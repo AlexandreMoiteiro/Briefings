@@ -2,6 +2,8 @@ import streamlit as st
 import fitz  # PyMuPDF
 from PIL import Image
 import io
+import openai
+
 
 # Helper to extract text from a PDF (mission objectives)
 def extract_text_from_pdf(pdf_file):
