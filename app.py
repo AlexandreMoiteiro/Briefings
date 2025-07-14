@@ -1,120 +1,77 @@
 import streamlit as st
-from pathlib import Path
+import fitz  # PyMuPDF
 from PIL import Image
 import io
 
-st.set_page_config(page_title="Pre-Flight Briefing Generator", layout="wide")
+# Helper to extract text from a PDF (mission objectives)
+def extract_text_from_pdf(pdf_file):
+    text = ""
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    for page in doc:
+        text += page.get_text()
+    return text
 
-# Custom CSS for style (similar to your mass-balance app)
-def inject_css():
-    st.markdown("""
-    <style>
-    html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', Arial, sans-serif; }
-    .stProgress > div > div > div > div { background-color: #4e8af4; }
-    .section-title { font-size: 1.22rem; font-weight: 700; margin-bottom: 12px; }
-    .footer {margin-top:32px;font-size:0.96rem;color:var(--text-color,#a0a8b6);text-align:center;}
-    </style>
-    """, unsafe_allow_html=True)
+# Helper for displaying image from upload (PDF page as image)
+def get_pdf_first_page_image(pdf_file):
+    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+    page = doc.load_page(0)
+    pix = page.get_pixmap()
+    img_bytes = pix.tobytes("png")
+    return Image.open(io.BytesIO(img_bytes))
 
-inject_css()
+# ---- Mission Objectives Step ----
+mission_file = st.file_uploader("Upload Mission Objectives (PDF, PNG, JPG, GIF, or text file)", 
+                                type=["pdf", "png", "jpg", "jpeg", "gif", "txt"])
+mission_text = ""
+if mission_file:
+    if mission_file.type == "application/pdf":
+        mission_text = extract_text_from_pdf(mission_file)
+        st.success("PDF extracted.")
+    elif mission_file.type in ["image/png", "image/jpeg", "image/gif"]:
+        img = Image.open(mission_file)
+        st.image(img, caption="Uploaded Mission Image")
+        mission_text = st.text_area("Describe the mission objective in your own words (or paste text from image)")
+    elif mission_file.type == "text/plain":
+        mission_text = mission_file.read().decode("utf-8")
+    else:
+        st.warning("Unsupported file type.")
 
-if "step" not in st.session_state:
-    st.session_state.step = 1
+if mission_text:
+    st.markdown("#### AI Summary of Mission Objectives")
+    if st.button("Summarize with AI"):
+        # -- GPT integration here --
+        import openai
+        summary = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Summarize the following mission objectives for a pre-flight briefing, focusing on essential points:"},
+                {"role": "user", "content": mission_text}
+            ]
+        )["choices"][0]["message"]["content"]
+        st.info(summary)
 
-st.markdown('<div class="section-title">Pre-Flight Briefing Generator</div>', unsafe_allow_html=True)
-st.progress((st.session_state.step-1)/4)
+# ---- Weather Chart Step ----
+weather_files = st.file_uploader(
+    "Upload Weather Charts (Surface Pressure, Significant Weather, etc.; PDF, PNG, JPG, GIF)", 
+    type=["pdf", "png", "jpg", "jpeg", "gif"], 
+    accept_multiple_files=True
+)
+user_obs = st.text_area("Describe what you see in the weather charts (fronts, systems, etc.)")
 
-# ---- STEP 1: Mission Overview ----
-if st.session_state.step == 1:
-    st.subheader("1. Mission Overview")
-    mission_pdf = st.file_uploader("Upload Mission Objectives PDF (optional)", type=["pdf"])
-    callsign = st.text_input("Callsign")
-    time_slot = st.text_input("Designated Time Slot (e.g., 14:00-16:00Z)")
-    if st.button("Next"):
-        if not callsign or not time_slot:
-            st.warning("Please fill in the required fields.")
-        else:
-            st.session_state.mission_pdf = mission_pdf
-            st.session_state.callsign = callsign
-            st.session_state.time_slot = time_slot
-            st.session_state.step += 1
-
-# ---- STEP 2: Weather Briefing ----
-elif st.session_state.step == 2:
-    st.subheader("2. Weather Briefing")
-    st.markdown("Upload your **surface pressure chart** and/or **significant weather chart** (PDF, PNG, JPG).")
-    weather_files = st.file_uploader("Upload Weather Charts", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
-    st.markdown("Select observed weather features (for the area of your flight):")
-    features = st.multiselect(
-        "What do you observe?",
-        ["Cold front", "Warm front", "Occluded front", "High pressure", "Low pressure", "Showers expected", "Fog/RVR issues", "Turbulence", "Thunderstorms", "None of the above"],
+if st.button("AI Weather Interpretation"):
+    prompt = (
+        "You are an aviation meteorologist. Given the following description and chart types, "
+        "provide a detailed, operational weather briefing for a pilot. "
+        f"Description: {user_obs}"
     )
-    user_obs = st.text_area("Any other relevant weather observations?", max_chars=500)
-    gpt_option = st.checkbox("Use AI to summarize/explain the weather charts (recommended)")
-    if st.button("Next"):
-        st.session_state.weather_files = weather_files
-        st.session_state.features = features
-        st.session_state.user_obs = user_obs
-        st.session_state.gpt_option = gpt_option
-        st.session_state.step += 1
-    if st.button("Back"):
-        st.session_state.step -= 1
+    # -- GPT integration here --
+    weather_summary = openai.ChatCompletion.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "Provide a weather interpretation for a pre-flight briefing."},
+            {"role": "user", "content": prompt}
+        ]
+    )["choices"][0]["message"]["content"]
+    st.info(weather_summary)
 
-# ---- STEP 3: NOTAMs ----
-elif st.session_state.step == 3:
-    st.subheader("3. NOTAM Information")
-    st.markdown("Paste or summarize the **relevant NOTAMs** for your route/area below:")
-    notam_text = st.text_area("NOTAM Summary", max_chars=1000)
-    if st.button("Next"):
-        st.session_state.notam_text = notam_text
-        st.session_state.step += 1
-    if st.button("Back"):
-        st.session_state.step -= 1
-
-# ---- STEP 4: Mission Details / Clarifications ----
-elif st.session_state.step == 4:
-    st.subheader("4. Mission-specific Details and Doubts")
-    mission_details = st.text_area(
-        "Clarify mission-specific details (e.g., Nav Log, doubts, instructions, alternate plans)",
-        max_chars=1000
-    )
-    if st.button("Next"):
-        st.session_state.mission_details = mission_details
-        st.session_state.step += 1
-    if st.button("Back"):
-        st.session_state.step -= 1
-
-# ---- STEP 5: Review & Generate PDF ----
-elif st.session_state.step == 5:
-    st.subheader("5. Review & Generate PDF")
-    st.write("**Callsign:**", st.session_state.callsign)
-    st.write("**Time Slot:**", st.session_state.time_slot)
-    st.write("**Mission Objectives PDF:**", "Uploaded" if st.session_state.mission_pdf else "None")
-    st.write("**Weather Files:**", [f.name for f in st.session_state.weather_files] if st.session_state.weather_files else "None")
-    st.write("**Selected Weather Features:**", ", ".join(st.session_state.features))
-    st.write("**Weather Observations:**", st.session_state.user_obs or "None")
-    st.write("**NOTAMs:**", st.session_state.notam_text or "None")
-    st.write("**Mission Details:**", st.session_state.mission_details or "None")
-
-    # Simulated AI summary (replace with real GPT call in production)
-    if st.session_state.gpt_option:
-        st.markdown("#### AI Weather Interpretation")
-        ai_obs = (
-            "Example: A cold front approaching the west coast will likely bring increasing CB clouds and showers. "
-            "Expect lowering pressure and gusty winds. Plan for alternate routes if convective weather worsens."
-        )
-        st.info(ai_obs)
-
-    st.markdown("You can now generate your PDF briefing package including your uploads and AI summaries (feature in progress).")
-
-    # PDF generation placeholder
-    if st.button("Finish / Restart"):
-        for key in [
-            "step", "mission_pdf", "callsign", "time_slot", "weather_files", "features",
-            "user_obs", "gpt_option", "notam_text", "mission_details"
-        ]:
-            if key in st.session_state: del st.session_state[key]
-        st.session_state.step = 1
-
-st.markdown('<div class="footer">Site developed for Sevenair Academy Pre-Flight Briefings. All rights reserved.</div>', unsafe_allow_html=True)
 
