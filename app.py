@@ -10,6 +10,8 @@ import datetime
 import unicodedata
 import re
 
+from metar.Metar import Metar
+
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 def ascii_safe(text):
@@ -27,40 +29,12 @@ def downscale_image(img, width=900):
     img_bytes.seek(0)
     return img, img_bytes
 
-def ai_pdf_summary(pdf_bytes):
-    # Extract text from the first page and ask for summary in first person
-    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    text = pdf_doc[0].get_text().strip()
-    sys_prompt = (
-        "You are a student pilot writing a briefing. "
-        "Summarize the following mission objectives in the first person, naturally and simply, as if you are briefing your instructor. Be concise, direct, and do not use headings, just a short paragraph."
-    )
-    user_prompt = f"MISSION OBJECTIVES:\n{text}"
-    response = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        max_tokens=300,
-        temperature=0.4
-    )
-    return response.choices[0].message.content
-
 def ai_chart_analysis(img_base64, chart_type, user_area_desc):
-    if chart_type == "SPC":
-        sys_prompt = (
-            "Write a preflight weather analysis for the cropped area of the Surface Pressure Chart (SPC). "
-            "Use the first person ('I', 'we'), short sentences, and no more than 5-6 sentences. "
-            "Describe what I should expect in the area regarding synoptic situation, pressure, fronts, expected winds, clouds, VFR/IFR impact. "
-            "Do not mention automation or use technical language."
-        )
-    else:
-        sys_prompt = (
-            "Write a first-person, short analysis of the Significant Weather Chart (SIGWX) for preflight briefing. "
-            "No more than 5-6 sentences, use 'I/we', and speak simply: main weather, turbulence, icing, visibility, hazards for the described area."
-        )
-    user_prompt = f"Focus on: {user_area_desc.strip()}" if user_area_desc.strip() else "Focus on Portugal."
+    sys_prompt = (
+        "Write a preflight weather analysis in the first person plural (e.g., 'We should expect'), in natural, student-like language, for the cropped area of the chart. "
+        "No bullet points. Summarize the weather in a couple of sentences, mentioning clouds, winds, hazards, etc. Do not mention automation or AI."
+    )
+    area = user_area_desc.strip() or "Portugal"
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -68,70 +42,17 @@ def ai_chart_analysis(img_base64, chart_type, user_area_desc):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": user_prompt},
+                    {"type": "text", "text": f"Please focus on: {area}"},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
                 ]
             }
         ],
         max_tokens=420,
-        temperature=0.5
-    )
-    return response.choices[0].message.content
-
-def ai_decode(code, code_type):
-    prompts = {
-        "NOTAM": (
-            "Rewrite this NOTAM briefly and in first person, with all abbreviations decoded and only the relevant operational info, as I would say in a preflight briefing. Max 2-3 sentences."
-        ),
-        "METAR": (
-            "Decode this METAR in first person and briefly, as a student would summarize to their instructor in a preflight briefing. No more than 3-4 sentences. Use simple, clear language and mention VFR/IFR if needed."
-        ),
-        "TAF": (
-            "Decode this TAF briefly, in first person, as a student would summarize to their instructor. Max 3-4 sentences. Focus on what I/we should expect and main changes in the period."
-        ),
-        "GAMET": (
-            "Summarize this GAMET in first person and briefly, as a student would in a preflight briefing. No more than 3-4 sentences. Focus on practical operational impacts."
-        ),
-    }
-    sys_prompt = prompts.get(code_type, "Rewrite this code in plain language, in first person, briefly.")
-    response = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": code}
-        ],
-        max_tokens=350,
         temperature=0.3
     )
     return response.choices[0].message.content
 
-def ai_conclusion(mission, metars, tafs, gamets, spc_text, sigwx_text):
-    # Use all the pieces for a conclusion in first person
-    summary = f"""
-Mission: {mission}
-Weather briefing METARs: {metars}
-TAFs: {tafs}
-GAMETs: {gamets}
-SIGWX: {sigwx_text}
-SPC: {spc_text}
-"""
-    sys_prompt = (
-        "You are a student pilot finishing a preflight briefing. "
-        "Write a short, first-person conclusion (dispatch criteria) considering all previous weather, focusing on whether conditions for departure and arrival are met, and mentioning any doubts or cautions. No more than 3-4 sentences."
-    )
-    response = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": summary}
-        ],
-        max_tokens=200,
-        temperature=0.4
-    )
-    return response.choices[0].message.content
-
 def render_markdown_like(text):
-    # Remove markdown formatting (basic)
     lines = text.split('\n')
     final = []
     for line in lines:
@@ -141,46 +62,71 @@ def render_markdown_like(text):
         final.append(line)
     return '\n'.join(final)
 
+def parse_metar(metar_str):
+    try:
+        m = Metar(metar_str)
+        txt = m.string()
+        txt = re.sub(r'(Temperature|Dewpoint|Visibility|Pressure|Wind)', r'We have \1', txt, flags=re.IGNORECASE)
+        txt = txt.replace('Clouds', 'We have clouds')
+        txt = txt.replace("The wind is", "We have wind")
+        txt = txt.replace("Temperature", "We have temperature")
+        # Shorten
+        txt = txt.split('=',1)[0]
+        # First person, short
+        txt = re.sub(r'(The|We have|Winds|Clouds)', r'We have', txt)
+        txt = txt.replace("CAVOK", "sky clear and visibility OK")
+        return txt.strip()
+    except Exception as e:
+        return f"Could not decode METAR: {e}"
+
+def parse_taf(taf_str):
+    # For now, just show plain text
+    return f"We have the following TAF forecast: {taf_str}"
+
+def decode_notam(notam_str):
+    # You may want to use a real decoder here.
+    return f"NOTAM: {notam_str}"
+
 class BriefingPDF(FPDF):
     def header(self):
-        # Understated, no big block
-        if self.page_no() == 1:
-            pass
-        else:
-            self.set_font('Arial', 'B', 13)
-            self.cell(0, 8, ascii_safe("Preflight Briefing"), align='C', ln=1)
-            self.ln(2)
+        pass
     def footer(self):
-        self.set_y(-10)
-        self.set_font('Arial', 'I', 7)
+        self.set_y(-13)
+        self.set_font('Arial', 'I', 8)
         self.set_text_color(120, 120, 120)
         self.cell(0, 7, ascii_safe(f"Page {self.page_no()}"), align='C')
     def section_header(self, title):
-        self.set_font("Arial", 'B', 13)
+        self.set_font("Arial", 'B', 14)
         self.set_text_color(0,0,0)
-        self.cell(0, 8, ascii_safe(title), ln=True)
-        self.set_draw_color(120, 120, 120)
-        self.set_line_width(0.6)
+        self.cell(0, 9, ascii_safe(title), ln=True)
+        self.set_draw_color(70, 130, 180)
+        self.set_line_width(0.8)
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
-        self.ln(3)
+        self.ln(4)
         self.set_line_width(0.2)
-    def cover_page(self, mission, callsign, date):
+    def cover_page(self, mission, pilot, aircraft, date, callsign):
         self.add_page()
-        self.set_font("Arial", 'B', 16)
-        self.set_text_color(30,30,30)
-        self.cell(0, 12, ascii_safe("Preflight Briefing Package"), ln=True, align='C')
-        self.ln(6)
-        self.set_font("Arial", '', 12)
-        self.cell(0, 9, ascii_safe(f"Mission: {mission}"), ln=True, align='C')
+        self.set_xy(0,30)
+        self.set_font("Arial", 'B', 21)
+        self.set_text_color(20,20,40)
+        self.cell(0, 14, ascii_safe("Preflight Briefing"), ln=True, align='C')
+        self.ln(8)
+        self.set_font("Arial", '', 13)
+        self.set_text_color(0,0,0)
+        self.cell(0, 8, ascii_safe(f"Mission: {mission}"), ln=True, align='C')
+        self.cell(0, 8, ascii_safe(f"Pilot: {pilot}"), ln=True, align='C')
+        self.cell(0, 8, ascii_safe(f"Aircraft: {aircraft}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
-        self.ln(12)
-    def add_section(self, title, body):
-        self.section_header(title)
+        self.ln(10)
+    def met_section(self, section_title, decoded_lines):
+        self.section_header(section_title)
         self.set_font("Arial", '', 12)
-        self.multi_cell(0, 8, ascii_safe(render_markdown_like(body)))
-        self.ln(2)
+        for line in decoded_lines:
+            self.multi_cell(0, 8, ascii_safe(line))
+            self.ln(1)
     def chart_section(self, title, img_bytes, ai_text, user_desc=""):
+        self.add_page()
         self.section_header(title)
         if user_desc.strip():
             self.set_font("Arial", 'I', 11)
@@ -188,49 +134,42 @@ class BriefingPDF(FPDF):
             self.cell(0, 7, ascii_safe(f"Area/focus: {user_desc.strip()}"), ln=True)
             self.set_text_color(0,0,0)
         self.ln(1)
-        # Center and size image nicely
         chart_img_path = "tmp_chart.png"
         with open(chart_img_path, "wb") as f:
             f.write(img_bytes.getvalue())
         self.set_font("Arial", '', 11)
-        self.image(chart_img_path, x=25, w=160)
-        self.ln(6)
+        self.image(chart_img_path, x=23, w=165)
+        self.ln(7)
         clean_text = render_markdown_like(ai_text)
         self.set_font("Arial", '', 12)
         self.multi_cell(0, 8, ascii_safe(clean_text))
-        self.ln(2)
-    def met_section(self, raw_code, decoded, section_title="METAR/TAF/NOTAM"):
-        self.section_header(section_title)
-        self.set_font("Arial", 'I', 11)
-        self.cell(0, 7, ascii_safe(raw_code), ln=True)
         self.ln(1)
+    def conclusion(self):
+        self.section_header("Conclusion")
         self.set_font("Arial", '', 12)
-        self.multi_cell(0, 8, ascii_safe(render_markdown_like(decoded)))
+        txt = (
+            "Dispatch criteria include assessing weather conditions for both departure and arrival, "
+            "ensuring that the meteorological minima and operational requirements are met, "
+            "and verifying the suitability of NOTAMs and other operational information."
+        )
+        self.multi_cell(0,8, ascii_safe(txt))
         self.ln(2)
 
-st.title("Preflight Briefing (Mission, Weather, NOTAMs)")
+st.title("Preflight Briefing PDF (METAR/TAF/SIGWX/SPC/NOTAMs)")
 
-with st.expander("1. Mission Objectives PDF", expanded=True):
-    mission_pdf_file = st.file_uploader("Upload the MISSION OBJECTIVES PDF (only the relevant page is used):", type=["pdf"], key="missionpdf")
-    mission_objective_summary = ""
-    if mission_pdf_file:
-        mission_pdf_bytes = mission_pdf_file.read()
-        mission_objective_summary = ai_pdf_summary(mission_pdf_bytes)
-        st.success("Mission objectives summary ready!")
-
-with st.expander("2. Flight Info", expanded=True):
+with st.expander("1. Mission Information", expanded=True):
+    mission = st.text_input("Mission (overview/route/objective)", "")
+    pilot = st.text_input("Pilot", "")
+    aircraft = st.text_input("Aircraft", "")
     callsign = st.text_input("Callsign", "")
     date = st.date_input("Date", datetime.date.today())
-    time_slot = st.text_input("Designated time slot", "")
 
-# --- METAR/TAF/GAMET
-with st.expander("3. Weather Briefing (METAR/TAF/GAMET)", expanded=True):
-    metars = st.text_area("Paste METARs here (one per line):", height=80, key="metar_area")
-    tafs = st.text_area("Paste TAFs here (one per line):", height=80, key="taf_area")
-    gamets = st.text_area("Paste GAMETs here (one per line):", height=80, key="gamet_area")
+with st.expander("2. Weather Inputs"):
+    metars = st.text_area("Paste METARs (one per line):", height=80, key="metar_area")
+    tafs = st.text_area("Paste TAFs (one per line):", height=80, key="taf_area")
+    gamet = st.text_area("Paste GAMET (optional, plain text):", height=80, key="gamet_area")
 
-# --- SIGWX Chart
-with st.expander("4. Significant Weather Chart (SIGWX)", expanded=True):
+with st.expander("3. Significant Weather Chart (SIGWX)", expanded=True):
     sigwx_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="sigwx")
     if "sigwx_img_bytes" not in st.session_state:
         st.session_state["sigwx_img_bytes"] = None
@@ -250,8 +189,7 @@ with st.expander("4. Significant Weather Chart (SIGWX)", expanded=True):
         sigwx_desc = st.text_input("SIGWX: Area/focus for analysis (default: Portugal)", value=st.session_state["sigwx_desc"], key="sigwxdesc")
         st.session_state["sigwx_desc"] = sigwx_desc
 
-# --- SPC Chart
-with st.expander("5. Surface Pressure Chart (SPC)", expanded=True):
+with st.expander("4. Surface Pressure Chart (SPC)", expanded=True):
     spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
     if "spc_full_bytes" not in st.session_state:
         st.session_state["spc_full_bytes"] = None
@@ -283,42 +221,33 @@ with st.expander("5. Surface Pressure Chart (SPC)", expanded=True):
         st.session_state["cropped_spc_bytes"] = cropped_spc_bytes
         st.session_state["spc_desc"] = spc_desc
 
-# --- NOTAMs ---
-with st.expander("6. NOTAMs (optional):"):
-    notams = st.text_area("Paste NOTAMs here (one per line):", height=80, key="notam_area")
+with st.expander("5. NOTAMs (optional)"):
+    notams = st.text_area("Paste NOTAMs (one per line):", height=80, key="notam_area")
 
-ready = mission_pdf_file and st.session_state.get("sigwx_img_bytes") and st.session_state.get("spc_full_bytes") and st.session_state.get("cropped_spc_bytes")
+ready = (
+    st.session_state.get("spc_full_bytes")
+    and st.session_state.get("cropped_spc_bytes")
+    and st.session_state.get("sigwx_img_bytes")
+)
+
 if ready:
     if st.button("Generate PDF Report"):
         with st.spinner("Preparing your preflight briefing..."):
             pdf = BriefingPDF()
-            pdf.set_auto_page_break(auto=True, margin=13)
-            # Cover page: only mission, callsign, date
-            pdf.cover_page(mission_objective_summary, callsign, str(date))
+            pdf.set_auto_page_break(auto=True, margin=12)
+            pdf.cover_page(mission, pilot, aircraft, str(date), callsign)
 
-            # 1. Mission objectives (already summarized)
-            pdf.add_section("Summary of Mission Objectives, Time Slot and Callsign", mission_objective_summary + (f"\n\nDesignated Time Slot: {time_slot}\nCallsign: {callsign}" if time_slot or callsign else ""))
+            # 1. Weather briefing (METAR/TAF/GAMET)
+            decoded_metars = [parse_metar(m) for m in (metars or "").split('\n') if m.strip()]
+            decoded_tafs   = [parse_taf(t) for t in (tafs or "").split('\n') if t.strip()]
+            gamet_text     = gamet.strip() if gamet else None
+            all_weather = decoded_metars + decoded_tafs
+            if gamet_text:
+                all_weather.append("GAMET: " + gamet_text)
+            if all_weather:
+                pdf.met_section("Weather Briefing (METAR/TAF/GAMET)", all_weather)
 
-            # 2. Weather Briefing: METAR/TAF/GAMET (decoded in first person, short)
-            metar_decoded = ""
-            for m in (metars or "").split('\n'):
-                m = m.strip()
-                if m:
-                    metar_decoded += ai_decode(m, "METAR") + "\n"
-            taf_decoded = ""
-            for t in (tafs or "").split('\n'):
-                t = t.strip()
-                if t:
-                    taf_decoded += ai_decode(t, "TAF") + "\n"
-            gamet_decoded = ""
-            for g in (gamets or "").split('\n'):
-                g = g.strip()
-                if g:
-                    gamet_decoded += ai_decode(g, "GAMET") + "\n"
-            weather_summary = metar_decoded + taf_decoded + gamet_decoded
-            pdf.add_section("Weather Briefing: METAR/TAFs/GAMET", weather_summary.strip())
-
-            # 3. SIGWX (analyze with AI)
+            # 2. SIGWX
             sigwx_base64 = base64.b64encode(st.session_state["sigwx_img_bytes"].getvalue()).decode("utf-8")
             sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", st.session_state["sigwx_desc"])
             pdf.chart_section(
@@ -328,7 +257,7 @@ if ready:
                 user_desc=st.session_state["sigwx_desc"]
             )
 
-            # 4. SPC (analyze with AI; use crop for analysis, full chart in PDF)
+            # 3. SPC
             spc_base64 = base64.b64encode(st.session_state["cropped_spc_bytes"].getvalue()).decode("utf-8")
             spc_ai_text = ai_chart_analysis(spc_base64, "SPC", st.session_state["spc_desc"])
             pdf.chart_section(
@@ -338,20 +267,13 @@ if ready:
                 user_desc=st.session_state["spc_desc"]
             )
 
-            # 5. Conclusion (AI)
-            conclusion_text = ai_conclusion(
-                mission_objective_summary,
-                metar_decoded, taf_decoded, gamet_decoded,
-                spc_ai_text, sigwx_ai_text
-            )
-            pdf.add_section("Conclusion / Dispatch Criteria", conclusion_text)
+            # 4. Conclusion
+            pdf.conclusion()
 
-            # 6. NOTAMs (decoded)
-            for n in (notams or "").split('\n'):
-                n = n.strip()
-                if n:
-                    decoded = ai_decode(n, "NOTAM")
-                    pdf.met_section(n, decoded, section_title="NOTAM")
+            # 5. NOTAMs
+            notam_lines = [decode_notam(n) for n in (notams or "").split('\n') if n.strip()]
+            if notam_lines:
+                pdf.met_section("NOTAM Information Pertinent to Operational Areas", notam_lines)
 
             out_pdf = "Preflight_Briefing.pdf"
             pdf.output(out_pdf)
@@ -364,8 +286,8 @@ if ready:
                 )
             st.success("PDF generated successfully!")
 else:
-    st.info("Upload all required files and inputs before generating your PDF.")
+    st.info("Fill all sections and upload/crop both charts before generating your PDF.")
 
-st.caption("Order: Mission Objectives summary, Weather Briefing, SIGWX, SPC, Conclusion/Dispatch, then NOTAMs.")
+st.caption("Charts are included in the PDF. METAR/TAF/NOTAMs are decoded using Python, not AI. Weather sections use first person. For upgrades, just ask!")
 
 
