@@ -298,7 +298,7 @@ class BriefingPDF(FPDF):
         self.cell(0, 8, ascii_safe(f"Pilot: {pilot}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Aircraft: {aircraft}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Mission #: {mission}"), ln=True, align='C')
+        self.cell(0, 8, ascii_safe(f"Mission: {mission}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Flight Time (UTC): {time_utc}"), ln=True, align='C')
         self.ln(30)
