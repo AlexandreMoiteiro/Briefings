@@ -5,3 +5,4 @@ Pillow
 PyMuPDF
 openai
 python-metar
+airportsdata
