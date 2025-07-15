@@ -44,6 +44,8 @@ if spc_file:
         img = Image.open(io.BytesIO(pix.tobytes("png")))
     else:
         img = Image.open(spc_file)
+        
+    img = img.convert("RGB")
 
     st.markdown("#### Crop the chart to cover **only Portugal and vicinity**:")
     cropped_img = st_cropper(
