@@ -13,7 +13,6 @@ from metar.Metar import Metar
 import requests
 import json
 
-# --- EMAIL SETTINGS ---
 ADMIN_EMAIL = "alexandre.moiteiro@gmail.com"
 WEBSITE_LINK = "https://mass-balance.streamlit.app/"
 SENDGRID_API_KEY = st.secrets["SENDGRID_API_KEY"]
@@ -56,14 +55,20 @@ def clean_markdown(text):
     text = re.sub(r"\n{2,}", "\n\n", text)
     return text.strip()
 
-def ai_chart_analysis(img_base64, chart_type, user_area_desc):
+def ai_chart_analysis(img_base64, chart_type, user_area_desc, extra_instruction=""):
     sys_prompt = (
-        "You are a student pilot preparing a preflight weather briefing. Analyze the attached aviation weather chart, focusing on the specified area but also considering the broader context and any significant patterns, movements, or developments shown elsewhere in the chart that could influence conditions in your area during the period of interest. "
-        "Describe how weather systems, trends, and nearby phenomena could evolve and impact the area of focus, including possible changes or risks during the flight window. "
-        "Avoid bullets, bold, lists, or headings. Write a detailed, readable, and practical paragraph as a student would brief out loud. "
-        "Mention the key weather features (fronts, clouds, winds, visibility, temperatures, pressure, hazards), and connect them to both the local area and the bigger weather picture."
+        "You are a student pilot preparing a preflight weather briefing. "
+        "Write a detailed, natural-English, operational analysis in the first person plural (for example, 'We can expect... Our area will...'). "
+        "Analyze the aviation weather chart for the focus area, but also mention relevant patterns, systems, and trends on the chart that might affect us or develop during our flight. "
+        "Connect what we see on the chart to what we should expect in our area during the period, and the possible evolution. "
+        "Never use bullet points or formatting. Avoid words like 'pilots should remain aware'. Write as if we are briefing our own flight. "
+        "Always be practical and clear, in a natural, student-style tone. If user gives additional instructions, follow them."
     )
     area = user_area_desc.strip() or "Portugal"
+    if extra_instruction:
+        user_text = f"Focus on: {area}. {extra_instruction}"
+    else:
+        user_text = f"Focus on: {area}."
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -71,20 +76,20 @@ def ai_chart_analysis(img_base64, chart_type, user_area_desc):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Focus on: {area}."},
+                    {"type": "text", "text": user_text},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
                 ]
             }
         ],
-        max_tokens=800,
-        temperature=0.35
+        max_tokens=850,
+        temperature=0.33
     )
     return clean_markdown(response.choices[0].message.content)
 
 def ai_sigmet_summary(sigmet_text):
     prompt = (
-        "You are a student pilot. Given these SIGMET/AIRMET/GAMET en-route weather warnings, write a short flowing English summary, no more than a paragraph, in practical preflight style. "
-        "Do NOT use bullet points or formatting. Mention the key weather hazards, their likely effect on the route, and main recommendations."
+        "Write a short summary in English of these SIGMET/AIRMET/GAMET en-route weather warnings, in the first person plural and student pilot style. "
+        "Do not use formatting. Do not say 'pilots should'. Instead, use 'We can expect... We may encounter...'."
     )
     response = openai.chat.completions.create(
         model="gpt-4o",
@@ -92,15 +97,15 @@ def ai_sigmet_summary(sigmet_text):
             {"role": "system", "content": prompt},
             {"role": "user", "content": sigmet_text}
         ],
-        max_tokens=160,
-        temperature=0.25
+        max_tokens=180,
+        temperature=0.19
     )
     return clean_markdown(response.choices[0].message.content.strip())
 
 def brief_metar_taf_comment(metar_code, taf_code):
     prompt = (
-        "Given this METAR and TAF, write a very brief and practical summary for pilots (one or two sentences max). "
-        "Mention main weather concerns or favorable aspects, but keep it short and simple. No formatting or Markdown, just clear English."
+        "Given this METAR and TAF, write a very brief summary as a student for our own flight (one or two sentences). "
+        "Speak in first person plural, avoid generic advice. Just say what we expect or any main issue."
     )
     content = f"METAR:\n{metar_code}\nTAF:\n{taf_code}"
     response = openai.chat.completions.create(
@@ -109,8 +114,8 @@ def brief_metar_taf_comment(metar_code, taf_code):
             {"role": "system", "content": prompt},
             {"role": "user", "content": content}
         ],
-        max_tokens=90,
-        temperature=0.2
+        max_tokens=80,
+        temperature=0.18
     )
     return clean_markdown(response.choices[0].message.content.strip())
 
@@ -119,7 +124,7 @@ def brief_notam_comment(notams, icao):
     if not text.strip():
         return ""
     prompt = (
-        f"You are a student pilot. Given these NOTAMs for {icao}, write a very brief summary (one or two sentences, no formatting) of the main operational points and anything of special attention. Only mention what is truly relevant."
+        f"Given these NOTAMs for {icao}, write a very short summary in the first person plural (e.g., 'We should take note that...'), as a student pilot would for a preflight briefing."
     )
     response = openai.chat.completions.create(
         model="gpt-4o",
@@ -127,8 +132,8 @@ def brief_notam_comment(notams, icao):
             {"role": "system", "content": prompt},
             {"role": "user", "content": text}
         ],
-        max_tokens=90,
-        temperature=0.18
+        max_tokens=80,
+        temperature=0.14
     )
     return clean_markdown(response.choices[0].message.content.strip())
 
@@ -232,155 +237,10 @@ def decode_taf(taf_code):
     lines.extend([wind_str, wind_speed, vis_str, clouds_str, wx_str])
     return "\n".join([l for l in lines if l.strip()])
 
-# --- PDF Class ---
-class BriefingPDF(FPDF):
-    def header(self): pass
-    def footer(self):
-        self.set_y(-13)
-        self.set_font('Arial', 'I', 8)
-        self.set_text_color(120, 120, 120)
-        self.cell(0, 7, ascii_safe(f"Page {self.page_no()}"), align='C')
-    def section_header(self, title):
-        self.set_font("Arial", 'B', 15)
-        self.set_text_color(28, 44, 80)
-        self.cell(0, 10, ascii_safe(title), ln=True)
-        self.set_draw_color(70, 130, 180)
-        self.set_line_width(1.0)
-        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
-        self.ln(5)
-        self.set_line_width(0.2)
-    def add_section_page(self, title):
-        self.add_page()
-        self.section_header(title)
-    def cover_page(self, pilot, aircraft, date, time_utc, callsign, mission):
-        self.add_page()
-        self.set_xy(0,38)
-        self.set_font("Arial", 'B', 23)
-        self.set_text_color(28, 44, 80)
-        self.cell(0, 15, ascii_safe("Preflight Weather Briefing & NOTAMs"), ln=True, align='C')
-        self.ln(10)
-        self.set_font("Arial", '', 14)
-        self.set_text_color(44,44,44)
-        self.cell(0, 8, ascii_safe(f"Pilot: {pilot}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Aircraft: {aircraft}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Mission #: {mission}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Flight Time (UTC): {time_utc}"), ln=True, align='C')
-        self.ln(30)
-    def metar_taf_section(self, pairs):
-        for i, entry in enumerate(pairs, 1):
-            icao = entry['icao'].upper()
-            info, aerodrome = get_aerodrome_info(icao)
-            metar_code = entry['metar']
-            taf_code = entry['taf']
-            self.add_section_page(f"{icao} ({aerodrome})")
-            self.set_font("Arial", 'B', 13)
-            self.set_text_color(40,40,40)
-            self.cell(0, 8, "METAR (Raw):", ln=True)
-            self.set_font("Arial", '', 12)
-            self.set_text_color(0,0,0)
-            self.multi_cell(0, 8, ascii_safe(metar_code))
-            self.ln(2)
-            self.set_font("Arial", 'B', 13)
-            self.set_text_color(40,40,40)
-            self.cell(0, 8, "Decoded METAR:", ln=True)
-            self.set_font("Arial", '', 12)
-            self.set_text_color(0,0,0)
-            self.multi_cell(0, 8, ascii_safe(decode_metar(metar_code)))
-            self.ln(5)
-            self.set_font("Arial", 'B', 13)
-            self.set_text_color(40,40,40)
-            self.cell(0, 8, "TAF (Raw):", ln=True)
-            self.set_font("Arial", '', 12)
-            self.set_text_color(0,0,0)
-            self.multi_cell(0, 8, ascii_safe(taf_code))
-            self.ln(2)
-            self.set_font("Arial", 'B', 13)
-            self.set_text_color(40,40,40)
-            self.cell(0, 8, "Decoded TAF:", ln=True)
-            self.set_font("Arial", '', 12)
-            self.set_text_color(0,0,0)
-            self.multi_cell(0, 8, ascii_safe(decode_taf(taf_code)))
-            self.ln(6)
-            if metar_code.strip() or taf_code.strip():
-                self.set_font("Arial", 'I', 11)
-                self.set_text_color(80, 56, 0)
-                try:
-                    comment = brief_metar_taf_comment(metar_code, taf_code)
-                    self.multi_cell(0, 8, f"Summary: {ascii_safe(comment)}")
-                except Exception as e:
-                    self.multi_cell(0, 8, f"(Short comment failed: {e})")
-            self.ln(6)
-    def enroute_section(self, text, ai_summary):
-        if text.strip():
-            self.add_section_page("En-route Weather Warnings (SIGMET/AIRMET/GAMET)")
-            self.set_font("Arial", 'B', 13)
-            self.cell(0, 8, "Raw Text:", ln=True)
-            self.set_font("Arial", '', 12)
-            self.multi_cell(0, 8, ascii_safe(text))
-            self.ln(2)
-            if ai_summary:
-                self.set_font("Arial", 'B', 13)
-                self.cell(0, 8, "Summary:", ln=True)
-                self.set_font("Arial", '', 12)
-                self.multi_cell(0, 8, ascii_safe(ai_summary))
-                self.ln(4)
-    def sigwx_sections(self, sigwx_list):
-        for chart in sigwx_list:
-            title = f"Significant Weather Chart (SIGWX) - {chart['source']}"
-            self.chart_section(
-                title=title,
-                img_bytes=chart['img_bytes'],
-                ai_text=chart['ai_text'],
-                user_desc=chart['desc']
-            )
-    def chart_section(self, title, img_bytes, ai_text, user_desc=""):
-        self.add_section_page(title)
-        if user_desc.strip():
-            self.set_font("Arial", 'I', 11)
-            self.set_text_color(70,70,70)
-            self.cell(0, 7, ascii_safe(f"Area/focus: {user_desc.strip()}"), ln=True)
-            self.set_text_color(0,0,0)
-        self.ln(2)
-        chart_img_path = f"tmp_chart_{ascii_safe(title).replace(' ','_')}.png"
-        with open(chart_img_path, "wb") as f:
-            f.write(img_bytes.getvalue())
-        self.set_font("Arial", '', 11)
-        self.image(chart_img_path, x=22, w=168)
-        self.ln(7)
-        self.set_font("Arial", '', 12)
-        self.multi_cell(0, 8, ascii_safe(ai_text))
-        self.ln(2)
-    def notam_section(self, notam_data):
-        if not notam_data:
-            return
-        self.add_section_page("NOTAM Information")
-        for entry in notam_data:
-            if entry["aero"].strip():
-                info, name = get_aerodrome_info(entry["aero"])
-                self.set_font("Arial", 'B', 18)
-                self.set_text_color(28, 44, 80)
-                self.cell(0, 12, ascii_safe(f"{entry['aero'].upper()} ({name})"), ln=True)
-                self.ln(3)
-            self.set_text_color(0,0,0)
-            self.set_font("Arial", '', 12)
-            for nidx, notam in enumerate(entry["notams"], 1):
-                if notam["num"].strip() or notam["text"].strip():
-                    self.set_font("Arial",'B',12)
-                    self.cell(0, 8, f"NOTAM: {notam['num']}", ln=True)
-                    self.set_font("Arial",'',12)
-                    self.multi_cell(0, 8, ascii_safe(notam["text"]))
-                    self.ln(3)
-            ai_summary = brief_notam_comment(entry["notams"], entry["aero"])
-            if ai_summary:
-                self.set_font("Arial", 'I', 11)
-                self.set_text_color(80, 56, 0)
-                self.multi_cell(0, 8, f"Summary: {ascii_safe(ai_summary)}")
-                self.ln(6)
-            else:
-                self.ln(6)
+# --- PDF Class (as above, omitted for brevity, but use your last version) ---
+# ... (paste the BriefingPDF class from your last code block here) ...
 
+# --- EMAIL SEND ---
 def send_report_email(to_email, subject, body, filename, filedata):
     html_body = f"""
     <html>
@@ -421,12 +281,12 @@ def send_report_email(to_email, subject, body, filename, filedata):
     if resp.status_code >= 400:
         st.warning(f"PDF generated but failed to send email (SendGrid error: {resp.text})")
 
-# --- INPUT BLOCKS ---
+# --- UI Blocks ---
 st.title("Preflight Weather Briefing and NOTAMs")
 
 with st.expander("1. Pilot/Aircraft Info", expanded=True):
     pilot = st.text_input("Pilot", "")
-    aircraft = st.text_input("Aircraft", "")
+    aircraft = st.text_input("Aircraft (e.g., Tecnam P2008 (CS-ECD))", "")
     callsign = st.text_input("Callsign", "")
     mission = st.text_input("Mission #", "")
     date = st.date_input("Date", datetime.date.today())
@@ -447,75 +307,53 @@ def metar_taf_block():
     if remove_pair:
         st.session_state.metar_taf_pairs.pop()
 
-def multi_sigwx_block():
-    if "sigwx_charts" not in st.session_state:
-        st.session_state.sigwx_charts = []
-    st.subheader("3. Significant Weather Charts (SIGWX)")
-    num_sigwx = len(st.session_state.sigwx_charts)
-    for i in range(num_sigwx):
-        chart = st.session_state.sigwx_charts[i]
-        with st.expander(f"SIGWX {i+1}", expanded=True):
-            chart["source"] = st.text_input("SIGWX Source (ex: IPMA, UKMO, Meteo France, ECMWF)", value=chart.get("source",""), key=f"sigwx_source_{i}")
-            chart["desc"] = st.text_input("Area/focus for analysis (default: Portugal)", value=chart.get("desc","Portugal"), key=f"sigwx_desc_{i}")
-            chart_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"sigwx_file_{i}")
+def chart_upload_and_analysis_block(key_prefix, label, desc_default="Portugal"):
+    if key_prefix not in st.session_state:
+        st.session_state[key_prefix] = []
+    chart_list = st.session_state[key_prefix]
+    st.subheader(label)
+    for i in range(len(chart_list)):
+        chart = chart_list[i]
+        with st.expander(f"{label} {i+1}", expanded=True):
+            chart["desc"] = st.text_input("Area/focus for analysis", value=chart.get("desc", desc_default), key=f"{key_prefix}_desc_{i}")
+            chart["extra"] = st.text_area("Extra instructions to AI (optional)", value=chart.get("extra",""), key=f"{key_prefix}_extra_{i}")
+            chart_file = st.file_uploader(f"Upload chart ({label})", type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{key_prefix}_file_{i}")
             if chart_file:
                 if chart_file.type == "application/pdf":
                     pdf_bytes = chart_file.read()
                     pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
                     page = pdf_doc.load_page(0)
                     pix = page.get_pixmap()
-                    sigwx_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
+                    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
                 else:
-                    sigwx_img = Image.open(chart_file).convert("RGB").copy()
-                _, sigwx_img_bytes = downscale_image(sigwx_img)
-                chart["img_bytes"] = sigwx_img_bytes
-                st.image(sigwx_img, caption="SIGWX: Full Chart (included in PDF)")
+                    img = Image.open(chart_file).convert("RGB").copy()
+                _, img_bytes = downscale_image(img)
+                chart["img_bytes"] = img_bytes
+                st.image(img, caption=f"{label} (included in PDF)")
+                # Generate or preview analysis
+                if "ai_text" not in chart or st.button(f"Regenerate AI analysis for {label} {i+1}", key=f"{key_prefix}_regen_{i}"):
+                    if img_bytes:
+                        img_b64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
+                        ai_text = ai_chart_analysis(img_b64, label, chart["desc"], chart.get("extra",""))
+                        chart["ai_text"] = ai_text
+                chart["ai_text"] = st.text_area("Edit/Approve AI Analysis", value=chart.get("ai_text",""), key=f"{key_prefix}_aitxt_{i}", height=150)
             else:
                 chart["img_bytes"] = None
+                chart["ai_text"] = ""
     addcol, rmcol = st.columns([0.24,0.24])
-    if addcol.button("Add SIGWX chart"):
-        st.session_state.sigwx_charts.append({"source": "", "desc": "Portugal", "img_bytes": None})
-    if num_sigwx > 1 and rmcol.button("Remove last SIGWX chart"):
-        st.session_state.sigwx_charts.pop()
+    if addcol.button(f"Add {label}"):
+        chart_list.append({"desc": desc_default, "extra": "", "img_bytes": None, "ai_text": ""})
+    if len(chart_list) > 1 and rmcol.button(f"Remove last {label}"):
+        chart_list.pop()
 
 def windtemp_block():
-    with st.expander("4. Wind and Temperature Chart", expanded=True):
-        windtemp_file = st.file_uploader("Upload Wind/Temp Chart (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="windtemp")
-        windtemp_desc = st.text_input("Area/focus for analysis (default: Portugal)", value="Portugal", key="windtempdesc")
-        if windtemp_file:
-            if windtemp_file.type == "application/pdf":
-                pdf_bytes = windtemp_file.read()
-                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                page = pdf_doc.load_page(0)
-                pix = page.get_pixmap()
-                windtemp_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
-            else:
-                windtemp_img = Image.open(windtemp_file).convert("RGB").copy()
-            _, windtemp_img_bytes = downscale_image(windtemp_img)
-            st.session_state["windtemp_img_bytes"] = windtemp_img_bytes
-            st.image(windtemp_img, caption="Wind & Temp Chart (included in PDF)")
-        else:
-            st.session_state["windtemp_img_bytes"] = None
+    chart_upload_and_analysis_block("windtemp_charts", "Wind and Temperature Chart", desc_default="Portugal")
 
 def spc_block():
-    with st.expander("5. Surface Pressure Chart (SPC)", expanded=True):
-        spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
-        spc_desc = st.text_input("Area/focus for analysis (default: Portugal)", value="Portugal", key="spcdesc")
-        if spc_file:
-            if spc_file.type == "application/pdf":
-                pdf_bytes = spc_file.read()
-                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                page = pdf_doc.load_page(0)
-                pix = page.get_pixmap()
-                spc_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
-            else:
-                spc_img = Image.open(spc_file).convert("RGB").copy()
-            _, spc_full_bytes = downscale_image(spc_img)
-            st.session_state["spc_full_bytes"] = spc_full_bytes
-            st.image(spc_img, caption="SPC: Full Chart (included in PDF)")
-        else:
-            st.session_state["spc_full_bytes"] = None
-        st.session_state["spc_desc"] = spc_desc
+    chart_upload_and_analysis_block("spc_charts", "Surface Pressure Chart (SPC)", desc_default="Portugal")
+
+def sigwx_block():
+    chart_upload_and_analysis_block("sigwx_charts", "Significant Weather Chart (SIGWX)", desc_default="Portugal")
 
 def sigmet_block():
     st.subheader("6. En-route Weather Warnings (SIGMET/AIRMET/GAMET)")
@@ -544,22 +382,22 @@ def notam_block():
     if len(st.session_state.notam_data)>1 and btncols[1].button("Remove Last Aerodrome NOTAM"):
         st.session_state.notam_data.pop()
 
-# --- UI Flow ---
+# ---- UI ----
 metar_taf_block()
-multi_sigwx_block()
+sigwx_block()
 windtemp_block()
 spc_block()
 sigmet_gamet_text = sigmet_block()
 notam_block()
 
-# --- READY STATE AND GENERATE PDF ---
-charts_ready = (
-    st.session_state.get("spc_full_bytes")
-    and st.session_state.get("windtemp_img_bytes")
-    and len([c for c in st.session_state.get("sigwx_charts", []) if c.get("img_bytes")]) > 0
+# ---- READY & PDF ----
+ready = (
+    len([c for c in st.session_state.get("sigwx_charts", []) if c.get("img_bytes")]) > 0
+    and len([c for c in st.session_state.get("windtemp_charts", []) if c.get("img_bytes")]) > 0
+    and len([c for c in st.session_state.get("spc_charts", []) if c.get("img_bytes")]) > 0
 )
 
-if charts_ready:
+if ready:
     if st.button("Generate PDF Report"):
         with st.spinner("Preparing your preflight briefing..."):
             pdf = BriefingPDF()
@@ -573,30 +411,30 @@ if charts_ready:
                 pdf.metar_taf_section(metar_taf_pairs)
             sigmet_ai_summary = ai_sigmet_summary(sigmet_gamet_text) if sigmet_gamet_text.strip() else ""
             pdf.enroute_section(sigmet_gamet_text, sigmet_ai_summary)
-            sigwx_list = []
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
-                    sigwx_base64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", chart.get("desc","Portugal"))
-                    sigwx_list.append({
-                        "source": chart.get("source",""),
-                        "desc": chart.get("desc","Portugal"),
-                        "img_bytes": chart["img_bytes"],
-                        "ai_text": ai_text
-                    })
-            pdf.sigwx_sections(sigwx_list)
-            windtemp_bytes = st.session_state.get("windtemp_img_bytes")
-            windtemp_desc = st.session_state.get("windtempdesc", "Portugal")
-            if windtemp_bytes:
-                windtemp_base64 = base64.b64encode(windtemp_bytes.getvalue()).decode("utf-8")
-                windtemp_ai = ai_chart_analysis(windtemp_base64, "Wind and Temperature Chart", windtemp_desc)
-                pdf.chart_section("Wind & Temperature Chart", windtemp_bytes, windtemp_ai, user_desc=windtemp_desc)
-            spc_bytes = st.session_state.get("spc_full_bytes")
-            spc_desc = st.session_state.get("spc_desc", "Portugal")
-            if spc_bytes:
-                spc_base64 = base64.b64encode(spc_bytes.getvalue()).decode("utf-8")
-                spc_ai_text = ai_chart_analysis(spc_base64, "SPC", spc_desc)
-                pdf.chart_section("Surface Pressure Chart (SPC)", spc_bytes, spc_ai_text, user_desc=spc_desc)
+                    pdf.chart_section(
+                        title=f"Significant Weather Chart (SIGWX)",
+                        img_bytes=chart["img_bytes"],
+                        ai_text=chart.get("ai_text",""),
+                        user_desc=chart.get("desc","")
+                    )
+            for chart in st.session_state.get("windtemp_charts", []):
+                if chart.get("img_bytes"):
+                    pdf.chart_section(
+                        title="Wind and Temperature Chart",
+                        img_bytes=chart["img_bytes"],
+                        ai_text=chart.get("ai_text",""),
+                        user_desc=chart.get("desc","")
+                    )
+            for chart in st.session_state.get("spc_charts", []):
+                if chart.get("img_bytes"):
+                    pdf.chart_section(
+                        title="Surface Pressure Chart (SPC)",
+                        img_bytes=chart["img_bytes"],
+                        ai_text=chart.get("ai_text",""),
+                        user_desc=chart.get("desc","")
+                    )
             pdf.notam_section(st.session_state.notam_data)
             out_pdf = f"weather_and_notam_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
@@ -629,7 +467,7 @@ if charts_ready:
             except Exception as e:
                 st.warning(f"PDF generated, but failed to email admin: {e}")
 else:
-    st.info("Fill all sections and upload all required charts before generating your PDF.")
+    st.info("Fill all sections and upload at least one chart of each type before generating your PDF.")
 
 
 
