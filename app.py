@@ -11,19 +11,19 @@ import datetime
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 SPC_PROMPT = """
-You are an aviation meteorology instructor. Based only on the attached surface pressure chart, write a concise, structured, and realistic weather briefing focused ONLY on the area of Portugal or the Iberian Peninsula (or as specified by the user).
-- Organize your briefing as bullet points (•) or numbered items, covering:
+You are an aviation meteorology instructor. Based only on the attached surface pressure chart, write a concise, structured, and realistic weather briefing focused ONLY on the area cropped by the user (e.g., Portugal or the Iberian Peninsula).
+- Organize your briefing as bullet points or numbered items, covering:
     • The synoptic situation (pressure systems, fronts)
     • Any approaching or passing fronts
     • Expected wind direction/speed at low level
     • Notable clouds, weather, and any VFR/IFR risks
     • Any relevant trends
-Do NOT use Markdown, bold, or asterisks. Write just in clear English, as for a professional pilot briefing. If there are no notable risks, say so. Do NOT invent information—describe only what you see in the chart.
+Do NOT use Markdown, bold, or asterisks. Write just in clear English, as for a professional pilot briefing. If there are no notable risks, say so. Do NOT invent information—describe only what you see in the cropped chart.
 """
 
 SIGWX_PROMPT = """
 You are an aviation meteorology instructor. Based only on the attached significant weather chart, write a concise, structured, and realistic weather briefing focused ONLY on the area of Portugal or the Iberian Peninsula (or as specified by the user).
-- Organize your briefing as bullet points (•) or numbered items, covering:
+- Organize your briefing as bullet points or numbered items, covering:
     • Clouds, CBs, thunderstorms
     • Turbulence (areas and severity)
     • Icing and freezing levels
@@ -59,11 +59,9 @@ def ai_briefing(image_base64, prompt, user_focus=""):
     )
     return response.choices[0].message.content
 
-# PDF class styled like Mass & Balance report
 class MBStylePDF(FPDF):
     def header(self):
         if self.page_no() == 1:
-            # Cover: shaded band
             self.set_fill_color(34,34,34)
             self.rect(0, 0, 210, 20, 'F')
             self.set_font("Arial", 'B', 16)
@@ -98,15 +96,13 @@ class MBStylePDF(FPDF):
             f.write(img_bytes.getvalue())
         self.image(img_path, x=17, w=175)
         self.ln(5)
-        # Format AI text as bullets
         self.set_font("Arial", '', 11)
         lines = ai_text.split("\n")
         for line in lines:
             l = line.strip()
-            # Bullet (starts with - or • or number)
             if l.startswith("- ") or l.startswith("• "):
                 self.set_x(23)
-                self.cell(6, 7, u"\u2022", align="R")  # real bullet
+                self.cell(6, 7, "-", align="R")  # Use "-" for bullet (FPDF-safe)
                 self.multi_cell(0, 7, l[2:])
             elif l[:2].isdigit() and l[2:4] in [". ", ") "]:
                 self.set_x(23)
@@ -120,6 +116,7 @@ class MBStylePDF(FPDF):
         self.ln(1)
 
 st.title("Preflight Briefing PDF (Mass & Balance Style)")
+
 col1, col2 = st.columns(2)
 with col1:
     mission = st.text_input("Mission number", "")
@@ -130,8 +127,10 @@ with col2:
     callsign = st.text_input("Callsign", "")
 
 st.markdown("### Surface Pressure Chart (SPC)")
+st.info("**Crop/select ONLY the area you want analyzed (e.g., Portugal/Iberian Peninsula) below.**\n\nOnly the cropped region will be sent to AI. The full chart will appear in the PDF for reference.")
+
 spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
-spc_img, spc_img_bytes = None, None
+spc_img, spc_img_bytes, crop_img, crop_img_bytes = None, None, None, None
 if spc_file:
     if spc_file.type == "application/pdf":
         pdf_bytes = spc_file.read()
@@ -143,6 +142,16 @@ if spc_file:
         spc_img = Image.open(spc_file).convert("RGB").copy()
     spc_img, spc_img_bytes = downscale_image(spc_img, width=1300)
     st.image(spc_img, caption="SPC Chart (full)")
+    st.markdown("Crop/select the focus area for the AI analysis (e.g., Portugal/Iberian Peninsula):")
+    crop_img = st_cropper(
+        spc_img,
+        aspect_ratio=None,
+        box_color='red',
+        return_type='image',
+        realtime_update=True,
+        key="spc_crop"
+    )
+    crop_img, crop_img_bytes = downscale_image(crop_img, width=600)
 spc_focus = st.text_input("SPC briefing focus (optional, e.g. 'over Portugal')", "")
 
 st.markdown("---")
@@ -164,13 +173,13 @@ sigwx_focus = st.text_input("SIGWX briefing focus (optional, e.g. 'over Portugal
 
 can_generate = all([
     mission, pilot, aircraft, callsign, date,
-    spc_img_bytes, sigwx_img_bytes
+    spc_img_bytes, crop_img_bytes, sigwx_img_bytes
 ])
 
 if st.button("Generate PDF Briefing", disabled=not can_generate):
     with st.spinner("Calling AI and generating PDF..."):
-        spc_base64 = base64.b64encode(spc_img_bytes.getvalue()).decode("utf-8")
-        spc_report = ai_briefing(spc_base64, SPC_PROMPT, spc_focus)
+        spc_crop_base64 = base64.b64encode(crop_img_bytes.getvalue()).decode("utf-8")
+        spc_report = ai_briefing(spc_crop_base64, SPC_PROMPT, spc_focus)
         sigwx_base64 = base64.b64encode(sigwx_img_bytes.getvalue()).decode("utf-8")
         sigwx_report = ai_briefing(sigwx_base64, SIGWX_PROMPT, sigwx_focus)
 
@@ -189,7 +198,7 @@ if st.button("Generate PDF Briefing", disabled=not can_generate):
             )
         st.success("PDF generated successfully!")
 
-st.caption("PDF styled for clarity, with real bullet points. Charts are shown in full, briefing is clean and structured.")
+st.caption("Crop only the SPC for the analysis (PDF will always include the full charts). Bullet points are formatted for professional briefings.")
 
 
 
