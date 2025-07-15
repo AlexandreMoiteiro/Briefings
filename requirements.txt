@@ -3,3 +3,4 @@ streamlit-cropper
 pillow
 openai
 pymupdf
+fpdf
