@@ -4,6 +4,7 @@ from PIL import Image
 import io
 import openai
 
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # Helper to extract text from a PDF (mission objectives)
 def extract_text_from_pdf(pdf_file):
