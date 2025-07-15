@@ -14,16 +14,16 @@ from metar.Metar import Metar
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# Load airport database once
 AIRPORTS = airportsdata.load('ICAO')
 
 def get_aerodrome_info(icao):
     info = AIRPORTS.get(icao)
     if not info:
-        return ""
+        return "", icao
     lat = f"{abs(info['lat']):.4f}{'N' if info['lat'] >= 0 else 'S'}"
     lon = f"{abs(info['lon']):.4f}{'E' if info['lon'] >= 0 else 'W'}"
-    return f"{info['name']}, {info['city']}, {info['country']} {lat} {lon}"
+    name = info['name'].title()
+    return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
 def ascii_safe(text):
     if not isinstance(text, str):
@@ -77,7 +77,7 @@ def decode_metar(metar_code):
     try:
         m = Metar(metar_code)
         station = m.station_id or "Unknown"
-        info = get_aerodrome_info(station)
+        info, name = get_aerodrome_info(station)
         result = []
         if info:
             result.append(f"Report for station {station}: {info}")
@@ -134,61 +134,74 @@ def decode_metar(metar_code):
         return f"Could not decode METAR: {e}"
 
 def decode_taf(taf_code):
-    lines = taf_code.strip().split("\n")
-    taf_line = next((line for line in lines if line.upper().startswith("TAF")), None)
-    station_match = re.search(r'([A-Z]{4})', taf_line or "")
-    station = station_match.group(1) if station_match else "UNKNOWN"
-    info = get_aerodrome_info(station)
-    result = []
-    result.append(f"Decoded TAF for {station} ({info})")
-    # Observation and forecast times
-    obs_time = re.search(r'(\d{2})(\d{2})(\d{2})Z', taf_line or "")
+    airports = AIRPORTS
+    # ICAO code
+    match = re.search(r'\b([A-Z]{4})\b', taf_code)
+    icao = match.group(1) if match else "UNKNOWN"
+    info = airports.get(icao, None)
+    name = info['name'].upper() if info else icao
+    city = info['city'] if info else ""
+    country = info['country'] if info else ""
+    lat = info['lat'] if info else 0
+    lon = info['lon'] if info else 0
+    lat_str = f"{abs(lat):.4f}{'N' if lat >= 0 else 'S'}"
+    lon_str = f"{abs(lon):.4f}{'E' if lon >= 0 else 'W'}"
+
+    lines = []
+    lines.append(f"Decoded TAF for {icao} ({name})")
+    lines.append(f"Forecast for station {icao}: {name.title()}, {country} {lat_str} {lon_str}")
+
+    # Observation/forecast times
+    obs_time = re.search(r'(\d{2})(\d{2})(\d{2})Z', taf_code)
     if obs_time:
-        result.append(f"Observation time: [Day {obs_time.group(1)} {obs_time.group(2)}:00]")
-    time_match = re.findall(r'(\d{2})(\d{2})/(\d{2})(\d{2})', taf_code)
-    if time_match:
-        result.append(f"Forecast start time: [Day {time_match[0][0]} {time_match[0][1]}:00] Until time: [Day {time_match[0][2]} {time_match[0][3]}:00]")
-    # Parse the main TAF block and all BECMG/TEMPO groups
-    def decode_block(text):
-        wind = re.search(r'(\d{3}|VRB)(\d{2,3})G?(\d{2,3})?KT', text)
-        vis = re.search(r' (\d{4}) ', text)
-        clouds = []
-        if "CAVOK" in text:
-            clouds.append("No cloud below 1500m and no Cumulonimbus")
-        else:
-            for c in re.findall(r'(FEW|SCT|BKN|OVC)(\d{3})', text):
-                typ, lvl = c
-                h = int(lvl)*30.48  # feet to meters
-                clouds.append(f"{typ} at {int(h)}m")
-            if not clouds:
-                clouds.append("No significant clouds reported")
-        lines = []
-        if wind:
-            wdir = wind.group(1)
-            wspd = wind.group(2)
-            lines.append(f"Wind direction: {wdir if wdir != 'VRB' else 'variable'}")
-            lines.append(f"Wind speed: {int(wspd)*0.514:.1f} m/s ({wspd}kt)")
-        if vis:
-            v = int(vis.group(1))
-            lines.append(f"Visibility: {v/1000:.0f}km or more (CAVOK)" if v >= 9999 else f"Visibility: {v/1000:.0f}km")
-        lines.append("; ".join(clouds))
-        if not re.search(r'(RA|SN|TS|FG|BR)', text):
-            lines.append("No precipitation, thunderstorm, shallow fog or low drifting snow")
-        return "\n".join(lines)
-    # Main block
-    result.append(decode_block(taf_line or ""))
-    # Change groups
-    change_re = re.compile(r'(BECMG|TEMPO|PROB\d{2})\s?(\d{4})/(\d{4})([\s\S]*?)(?=BECMG|TEMPO|PROB\d{2}|$)')
-    for match in change_re.finditer(taf_code):
-        chg, from_, to_, body = match.groups()
-        result.append("---------------------------------------------------------------\n")
-        label = {
-            "BECMG": "Becoming time",
-            "TEMPO": "Temporary time"
-        }.get(chg[:5], f"{chg} time")
-        result.append(f"{label}: [Day {from_[:2]} {from_[2:]}:00] Until time: [Day {to_[:2]} {to_[2:]}:00]")
-        result.append(decode_block(body))
-    return "\n".join(result)
+        lines.append(f"Observation time: [Day {obs_time.group(1)} {obs_time.group(2)}:00]")
+
+    period = re.search(r'(\d{2})(\d{2})/(\d{2})(\d{2})', taf_code)
+    if period:
+        lines.append(f"Forecast start time: [Day {period.group(1)} {period.group(2)}:00] Until time: [Day {period.group(3)} {period.group(4)}:00]")
+
+    # Main block (first line after header)
+    taf_main = taf_code.split('\n')[0]
+    wind_match = re.search(r'(VRB|\d{3})(\d{2,3})KT', taf_main)
+    wind_dir = wind_match.group(1) if wind_match else "variable"
+    wind_spd = wind_match.group(2) if wind_match else ""
+    wind_str = f"Wind direction: {wind_dir if wind_dir != 'VRB' else 'variable'}"
+    wind_speed = f"Wind speed: {float(wind_spd)*0.514:.1f} m/s ({wind_spd}kt)" if wind_spd else ""
+
+    vis_match = re.search(r' (\d{4}) ', taf_main)
+    vis_str = "Visibility: 10km or more (CAVOK)" if "CAVOK" in taf_main or (vis_match and int(vis_match.group(1)) >= 9999) else f"Visibility: {int(vis_match.group(1))/1000:.0f}km" if vis_match else ""
+
+    clouds = []
+    if "CAVOK" in taf_main:
+        clouds.append("No cloud below 1500m and no Cumulonimbus")
+    else:
+        cloud_matches = re.findall(r'(FEW|SCT|BKN|OVC)(\d{3})', taf_main)
+        for typ, lvl in cloud_matches:
+            height = int(lvl)*30.48
+            clouds.append(f"{typ} at {int(height)}m")
+        if not clouds:
+            clouds.append("No significant clouds reported")
+    clouds_str = "; ".join(clouds)
+    wx_str = "No precipitation, thunderstorm, shallow fog or low drifting snow" if not re.search(r'(RA|SN|TS|FG|BR)', taf_main) else ""
+
+    lines.extend([wind_str, wind_speed, vis_str, clouds_str, wx_str, "---------------------------------------------------------------\n"])
+
+    # BECMG/TEMPO groups
+    block_re = re.compile(r'(BECMG|TEMPO)\s+(\d{4})/(\d{4})(.*?)((?=BECMG|TEMPO|PROB|$))', re.DOTALL)
+    for block in block_re.finditer(taf_code):
+        kind, fromd, tod, group, _ = block.groups()
+        from_day, from_hour = fromd[:2], fromd[2:]
+        to_day, to_hour = tod[:2], tod[2:]
+        lines.append(f"{'Becoming time' if kind == 'BECMG' else 'Temporary time'}: [Day {from_day} {from_hour}:00] Until time: [Day {to_day} {to_hour}:00]")
+
+        wind_match = re.search(r'(VRB|\d{3})(\d{2,3})KT', group)
+        wind_dir = wind_match.group(1) if wind_match else "variable"
+        wind_spd = wind_match.group(2) if wind_match else ""
+        wind_str = f"Wind direction: {wind_dir if wind_dir != 'VRB' else 'variable'}"
+        wind_speed = f"Wind speed: {float(wind_spd)*0.514:.1f} m/s ({wind_spd}kt)" if wind_spd else ""
+        lines.extend([wind_str, wind_speed, "---------------------------------------------------------------\n"])
+
+    return "\n".join([l for l in lines if l.strip()])
 
 class BriefingPDF(FPDF):
     def header(self):
@@ -241,6 +254,17 @@ class BriefingPDF(FPDF):
                 self.set_font("Arial", 'I', 11)
                 self.multi_cell(0, 7, ascii_safe(decode_taf(taf_code)))
             self.ln(2)
+    def gamet_sigmet_section(self, gamet_text, sigmet_text):
+        if gamet_text.strip():
+            self.section_header("GAMET (Area Forecast)")
+            self.set_font("Arial", '', 11)
+            self.multi_cell(0, 7, ascii_safe(gamet_text))
+            self.ln(2)
+        if sigmet_text.strip():
+            self.section_header("SIGMET")
+            self.set_font("Arial", '', 11)
+            self.multi_cell(0, 7, ascii_safe(sigmet_text))
+            self.ln(2)
     def chart_section(self, title, img_bytes, ai_text, user_desc=""):
         self.add_page()
         self.section_header(title)
@@ -279,7 +303,6 @@ with st.expander("1. Pilot/Aircraft Info", expanded=True):
     callsign = st.text_input("Callsign", "")
     date = st.date_input("Date", datetime.date.today())
 
-# Dynamic METAR/TAF pairs input
 if "metar_taf_pairs" not in st.session_state:
     st.session_state.metar_taf_pairs = [("", "")]
 st.subheader("2. METAR/TAF Pairs (by Aerodrome)")
@@ -303,14 +326,17 @@ for i, (metar, taf) in enumerate(st.session_state.metar_taf_pairs):
     if st.session_state.metar_taf_pairs[i][1].strip():
         decoded = decode_taf(st.session_state.metar_taf_pairs[i][1])
         st.markdown(f"**Decoded TAF:**\n\n```\n{decoded}\n```")
-
 if st.button("Add another Aerodrome"):
     st.session_state.metar_taf_pairs.append(("", ""))
 
 if remove_pair:
     st.session_state.metar_taf_pairs.pop()
 
-with st.expander("3. Significant Weather Chart (SIGWX)", expanded=True):
+with st.expander("3. GAMET/SIGMET (opcional)", expanded=True):
+    gamet_text = st.text_area("GAMET (Area Forecast, opcional):", height=70, key="gamet")
+    sigmet_text = st.text_area("SIGMET (opc., pode colar vários):", height=70, key="sigmet")
+
+with st.expander("4. Significant Weather Chart (SIGWX)", expanded=True):
     sigwx_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="sigwx")
     if "sigwx_img_bytes" not in st.session_state:
         st.session_state["sigwx_img_bytes"] = None
@@ -330,7 +356,7 @@ with st.expander("3. Significant Weather Chart (SIGWX)", expanded=True):
         sigwx_desc = st.text_input("SIGWX: Area/focus for analysis (default: Portugal)", value=st.session_state["sigwx_desc"], key="sigwxdesc")
         st.session_state["sigwx_desc"] = sigwx_desc
 
-with st.expander("4. Surface Pressure Chart (SPC)", expanded=True):
+with st.expander("5. Surface Pressure Chart (SPC)", expanded=True):
     spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
     if "spc_full_bytes" not in st.session_state:
         st.session_state["spc_full_bytes"] = None
@@ -357,12 +383,12 @@ with st.expander("4. Surface Pressure Chart (SPC)", expanded=True):
             key="spc_crop"
         )
         st.image(cropped_spc, caption="SPC: Cropped Area (for analysis)")
-        spc_desc = st.text_input("SPC: Area/focus for analysis (optional)", value=st.session_state["spc_desc"], key="spcdesc")
+        spc_desc = st.text_input("SPC: Area/focus for analysis (opcional)", value=st.session_state["spc_desc"], key="spcdesc")
         cropped_spc, cropped_spc_bytes = downscale_image(cropped_spc)
         st.session_state["cropped_spc_bytes"] = cropped_spc_bytes
         st.session_state["spc_desc"] = spc_desc
 
-with st.expander("5. NOTAMs (optional)"):
+with st.expander("6. NOTAMs (opcional)"):
     notams = st.text_area("Paste NOTAMs (one per line):", height=80, key="notam_area")
 
 ready = (
@@ -386,6 +412,9 @@ if ready:
             ]
             if metar_taf_pairs:
                 pdf.metar_taf_section(metar_taf_pairs)
+
+            # GAMET/SIGMET
+            pdf.gamet_sigmet_section(gamet_text, sigmet_text)
 
             # SIGWX
             sigwx_base64 = base64.b64encode(st.session_state["sigwx_img_bytes"].getvalue()).decode("utf-8")
@@ -432,6 +461,8 @@ if ready:
 else:
     st.info("Fill all sections and upload/crop both charts before generating your PDF.")
 
-st.caption("Add as many Aerodromes as needed. Each will pair METAR/TAF, decoded automatically (with airport info). Charts are analyzed automatically. NOTAMs included as plain text.")
+st.caption("Add as many Aerodromes as needed. Each will pair METAR/TAF, decoded automatically (with airport info). Charts are analyzed automatically. GAMET/SIGMET and NOTAMs included as plain text.")
+
+
 
 
