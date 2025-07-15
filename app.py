@@ -35,19 +35,16 @@ spc_file = st.file_uploader(
 )
 
 if spc_file:
-    # Handle PDF (convert first page to image)
+    import fitz
     if spc_file.type == "application/pdf":
-        import fitz
-        pdf_doc = fitz.open(stream=spc_file.read(), filetype="pdf")
+        pdf_bytes = spc_file.read()
+        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page = pdf_doc.load_page(0)
         pix = page.get_pixmap()
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
     else:
-        img = Image.open(spc_file)
-        
-    img = img.convert("RGB")
-
-    st.markdown("#### Crop the chart to cover **only Portugal and vicinity**:")
+        img = Image.open(spc_file).convert("RGB").copy()
+    st.write(f"Type: {type(img)}, Mode: {img.mode}, Size: {img.size}")
     cropped_img = st_cropper(
         img,
         aspect_ratio=None,
