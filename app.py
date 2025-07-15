@@ -39,7 +39,13 @@ def get_aerodrome_info(icao):
     name = info['name'].title()
     return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
-# Prompt completo e detalhado para os charts
+def clean_markdown(text):
+    # Remove bold, headings, and similar markdown
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"#+\s?", "", text)   # Remove headings ####
+    text = text.replace("**", "")
+    return text
+
 def ai_chart_analysis(img_base64, chart_type, user_area_desc):
     sys_prompt = (
         "Write a detailed, operational, student-style preflight weather analysis for the selected area of this aviation chart. "
@@ -64,11 +70,10 @@ def ai_chart_analysis(img_base64, chart_type, user_area_desc):
     )
     return response.choices[0].message.content
 
-# Comentário muito breve sobre METAR/TAF
 def brief_metar_taf_comment(metar_code, taf_code):
     prompt = (
         "Given this METAR and TAF, write a very brief and practical summary for pilots (one or two sentences max). "
-        "Mention main weather concerns or favorable aspects, but keep it short and simple."
+        "Mention main weather concerns or favorable aspects, but keep it short and simple. No markdown or formatting, just plain English."
     )
     content = f"METAR:\n{metar_code}\nTAF:\n{taf_code}"
     response = openai.chat.completions.create(
@@ -222,43 +227,55 @@ class BriefingPDF(FPDF):
     def metar_taf_section(self, pairs):
         for i, (metar_code, taf_code) in enumerate(pairs, 1):
             icao = ""
-            metar_lines = metar_code.strip().split()
-            if metar_lines:
-                match = re.match(r'([A-Z]{4})', metar_lines[0])
+            metar_code_stripped = metar_code.strip()
+            if metar_code_stripped:
+                match = re.match(r'([A-Z]{4})', metar_code_stripped)
                 if match:
                     icao = match.group(1)
-            info, name = get_aerodrome_info(icao) if icao else ("", f"Aerodrome {i}")
+            if icao and icao in AIRPORTS:
+                info, name = get_aerodrome_info(icao)
+            else:
+                name = f"Aerodrome {i}"
+                icao = ""
             self.add_section_page(f"{name} ({icao})")
-            self.set_font("Arial", 'B', 12)
+            # METAR
+            self.set_font("Arial", 'B', 13)
             self.set_text_color(40,40,40)
-            self.cell(0, 7, "METAR:", ln=True)
-            self.set_font("Arial", '', 11)
+            self.cell(0, 8, "METAR (Raw):", ln=True)
+            self.set_font("Arial", '', 12)
             self.set_text_color(0,0,0)
-            self.multi_cell(0, 7, ascii_safe(metar_code))
-            self.set_font("Arial", 'I', 11)
-            self.set_text_color(80,80,80)
-            self.multi_cell(0, 7, ascii_safe(decode_metar(metar_code)))
-            self.ln(1)
-            self.set_font("Arial", 'B', 12)
-            self.set_text_color(40,40,40)
-            self.cell(0, 7, "TAF:", ln=True)
-            self.set_font("Arial", '', 11)
-            self.set_text_color(0,0,0)
-            self.multi_cell(0, 7, ascii_safe(taf_code))
-            self.set_font("Arial", 'I', 11)
-            self.set_text_color(80,80,80)
-            self.multi_cell(0, 7, ascii_safe(decode_taf(taf_code)))
+            self.multi_cell(0, 8, ascii_safe(metar_code))
             self.ln(3)
-            # Comentário AI breve
+            self.set_font("Arial", 'I', 11)
+            self.set_text_color(80,80,80)
+            self.cell(0, 8, "Decoded METAR:", ln=True)
+            self.set_font("Arial", '', 11)
+            self.multi_cell(0, 8, ascii_safe(decode_metar(metar_code)))
+            self.ln(7)  # More space here
+            # TAF
+            self.set_font("Arial", 'B', 13)
+            self.set_text_color(40,40,40)
+            self.cell(0, 8, "TAF (Raw):", ln=True)
+            self.set_font("Arial", '', 12)
+            self.set_text_color(0,0,0)
+            self.multi_cell(0, 8, ascii_safe(taf_code))
+            self.ln(3)
+            self.set_font("Arial", 'I', 11)
+            self.set_text_color(80,80,80)
+            self.cell(0, 8, "Decoded TAF:", ln=True)
+            self.set_font("Arial", '', 11)
+            self.multi_cell(0, 8, ascii_safe(decode_taf(taf_code)))
+            self.ln(7)
+            # Short AI comment
             if metar_code.strip() or taf_code.strip():
                 self.set_font("Arial", 'B', 11)
                 self.set_text_color(120, 56, 0)
                 try:
                     comment = brief_metar_taf_comment(metar_code, taf_code)
-                    self.multi_cell(0, 8, f"Resumo breve: {ascii_safe(comment)}")
+                    self.multi_cell(0, 8, f"Summary: {ascii_safe(comment)}")
                 except Exception as e:
-                    self.multi_cell(0, 8, f"(Falha comentário breve: {e})")
-            self.ln(2)
+                    self.multi_cell(0, 8, f"(Short comment failed: {e})")
+            self.ln(5)
     def enroute_section(self, text):
         if text.strip():
             self.add_section_page("En-route Weather Warnings (SIGMET/AIRMET/GAMET)")
@@ -279,7 +296,8 @@ class BriefingPDF(FPDF):
         self.image(chart_img_path, x=22, w=168)
         self.ln(7)
         self.set_font("Arial", '', 12)
-        self.multi_cell(0, 8, ascii_safe(ai_text))
+        clean_text = clean_markdown(ai_text)
+        self.multi_cell(0, 8, ascii_safe(clean_text))
         self.ln(2)
     def notam_section(self, notam_data):
         if not notam_data:
@@ -288,20 +306,21 @@ class BriefingPDF(FPDF):
         for entry in notam_data:
             if entry["aero"].strip():
                 info, name = get_aerodrome_info(entry["aero"])
-                self.set_font("Arial", 'B', 16)
+                # Large subsection for aerodrome
+                self.set_font("Arial", 'B', 18)
                 self.set_text_color(28, 44, 80)
-                self.cell(0, 10, ascii_safe(f"{entry['aero'].upper()} ({name})"), ln=True)
+                self.cell(0, 12, ascii_safe(f"{entry['aero'].upper()} ({name})"), ln=True)
+                self.ln(3)
             self.set_text_color(0,0,0)
             self.set_font("Arial", '', 12)
             for nidx, notam in enumerate(entry["notams"], 1):
                 if notam["num"].strip() or notam["text"].strip():
-                    self.cell(8,8,'+', align='L')
-                    # Mostra número do NOTAM pedido explicitamente
                     self.set_font("Arial",'B',12)
-                    self.cell(22,8,f"NOTAM: {notam['num']}", align='L')
+                    self.cell(0, 8, f"NOTAM: {notam['num']}", ln=True)
                     self.set_font("Arial",'',12)
-                    self.multi_cell(140, 8, ascii_safe(notam["text"]))
-            self.ln(3)
+                    self.multi_cell(0, 8, ascii_safe(notam["text"]))
+                    self.ln(3)
+            self.ln(6)  # Extra space between aerodromes
     def conclusion(self):
         self.add_section_page("Conclusion")
         self.set_font("Arial", '', 13)
@@ -313,7 +332,6 @@ class BriefingPDF(FPDF):
         self.multi_cell(0,8, ascii_safe(txt))
         self.ln(2)
 
-# NOTAM block com campo "número"
 def notam_block():
     if "notam_data" not in st.session_state:
         st.session_state.notam_data = [{"aero": "", "notams": [{"num": "", "text": ""}]}]
@@ -419,7 +437,7 @@ with st.expander("4. Surface Pressure Chart (SPC)", expanded=True):
             key="spc_crop"
         )
         st.image(cropped_spc, caption="SPC: Cropped Area (for analysis)")
-        spc_desc = st.text_input("SPC: Area/focus for analysis (opcional)", value=st.session_state["spc_desc"], key="spcdesc")
+        spc_desc = st.text_input("SPC: Area/focus for analysis (optional)", value=st.session_state["spc_desc"], key="spcdesc")
         cropped_spc, cropped_spc_bytes = downscale_image(cropped_spc)
         st.session_state["cropped_spc_bytes"] = cropped_spc_bytes
         st.session_state["spc_desc"] = spc_desc
@@ -455,12 +473,12 @@ if ready:
                 ai_text=sigwx_ai_text,
                 user_desc=st.session_state["sigwx_desc"]
             )
-            # SPC — aqui vai a imagem CORTADA do crop!
+            # SPC
             spc_base64 = base64.b64encode(st.session_state["cropped_spc_bytes"].getvalue()).decode("utf-8")
             spc_ai_text = ai_chart_analysis(spc_base64, "SPC", st.session_state["spc_desc"])
             pdf.chart_section(
                 title="Surface Pressure Chart (SPC)",
-                img_bytes=st.session_state["cropped_spc_bytes"],   # CORRIGIDO!
+                img_bytes=st.session_state["cropped_spc_bytes"],
                 ai_text=spc_ai_text,
                 user_desc=st.session_state["spc_desc"]
             )
@@ -478,6 +496,7 @@ if ready:
             st.success("PDF generated successfully!")
 else:
     st.info("Fill all sections and upload/crop both charts before generating your PDF.")
+
 
 
 
