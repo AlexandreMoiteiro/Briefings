@@ -58,9 +58,8 @@ def ai_chart_analysis(img_base64, chart_type, user_area_desc, extra_instruction=
     sys_prompt = (
         "You are a student pilot preparing a preflight weather briefing. "
         "Write an analysis for our own flight, always in the first person plural ('We can expect...'). "
-        "For wind/temperature charts, be extremely concise and just summarize expected wind/temperature at the specified flight levels and time for our area. "
-        "For other charts, give a practical, operational summary for our area, mentioning any big-picture trends or systems that could affect us. "
-        "Never use formatting, lists or bullets. Never use 'pilots should' or give external advice. "
+        "Give a practical, operational summary for our area, mentioning any big-picture trends or systems that could affect us. "
+        "Never use formatting, lists or bullets. Never use 'pilots should' or give external advice. Speak in the first person. "
         "If extra instructions are given, follow them. "
     )
     area = user_area_desc.strip() or "Portugal"
