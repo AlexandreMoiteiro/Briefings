@@ -243,12 +243,11 @@ class BriefingPDF(FPDF):
         self.ln(30)
     def metar_taf_section(self, pairs):
         for i, entry in enumerate(pairs, 1):
-            aerodrome = entry['aerodrome']
-            icao = entry['icao']
+            icao = entry['icao'].upper()
+            info, aerodrome = get_aerodrome_info(icao)
             metar_code = entry['metar']
             taf_code = entry['taf']
             self.add_section_page(f"{icao} ({aerodrome})")
-            # METAR
             self.set_font("Arial", 'B', 13)
             self.set_text_color(40,40,40)
             self.cell(0, 8, "METAR (Raw):", ln=True)
@@ -263,7 +262,6 @@ class BriefingPDF(FPDF):
             self.set_text_color(0,0,0)
             self.multi_cell(0, 8, ascii_safe(decode_metar(metar_code)))
             self.ln(5)
-            # TAF
             self.set_font("Arial", 'B', 13)
             self.set_text_color(40,40,40)
             self.cell(0, 8, "TAF (Raw):", ln=True)
@@ -278,7 +276,6 @@ class BriefingPDF(FPDF):
             self.set_text_color(0,0,0)
             self.multi_cell(0, 8, ascii_safe(decode_taf(taf_code)))
             self.ln(6)
-            # Short AI comment for METAR/TAF
             if metar_code.strip() or taf_code.strip():
                 self.set_font("Arial", 'I', 11)
                 self.set_text_color(80, 56, 0)
@@ -310,7 +307,7 @@ class BriefingPDF(FPDF):
             self.cell(0, 7, ascii_safe(f"Area/focus: {user_desc.strip()}"), ln=True)
             self.set_text_color(0,0,0)
         self.ln(2)
-        chart_img_path = "tmp_chart.png"
+        chart_img_path = f"tmp_chart_{ascii_safe(title).replace(' ','_')}.png"
         with open(chart_img_path, "wb") as f:
             f.write(img_bytes.getvalue())
         self.set_font("Arial", '', 11)
@@ -347,7 +344,7 @@ def notam_block():
     st.subheader("6. NOTAMs by Aerodrome")
     for idx, entry in enumerate(st.session_state.notam_data):
         with st.expander(f"NOTAMs for Aerodrome {idx+1}", expanded=True):
-            entry["aero"] = st.text_input("Aerodrome ICAO or Name", value=entry["aero"], key=f"notam_aero_{idx}")
+            entry["aero"] = st.text_input("Aerodrome ICAO", value=entry["aero"], key=f"notam_aero_{idx}")
             num_notams = len(entry["notams"])
             for nidx in range(num_notams):
                 cols = st.columns([0.26, 0.74])
@@ -366,18 +363,16 @@ def notam_block():
 
 def metar_taf_block():
     if "metar_taf_pairs" not in st.session_state:
-        st.session_state.metar_taf_pairs = [{"icao":"", "aerodrome":"", "metar":"", "taf":""}]
+        st.session_state.metar_taf_pairs = [{"icao":"", "metar":"", "taf":""}]
     st.subheader("2. METAR/TAF by Aerodrome")
     remove_pair = st.button("Remove last Aerodrome") if len(st.session_state.metar_taf_pairs) > 1 else None
     for i, entry in enumerate(st.session_state.metar_taf_pairs):
         with st.expander(f"METAR/TAF for Aerodrome {i+1}", expanded=True):
-            cols = st.columns([0.25, 0.75])
-            entry["icao"] = cols[0].text_input("ICAO", value=entry["icao"], key=f"icao_{i}")
-            entry["aerodrome"] = cols[1].text_input("Aerodrome Name", value=entry["aerodrome"], key=f"aerodrome_{i}")
+            entry["icao"] = st.text_input("ICAO", value=entry["icao"], key=f"icao_{i}")
             entry["metar"] = st.text_area(f"METAR (raw code)", value=entry["metar"], key=f"metar_{i}")
             entry["taf"] = st.text_area(f"TAF (raw code)", value=entry["taf"], key=f"taf_{i}")
     if st.button("Add another Aerodrome"):
-        st.session_state.metar_taf_pairs.append({"icao":"", "aerodrome":"", "metar":"", "taf":""})
+        st.session_state.metar_taf_pairs.append({"icao":"", "metar":"", "taf":""})
     if remove_pair:
         st.session_state.metar_taf_pairs.pop()
 
@@ -385,15 +380,13 @@ def sigmet_block():
     st.subheader("5. En-route Weather Warnings (SIGMET/AIRMET/GAMET)")
     return st.text_area("SIGMET/AIRMET/GAMET:", height=110, key="sigmet_area")
 
-# --- TypeError safeguard for old tuple structure ---
 if "metar_taf_pairs" in st.session_state and isinstance(st.session_state.metar_taf_pairs, list):
     if st.session_state.metar_taf_pairs and isinstance(st.session_state.metar_taf_pairs[0], tuple):
         st.session_state.metar_taf_pairs = [
-            {"icao": "", "aerodrome": "", "metar": pair[0], "taf": pair[1]}
+            {"icao": "", "metar": pair[0], "taf": pair[1]}
             for pair in st.session_state.metar_taf_pairs
         ]
 
-# ---------------------- STREAMLIT MAIN APP -----------------------
 st.title("Preflight Weather Briefing and NOTAMs")
 
 with st.expander("1. Pilot/Aircraft Info", expanded=True):
@@ -430,7 +423,7 @@ with st.expander("4. Surface Pressure Chart (SPC)", expanded=True):
     if "spc_full_bytes" not in st.session_state:
         st.session_state["spc_full_bytes"] = None
         st.session_state["cropped_spc_bytes"] = None
-        st.session_state["spc_desc"] = ""
+        st.session_state["spc_desc"] = "Portugal"  # Default Portugal
     if spc_file:
         if spc_file.type == "application/pdf":
             pdf_bytes = spc_file.read()
@@ -452,7 +445,7 @@ with st.expander("4. Surface Pressure Chart (SPC)", expanded=True):
             key="spc_crop"
         )
         st.image(cropped_spc, caption="SPC: Cropped Area (for analysis)")
-        spc_desc = st.text_input("SPC: Area/focus for analysis (optional)", value=st.session_state["spc_desc"], key="spcdesc")
+        spc_desc = st.text_input("SPC: Area/focus for analysis (default: Portugal)", value=st.session_state["spc_desc"], key="spcdesc")
         cropped_spc, cropped_spc_bytes = downscale_image(cropped_spc)
         st.session_state["cropped_spc_bytes"] = cropped_spc_bytes
         st.session_state["spc_desc"] = spc_desc
@@ -470,30 +463,29 @@ if ready:
             pdf = BriefingPDF()
             pdf.set_auto_page_break(auto=True, margin=14)
             pdf.cover_page(pilot, aircraft, str(date), callsign, mission)
-            # Only include METAR/TAF with any field filled
             metar_taf_pairs = [
                 entry for entry in st.session_state.metar_taf_pairs
-                if entry['metar'].strip() or entry['taf'].strip() or entry['icao'].strip() or entry['aerodrome'].strip()
+                if entry['metar'].strip() or entry['taf'].strip() or entry['icao'].strip()
             ]
             if metar_taf_pairs:
                 pdf.metar_taf_section(metar_taf_pairs)
             sigmet_ai_summary = ai_sigmet_summary(sigmet_gamet_text) if sigmet_gamet_text.strip() else ""
             pdf.enroute_section(sigmet_gamet_text, sigmet_ai_summary)
-            # SIGWX
+            # SIGWX (Full chart!)
             sigwx_base64 = base64.b64encode(st.session_state["sigwx_img_bytes"].getvalue()).decode("utf-8")
             sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", st.session_state["sigwx_desc"])
             pdf.chart_section(
                 title="Significant Weather Chart (SIGWX)",
-                img_bytes=st.session_state["sigwx_img_bytes"],   # FULL CHART!
+                img_bytes=st.session_state["sigwx_img_bytes"],   # FULL SIGWX
                 ai_text=sigwx_ai_text,
                 user_desc=st.session_state["sigwx_desc"]
             )
-            # SPC - FULL CHART!
+            # SPC (Full chart!)
             spc_base64 = base64.b64encode(st.session_state["spc_full_bytes"].getvalue()).decode("utf-8")
             spc_ai_text = ai_chart_analysis(spc_base64, "SPC", st.session_state["spc_desc"])
             pdf.chart_section(
                 title="Surface Pressure Chart (SPC)",
-                img_bytes=st.session_state["spc_full_bytes"],    # FULL CHART!
+                img_bytes=st.session_state["spc_full_bytes"],    # FULL SPC
                 ai_text=spc_ai_text,
                 user_desc=st.session_state["spc_desc"]
             )
@@ -510,6 +502,8 @@ if ready:
             st.success("PDF generated successfully!")
 else:
     st.info("Fill all sections and upload both charts before generating your PDF.")
+
+
 
 
 
