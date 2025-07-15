@@ -9,10 +9,21 @@ import fitz
 import datetime
 import unicodedata
 import re
-
+import airportsdata
 from metar.Metar import Metar
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
+
+# Load airport database once
+AIRPORTS = airportsdata.load('ICAO')
+
+def get_aerodrome_info(icao):
+    info = AIRPORTS.get(icao)
+    if not info:
+        return ""
+    lat = f"{abs(info['lat']):.4f}{'N' if info['lat'] >= 0 else 'S'}"
+    lon = f"{abs(info['lon']):.4f}{'E' if info['lon'] >= 0 else 'W'}"
+    return f"{info['name']}, {info['city']}, {info['country']} {lat} {lon}"
 
 def ascii_safe(text):
     if not isinstance(text, str):
@@ -65,10 +76,13 @@ def render_markdown_like(text):
 def decode_metar(metar_code):
     try:
         m = Metar(metar_code)
-        result = []
-        # Header
         station = m.station_id or "Unknown"
-        result.append(f"Report for station {station}")
+        info = get_aerodrome_info(station)
+        result = []
+        if info:
+            result.append(f"Report for station {station}: {info}")
+        else:
+            result.append(f"Report for station {station}")
         if m.time:
             obs = m.time
             result.append(f"Observation time: [Day: {obs.day:02d}] [Time: {obs.hour:02d}{obs.minute:02d}]")
@@ -94,7 +108,7 @@ def decode_metar(metar_code):
                 skystr.append("No cloud below 1500m and no Cumulonimbus")
             else:
                 for s in m.sky:
-                    typ, height = s[0], s[1]*30.48 if s[1] else None  # feet to meters
+                    typ, height = s[0], s[1]*30.48 if s[1] else None
                     if typ == "CB":
                         skystr.append("Cumulonimbus present")
                     elif height is not None:
@@ -120,59 +134,60 @@ def decode_metar(metar_code):
         return f"Could not decode METAR: {e}"
 
 def decode_taf(taf_code):
-    # Simple block-style TAF decoder, as before
     lines = taf_code.strip().split("\n")
-    taf_line = None
-    change_lines = []
-    for idx, line in enumerate(lines):
-        line = line.strip()
-        if line.upper().startswith("TAF"):
-            taf_line = line
-        elif line.upper().startswith(("BECMG", "TEMPO", "PROB")) or re.match(r'^\d{4}/\d{4}', line):
-            change_lines.append((idx, line))
+    taf_line = next((line for line in lines if line.upper().startswith("TAF")), None)
     station_match = re.search(r'([A-Z]{4})', taf_line or "")
     station = station_match.group(1) if station_match else "UNKNOWN"
-    station_name = ""
-    result = [f"Decoded TAF for {station} ({station_name})"]
+    info = get_aerodrome_info(station)
+    result = []
+    result.append(f"Decoded TAF for {station} ({info})")
+    # Observation and forecast times
+    obs_time = re.search(r'(\d{2})(\d{2})(\d{2})Z', taf_line or "")
+    if obs_time:
+        result.append(f"Observation time: [Day {obs_time.group(1)} {obs_time.group(2)}:00]")
     time_match = re.findall(r'(\d{2})(\d{2})/(\d{2})(\d{2})', taf_code)
     if time_match:
-        for match in time_match:
-            result.append(f"Forecast start time: [Day {match[0]} {match[1]}:00] Until time: [Day {match[2]} {match[3]}:00]")
-            break
-    wind = re.search(r'(\d{3}|VRB)(\d{2,3})G?(\d{2,3})?KT', taf_code)
-    vis = re.search(r' (\d{4}) ', taf_code)
-    if wind:
-        wdir = wind.group(1)
-        wspd = wind.group(2)
-        result.append(f"Wind direction: {wdir if wdir != 'VRB' else 'variable'}")
-        result.append(f"Wind speed: {int(wspd)*0.514:.1f} m/s ({wspd}kt)")
-    if vis:
-        v = int(vis.group(1))
-        result.append(f"Visibility: {v/1000:.0f}km or more (CAVOK)" if v >= 9999 else f"Visibility: {v/1000:.0f}km")
-    clouds = []
-    if "CAVOK" in taf_code:
-        clouds.append("No cloud below 1500m and no Cumulonimbus")
-    else:
-        for c in re.findall(r'(FEW|SCT|BKN|OVC)(\d{3})', taf_code):
-            typ, lvl = c
-            h = int(lvl)*30.48  # feet to meters
-            clouds.append(f"{typ} at {int(h)}m")
-        if not clouds:
-            clouds.append("No significant clouds reported")
-    result.append("; ".join(clouds))
-    if not re.search(r'(RA|SN|TS|FG|BR)', taf_code):
-        result.append("No precipitation, thunderstorm, shallow fog or low drifting snow")
-    for idx, change in change_lines:
-        m = re.match(r'(?P<chg>BECMG|TEMPO|PROB\d{2}) ?(?P<from>\d{4})/(?P<to>\d{4})', change)
-        if m:
-            chg_type = m.group('chg')
-            from_time = m.group('from')
-            to_time = m.group('to')
-            result.append("---------------------------------------------------------------\n")
-            result.append(f"{chg_type} time: [Day {from_time[:2]} {from_time[2:]}:00] Until time: [Day {to_time[:2]} {to_time[2]}:00]")
+        result.append(f"Forecast start time: [Day {time_match[0][0]} {time_match[0][1]}:00] Until time: [Day {time_match[0][2]} {time_match[0][3]}:00]")
+    # Parse the main TAF block and all BECMG/TEMPO groups
+    def decode_block(text):
+        wind = re.search(r'(\d{3}|VRB)(\d{2,3})G?(\d{2,3})?KT', text)
+        vis = re.search(r' (\d{4}) ', text)
+        clouds = []
+        if "CAVOK" in text:
+            clouds.append("No cloud below 1500m and no Cumulonimbus")
         else:
-            result.append("---------------------------------------------------------------\n")
-            result.append(change)
+            for c in re.findall(r'(FEW|SCT|BKN|OVC)(\d{3})', text):
+                typ, lvl = c
+                h = int(lvl)*30.48  # feet to meters
+                clouds.append(f"{typ} at {int(h)}m")
+            if not clouds:
+                clouds.append("No significant clouds reported")
+        lines = []
+        if wind:
+            wdir = wind.group(1)
+            wspd = wind.group(2)
+            lines.append(f"Wind direction: {wdir if wdir != 'VRB' else 'variable'}")
+            lines.append(f"Wind speed: {int(wspd)*0.514:.1f} m/s ({wspd}kt)")
+        if vis:
+            v = int(vis.group(1))
+            lines.append(f"Visibility: {v/1000:.0f}km or more (CAVOK)" if v >= 9999 else f"Visibility: {v/1000:.0f}km")
+        lines.append("; ".join(clouds))
+        if not re.search(r'(RA|SN|TS|FG|BR)', text):
+            lines.append("No precipitation, thunderstorm, shallow fog or low drifting snow")
+        return "\n".join(lines)
+    # Main block
+    result.append(decode_block(taf_line or ""))
+    # Change groups
+    change_re = re.compile(r'(BECMG|TEMPO|PROB\d{2})\s?(\d{4})/(\d{4})([\s\S]*?)(?=BECMG|TEMPO|PROB\d{2}|$)')
+    for match in change_re.finditer(taf_code):
+        chg, from_, to_, body = match.groups()
+        result.append("---------------------------------------------------------------\n")
+        label = {
+            "BECMG": "Becoming time",
+            "TEMPO": "Temporary time"
+        }.get(chg[:5], f"{chg} time")
+        result.append(f"{label}: [Day {from_[:2]} {from_[2:]}:00] Until time: [Day {to_[:2]} {to_[2:]}:00]")
+        result.append(decode_block(body))
     return "\n".join(result)
 
 class BriefingPDF(FPDF):
@@ -417,4 +432,6 @@ if ready:
 else:
     st.info("Fill all sections and upload/crop both charts before generating your PDF.")
 
-st.caption("Add as many Aerodromes as needed. Each will pair METAR/TAF, decoded automatically. Charts are analyzed automatically. NOTAMs included as plain text.")
+st.caption("Add as many Aerodromes as needed. Each will pair METAR/TAF, decoded automatically (with airport info). Charts are analyzed automatically. NOTAMs included as plain text.")
+
+
