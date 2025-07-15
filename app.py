@@ -58,7 +58,7 @@ def clean_markdown(text):
 
 def ai_chart_analysis(img_base64, chart_type, user_area_desc, extra_instruction="", summarized=False):
     area = user_area_desc.strip() or "the selected area"
-geo_hint = (
+    geo_hint = (
     f"Our area of interest is {area}. "
     "Assume north is up, south is down, west is left, east is right on the chart. "
     "Do not mention regions outside the visible or relevant area. "
