@@ -40,13 +40,12 @@ def get_aerodrome_info(icao):
     return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
 def clean_markdown(text):
-    # Remove Markdown and bullet styling
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
     text = re.sub(r"#+\s?", "", text)
     text = re.sub(r"[*•\-]\s+", "", text)
     text = text.replace("**", "").replace("__", "")
     text = re.sub(r"[_`]", "", text)
-    text = re.sub(r"\n{2,}", "\n\n", text)  # max double linebreaks
+    text = re.sub(r"\n{2,}", "\n\n", text)
     return text.strip()
 
 def ai_chart_analysis(img_base64, chart_type, user_area_desc):
@@ -208,40 +207,6 @@ def decode_taf(taf_code):
     lines.extend([wind_str, wind_speed, vis_str, clouds_str, wx_str])
     return "\n".join([l for l in lines if l.strip()])
 
-def ai_conclusion(metar_taf_pairs, sigmet_text, chart_analyses, notam_data, aircraft="", mission=""):
-    summary = []
-    summary.append("METAR/TAF Briefing:")
-    for idx, entry in enumerate(metar_taf_pairs):
-        summary.append(f"Aerodrome: {entry['icao']} - {entry['aerodrome']}")
-        summary.append(f"METAR: {entry['metar']}")
-        summary.append(f"TAF: {entry['taf']}")
-    summary.append("SIGMET/AIRMET/GAMET:")
-    summary.append(sigmet_text)
-    for chart_type, analysis in chart_analyses.items():
-        summary.append(f"{chart_type} Analysis: {analysis}")
-    summary.append("NOTAMs:")
-    for entry in notam_data:
-        aerodrome = entry["aero"]
-        for n in entry["notams"]:
-            summary.append(f"{aerodrome}: {n['num']} {n['text']}")
-    full_context = "\n".join(summary)
-    prompt = (
-        "You are a flight dispatcher. Based on the following preflight weather briefing and NOTAM information, "
-        "write a short but practical operational dispatch decision (go/no-go) considering all the data. "
-        "Evaluate weather conditions for departure, arrival, and enroute; consider meteorological minima; highlight critical NOTAMs and any operational limitations. "
-        "Give a conclusion for dispatch, using clear aviation English. Do not mention being an AI or generating the report. No formatting or Markdown, just well-written text."
-    )
-    response = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": full_context}
-        ],
-        max_tokens=260,
-        temperature=0.2
-    )
-    return clean_markdown(response.choices[0].message.content.strip())
-
 class BriefingPDF(FPDF):
     def header(self): pass
     def footer(self):
@@ -313,7 +278,7 @@ class BriefingPDF(FPDF):
             self.set_text_color(0,0,0)
             self.multi_cell(0, 8, ascii_safe(decode_taf(taf_code)))
             self.ln(6)
-                        # Short AI comment for METAR/TAF
+            # Short AI comment for METAR/TAF
             if metar_code.strip() or taf_code.strip():
                 self.set_font("Arial", 'I', 11)
                 self.set_text_color(80, 56, 0)
@@ -323,7 +288,6 @@ class BriefingPDF(FPDF):
                 except Exception as e:
                     self.multi_cell(0, 8, f"(Short comment failed: {e})")
             self.ln(6)
-
     def enroute_section(self, text, ai_summary):
         if text.strip():
             self.add_section_page("En-route Weather Warnings (SIGMET/AIRMET/GAMET)")
@@ -338,7 +302,6 @@ class BriefingPDF(FPDF):
                 self.set_font("Arial", '', 12)
                 self.multi_cell(0, 8, ascii_safe(ai_summary))
                 self.ln(4)
-
     def chart_section(self, title, img_bytes, ai_text, user_desc=""):
         self.add_section_page(title)
         if user_desc.strip():
@@ -356,7 +319,6 @@ class BriefingPDF(FPDF):
         self.set_font("Arial", '', 12)
         self.multi_cell(0, 8, ascii_safe(ai_text))
         self.ln(2)
-
     def notam_section(self, notam_data):
         if not notam_data:
             return
@@ -378,14 +340,6 @@ class BriefingPDF(FPDF):
                     self.multi_cell(0, 8, ascii_safe(notam["text"]))
                     self.ln(3)
             self.ln(6)
-
-    def conclusion(self, ai_text):
-        self.add_section_page("Operational Dispatch Conclusion")
-        self.set_font("Arial", '', 13)
-        self.multi_cell(0, 8, ascii_safe(ai_text))
-        self.ln(2)
-
-# --- STREAMLIT NOTAM and METAR/TAF ENTRY BLOCKS ---
 
 def notam_block():
     if "notam_data" not in st.session_state:
@@ -431,8 +385,15 @@ def sigmet_block():
     st.subheader("5. En-route Weather Warnings (SIGMET/AIRMET/GAMET)")
     return st.text_area("SIGMET/AIRMET/GAMET:", height=110, key="sigmet_area")
 
-# ---------------------- STREAMLIT MAIN APP -----------------------
+# --- TypeError safeguard for old tuple structure ---
+if "metar_taf_pairs" in st.session_state and isinstance(st.session_state.metar_taf_pairs, list):
+    if st.session_state.metar_taf_pairs and isinstance(st.session_state.metar_taf_pairs[0], tuple):
+        st.session_state.metar_taf_pairs = [
+            {"icao": "", "aerodrome": "", "metar": pair[0], "taf": pair[1]}
+            for pair in st.session_state.metar_taf_pairs
+        ]
 
+# ---------------------- STREAMLIT MAIN APP -----------------------
 st.title("Preflight Weather Briefing and NOTAMs")
 
 with st.expander("1. Pilot/Aircraft Info", expanded=True):
@@ -501,7 +462,6 @@ notam_block()
 
 ready = (
     st.session_state.get("spc_full_bytes")
-    and st.session_state.get("cropped_spc_bytes")
     and st.session_state.get("sigwx_img_bytes")
 )
 if ready:
@@ -524,33 +484,20 @@ if ready:
             sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", st.session_state["sigwx_desc"])
             pdf.chart_section(
                 title="Significant Weather Chart (SIGWX)",
-                img_bytes=st.session_state["sigwx_img_bytes"],
+                img_bytes=st.session_state["sigwx_img_bytes"],   # FULL CHART!
                 ai_text=sigwx_ai_text,
                 user_desc=st.session_state["sigwx_desc"]
             )
-            # SPC (FIXED: show cropped area, not the full SPC)
-            spc_base64 = base64.b64encode(st.session_state["cropped_spc_bytes"].getvalue()).decode("utf-8")
+            # SPC - FULL CHART!
+            spc_base64 = base64.b64encode(st.session_state["spc_full_bytes"].getvalue()).decode("utf-8")
             spc_ai_text = ai_chart_analysis(spc_base64, "SPC", st.session_state["spc_desc"])
             pdf.chart_section(
                 title="Surface Pressure Chart (SPC)",
-                img_bytes=st.session_state["cropped_spc_bytes"],
+                img_bytes=st.session_state["spc_full_bytes"],    # FULL CHART!
                 ai_text=spc_ai_text,
                 user_desc=st.session_state["spc_desc"]
             )
             pdf.notam_section(st.session_state.notam_data)
-            chart_analyses = {
-                "SIGWX": sigwx_ai_text,
-                "SPC": spc_ai_text
-            }
-            ai_conc = ai_conclusion(
-                metar_taf_pairs,
-                sigmet_gamet_text,
-                chart_analyses,
-                st.session_state.notam_data,
-                aircraft=aircraft,
-                mission=mission
-            )
-            pdf.conclusion(ai_conc)
             out_pdf = f"Briefing_{ascii_safe(pilot)}_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
@@ -562,7 +509,8 @@ if ready:
                 )
             st.success("PDF generated successfully!")
 else:
-    st.info("Fill all sections and upload/crop both charts before generating your PDF.")
+    st.info("Fill all sections and upload both charts before generating your PDF.")
+
 
 
 
