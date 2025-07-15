@@ -10,6 +10,8 @@ import datetime
 import unicodedata
 import re
 
+from metar.Metar import Metar
+
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 def ascii_safe(text):
@@ -59,6 +61,131 @@ def render_markdown_like(text):
         line = line.replace('`', '')
         final.append(line)
     return '\n'.join(final)
+
+# --- METAR Decoding (detailed, by python-metar) ---
+def decode_metar(metar_code):
+    try:
+        m = Metar(metar_code)
+        result = []
+        # Header
+        station = m.station_id or "Unknown"
+        name = getattr(m, "station_name", None) or ""
+        lat, lon = "", ""
+        if m.lat and m.lon:
+            lat = f"{float(m.lat):.4f}N" if float(m.lat) >= 0 else f"{abs(float(m.lat)):.4f}S"
+            lon = f"{abs(float(m.lon)):.4f}{'E' if float(m.lon) >= 0 else 'W'}"
+        header = f"Report for station {station}: {name}".strip()
+        if lat and lon:
+            header += f", {lat} {lon}"
+        result.append(header)
+        if m.time:
+            obs = m.time
+            result.append(f"Observation time: [Day: {obs.day:02d}] [Time: {obs.hour:02d}{obs.minute:02d}]")
+        if m.wind_speed:
+            ws = m.wind_speed.value('MPS')
+            wd = m.wind_dir.value() if m.wind_dir else None
+            if wd:
+                result.append(f"Wind speed: {ws:.1f} m/s\nWind direction: {wd} degrees")
+            else:
+                result.append(f"Wind speed: {ws:.1f} m/s\nWind direction: variable")
+        if m.vis:
+            vis = m.vis.value('KM')
+            if "CAVOK" in metar_code:
+                result.append("Visibility: 10km or more (CAVOK)")
+            else:
+                result.append(f"Visibility: {vis} km")
+        if m.sky:
+            skystr = []
+            cb = any([s[0] == "CB" for s in m.sky])
+            cldbelow = any([(s[1] if len(s) > 1 else 999) < 15 for s in m.sky if s[1]])
+            if "CAVOK" in metar_code or not m.sky:
+                skystr.append("No cloud below 1500m and no Cumulonimbus")
+            else:
+                for s in m.sky:
+                    typ, height = s[0], s[1]*30.48 if s[1] else None  # feet to meters
+                    if typ == "CB":
+                        skystr.append("Cumulonimbus present")
+                    elif height is not None:
+                        skystr.append(f"{typ} at {int(height)}m")
+                if not skystr:
+                    skystr.append("No significant clouds reported")
+            result.append("; ".join(skystr))
+        wx = getattr(m, "weather", [])
+        if not wx or (len(wx) == 1 and wx[0] == ""):
+            result.append("No precipitation, thunderstorm, shallow fog or low drifting snow")
+        else:
+            result.append(f"Weather phenomena: {'; '.join(wx)}")
+        if m.temp:
+            result.append(f"Air Temperature: {m.temp.value():.0f} Degrees C")
+        if m.dewpt:
+            result.append(f"Dew-Point Temperature: {m.dewpt.value():.0f} Degrees C")
+        if m.press:
+            result.append(f"Observed QNH: {m.press.value():.0f} hPa")
+        return "\n".join(result)
+    except Exception as e:
+        return f"Could not decode METAR: {e}"
+
+# --- TAF decoding: readable, block-style forecast ---
+def decode_taf(taf_code):
+    # This is a *custom* "pseudo-decoder" that parses main lines and major change groups.
+    lines = taf_code.strip().split("\n")
+    # Find main TAF line
+    taf_line = None
+    change_lines = []
+    for idx, line in enumerate(lines):
+        line = line.strip()
+        if line.upper().startswith("TAF"):
+            taf_line = line
+        elif line.upper().startswith(("BECMG", "TEMPO", "PROB")) or re.match(r'^\d{4}/\d{4}', line):
+            change_lines.append((idx, line))
+    station_match = re.search(r'([A-Z]{4})', taf_line or "")
+    station = station_match.group(1) if station_match else "UNKNOWN"
+    station_name = ""  # You can add ICAO to city mapping if needed
+    result = [f"Decoded TAF for {station} ({station_name})"]
+    # Main Forecast period
+    time_match = re.findall(r'(\d{2})(\d{2})/(\d{2})(\d{2})', taf_code)
+    if time_match:
+        for match in time_match:
+            result.append(f"Forecast start time: [Day {match[0]} {match[1]}:00] Until time: [Day {match[2]} {match[3]}:00]")
+            break
+    # Find and show all main wind, vis, clouds, etc in TAF line
+    wind = re.search(r'(\d{3}|VRB)(\d{2,3})G?(\d{2,3})?KT', taf_code)
+    vis = re.search(r' (\d{4}) ', taf_code)
+    if wind:
+        wdir = wind.group(1)
+        wspd = wind.group(2)
+        result.append(f"Wind direction: {wdir if wdir != 'VRB' else 'variable'}")
+        result.append(f"Wind speed: {int(wspd)*0.514:.1f} m/s ({wspd}kt)")
+    if vis:
+        v = int(vis.group(1))
+        result.append(f"Visibility: {v/1000:.0f}km or more (CAVOK)" if v >= 9999 else f"Visibility: {v/1000:.0f}km")
+    clouds = []
+    if "CAVOK" in taf_code:
+        clouds.append("No cloud below 1500m and no Cumulonimbus")
+    else:
+        for c in re.findall(r'(FEW|SCT|BKN|OVC)(\d{3})', taf_code):
+            typ, lvl = c
+            h = int(lvl)*30.48  # feet to meters
+            clouds.append(f"{typ} at {int(h)}m")
+        if not clouds:
+            clouds.append("No significant clouds reported")
+    result.append("; ".join(clouds))
+    # Main weather
+    if not re.search(r'(RA|SN|TS|FG|BR)', taf_code):
+        result.append("No precipitation, thunderstorm, shallow fog or low drifting snow")
+    # Major changes
+    for idx, change in change_lines:
+        m = re.match(r'(?P<chg>BECMG|TEMPO|PROB\d{2}) ?(?P<from>\d{4})/(?P<to>\d{4})', change)
+        if m:
+            chg_type = m.group('chg')
+            from_time = m.group('from')
+            to_time = m.group('to')
+            result.append("---------------------------------------------------------------\n")
+            result.append(f"{chg_type} time: [Day {from_time[:2]} {from_time[2:]}:00] Until time: [Day {to_time[:2]} {to_time[2:]}:00]")
+        else:
+            result.append("---------------------------------------------------------------\n")
+            result.append(change)
+    return "\n".join(result)
 
 class BriefingPDF(FPDF):
     def header(self):
@@ -139,51 +266,43 @@ with st.expander("1. Pilot/Aircraft Info", expanded=True):
     callsign = st.text_input("Callsign", "")
     date = st.date_input("Date", datetime.date.today())
 
-# Dynamic METAR input
-if "metar_list" not in st.session_state:
-    st.session_state.metar_list = [("", "")]
+# Dynamic METAR input, Python-decoded
+if "metar_codes" not in st.session_state:
+    st.session_state.metar_codes = [""]
 st.subheader("2. METARs")
-remove_metar = st.button("Remove last METAR") if len(st.session_state.metar_list) > 1 else None
-for i, (metar, metar_decoded) in enumerate(st.session_state.metar_list):
+remove_metar = st.button("Remove last METAR") if len(st.session_state.metar_codes) > 1 else None
+for i, code in enumerate(st.session_state.metar_codes):
     col1, col2 = st.columns(2)
     with col1:
-        st.session_state.metar_list[i] = (
-            st.text_area(f"METAR #{i+1} (raw code)", value=metar, key=f"metar_{i}"),
-            st.session_state.metar_list[i][1]
-        )
+        st.session_state.metar_codes[i] = st.text_area(f"METAR #{i+1} (raw code)", value=code, key=f"metar_{i}")
     with col2:
-        st.session_state.metar_list[i] = (
-            st.session_state.metar_list[i][0],
-            st.text_area(f"METAR #{i+1} (decoded/summary)", value=metar_decoded, key=f"metar_decoded_{i}")
-        )
+        decoded = decode_metar(st.session_state.metar_codes[i]) if st.session_state.metar_codes[i].strip() else ""
+        st.markdown(f"**Decoded:**\n\n```\n{decoded}\n```" if decoded else "")
+
 if st.button("Add another METAR"):
-    st.session_state.metar_list.append(("", ""))
+    st.session_state.metar_codes.append("")
 
 if remove_metar:
-    st.session_state.metar_list.pop()
+    st.session_state.metar_codes.pop()
 
-# Dynamic TAF input
-if "taf_list" not in st.session_state:
-    st.session_state.taf_list = [("", "")]
+# Dynamic TAF input, Python-decoded
+if "taf_codes" not in st.session_state:
+    st.session_state.taf_codes = [""]
 st.subheader("3. TAFs")
-remove_taf = st.button("Remove last TAF") if len(st.session_state.taf_list) > 1 else None
-for i, (taf, taf_decoded) in enumerate(st.session_state.taf_list):
+remove_taf = st.button("Remove last TAF") if len(st.session_state.taf_codes) > 1 else None
+for i, code in enumerate(st.session_state.taf_codes):
     col1, col2 = st.columns(2)
     with col1:
-        st.session_state.taf_list[i] = (
-            st.text_area(f"TAF #{i+1} (raw code)", value=taf, key=f"taf_{i}"),
-            st.session_state.taf_list[i][1]
-        )
+        st.session_state.taf_codes[i] = st.text_area(f"TAF #{i+1} (raw code)", value=code, key=f"taf_{i}")
     with col2:
-        st.session_state.taf_list[i] = (
-            st.session_state.taf_list[i][0],
-            st.text_area(f"TAF #{i+1} (decoded/summary)", value=taf_decoded, key=f"taf_decoded_{i}")
-        )
+        decoded = decode_taf(st.session_state.taf_codes[i]) if st.session_state.taf_codes[i].strip() else ""
+        st.markdown(f"**Decoded:**\n\n```\n{decoded}\n```" if decoded else "")
+
 if st.button("Add another TAF"):
-    st.session_state.taf_list.append(("", ""))
+    st.session_state.taf_codes.append("")
 
 if remove_taf:
-    st.session_state.taf_list.pop()
+    st.session_state.taf_codes.pop()
 
 with st.expander("4. Significant Weather Chart (SIGWX)", expanded=True):
     sigwx_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="sigwx")
@@ -255,18 +374,16 @@ if ready:
 
             # METARs
             metar_pairs = [
-                (metar, decode)
-                for metar, decode in st.session_state.metar_list
-                if metar.strip() or decode.strip()
+                (code, decode_metar(code))
+                for code in st.session_state.metar_codes if code.strip()
             ]
             if metar_pairs:
                 pdf.pair_section("METARs", metar_pairs)
 
             # TAFs
             taf_pairs = [
-                (taf, decode)
-                for taf, decode in st.session_state.taf_list
-                if taf.strip() or decode.strip()
+                (code, decode_taf(code))
+                for code in st.session_state.taf_codes if code.strip()
             ]
             if taf_pairs:
                 pdf.pair_section("TAFs", taf_pairs)
@@ -316,5 +433,6 @@ if ready:
 else:
     st.info("Fill all sections and upload/crop both charts before generating your PDF.")
 
-st.caption("Add as many METAR or TAF/decoded pairs as needed. Charts are analyzed automatically. NOTAMs included as plain text.")
+st.caption("Add as many METAR or TAF as needed. They are decoded automatically in the correct style. Charts are analyzed automatically. NOTAMs included as plain text.")
+
 
