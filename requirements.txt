@@ -1,4 +1,5 @@
 streamlit
-pymupdf
+streamlit-cropper
 pillow
 openai
+pymupdf
