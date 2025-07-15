@@ -1,8 +1,7 @@
-python-metar
-avwx-engine
-notams
-Pillow
-fpdf
 streamlit
 streamlit-cropper
+fpdf
+Pillow
 PyMuPDF
+openai
+python-metar
