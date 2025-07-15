@@ -57,34 +57,33 @@ def clean_markdown(text):
     return text.strip()
 
 def ai_chart_analysis(img_base64, chart_type, user_area_desc, extra_instruction="", summarized=False):
-    geo_hint = (
-        "Assume north is up, west is to the left, east is to the right on the chart and south is down. "
-        "If information for Portugal is not clearly visible, state that and do not invent details."
-    )
+    area = user_area_desc.strip() or "the selected area"
+geo_hint = (
+    f"Our area of interest is {area}. "
+    "Assume north is up, south is down, west is left, east is right on the chart. "
+    "Do not mention regions outside the visible or relevant area. "
+    "If the chart does not clearly show this area, state that and do not speculate. "
+    "Avoid listing symbols or explaining the legend. Do not mention AI. Use simple language."
+)
+
     if chart_type.lower().startswith("sigwx"):
         base_prompt = (
-            f"You are a student pilot. Analyze this {chart_type} aviation weather chart in English, in first person plural. "
-            "Our area of interest is Portugal. " + geo_hint + " "
-            "Describe the situation for Portugal and adjacent approaches ONLY, mentioning any significant fronts, weather systems, winds, and potential hazards visible on the chart. "
-            "Avoid confusion between east and west. If unsure, do not speculate. "
-            "Do not repeat the legend. Do not mention AI. Do not use formatting or lists. "
-            "If the user provided extra instructions, follow them. "
-        )
+    f"We are preparing a flight and reviewing a {chart_type} chart. Please analyze the weather conditions that may affect us in {area}. "
+    "Describe any significant weather systems, turbulence, jet streams, cloud tops, or hazards relevant to our route. "
+    "Use first person plural and a practical tone. Only mention what is visible and relevant. " + geo_hint
+)
     elif chart_type.lower().startswith("surface pressure") or "spc" in chart_type.lower():
         base_prompt = (
-            f"You are a student pilot. Analyze this surface pressure (SPC) chart in English, in first person plural. "
-            "Focus on Portugal. " + geo_hint + " "
-            "Summarize the air mass and pressure systems, the wind flow expected for Portugal, and any indications of changes or hazards. "
-            "Never confuse west/east. Do not use formatting or lists. "
-            "If the user provided extra instructions, follow them."
-        )
+    "We are reviewing a surface pressure chart to understand current and upcoming conditions in our flight area. "
+    f"Summarize the pressure systems, expected wind flow, and possible weather transitions over {area}. "
+    "Speak in first person plural. Be concise and only describe what is visible. " + geo_hint
+)
     elif chart_type.lower().startswith("wind and temperature"):
         base_prompt = (
-            f"You are a student pilot. Summarize in one or two sentences the expected wind direction, wind speed, and temperature at the specified flight levels for Portugal and nearby approaches, based on this chart. "
-            + geo_hint +
-            " Use first person plural and speak as if briefing our own flight. Be practical and do not speculate if the chart is unclear. Do not use formatting or lists. "
-            "If the user provided extra instructions, follow them."
-        )
+    f"Based on this wind and temperature chart, summarize the expected wind direction, wind speed, and temperature at the relevant flight levels over {area}. "
+    "Use first person plural. Be brief and practical. If the data is unclear or unreadable, mention that directly. " + geo_hint
+)
+
     else:
         base_prompt = (
             f"You are a student pilot. Analyze this {chart_type} chart for Portugal. "
