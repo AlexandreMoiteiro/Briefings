@@ -445,14 +445,14 @@ def send_report_email(to_email, subject, body, filename, filedata):
     if resp.status_code >= 400:
         st.warning(f"PDF generated but failed to send email (SendGrid error: {resp.text})")
 
-# ----------------- STREAMLIT APP -----------------
+# --------------- STREAMLIT APP -----------------
 st.title("Preflight Weather Briefing and NOTAMs")
 
 with st.expander("1. Pilot/Aircraft Info", expanded=True):
     pilot = st.text_input("Pilot", "")
     aircraft = st.text_input("Aircraft (e.g., Tecnam P2008 (CS-ECD))", "")
     callsign = st.text_input("Callsign", "")
-    mission = st.text_input("Mission #", "")
+    mission = st.text_input("Mission", "")
     date = st.date_input("Date", datetime.date.today())
     time_utc = st.text_input("Expected Flight Time (UTC, e.g. 14:30-16:30)", "")
 
@@ -471,7 +471,11 @@ def metar_taf_block():
     if remove_pair:
         st.session_state.metar_taf_pairs.pop()
 
-def chart_block_multi(chart_key, label, title_base, desc_label="Area/focus for analysis", extra_label="Extra instructions to AI (optional)", has_levels=False, has_source=False, ai_type=None, summarized=False):
+def chart_block_multi(
+    chart_key, label, title_base,
+    desc_label="Area/focus for analysis", extra_label="Extra instructions to AI (optional)",
+    has_levels=False, has_source=False, ai_type=None, summarized=False
+):
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
     st.subheader(label)
@@ -479,14 +483,16 @@ def chart_block_multi(chart_key, label, title_base, desc_label="Area/focus for a
     for i in range(len(chart_list)):
         chart = chart_list[i]
         with st.expander(f"{label} {i+1}", expanded=True):
-            # Input fields
             if has_source:
                 chart["source"] = st.text_input("Source/Organization", value=chart.get("source",""), key=f"{chart_key}_source_{i}")
             if has_levels:
                 chart["levels"] = st.text_input("Applicable Flight Levels (e.g., FL050-FL120)", value=chart.get("levels",""), key=f"{chart_key}_levels_{i}")
             chart["desc"] = st.text_input(desc_label, value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
             chart["extra"] = st.text_area(extra_label, value=chart.get("extra",""), key=f"{chart_key}_extra_{i}")
-            chart_file = st.file_uploader(f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{chart_key}_file_{i}")
+            chart_file = st.file_uploader(
+                f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):", 
+                type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{chart_key}_file_{i}"
+            )
             if chart_file:
                 if chart_file.type == "application/pdf":
                     pdf_bytes = chart_file.read()
@@ -495,27 +501,36 @@ def chart_block_multi(chart_key, label, title_base, desc_label="Area/focus for a
                     img = Image.open(io.BytesIO(page.get_pixmap().tobytes("png"))).convert("RGB").copy()
                 else:
                     img = Image.open(chart_file).convert("RGB").copy()
-                # Full chart for PDF
                 _, img_bytes = downscale_image(img)
                 chart["img_bytes"] = img_bytes
                 st.image(img, caption="Full Chart (included in PDF)")
-                st.info("Only the cropped area will be analyzed by AI, but the full chart will be attached to the PDF.")
-                # --- Cropping UI for AI analysis ---
-                cropped_img = st_cropper(
-                    img,
-                    aspect_ratio=None,
-                    box_color='red',
-                    return_type='image',
-                    realtime_update=True,
-                    key=f"{chart_key}_crop_{i}"
-                )
-                st.image(cropped_img, caption="Selected Area for AI Analysis")
-                _, cropped_bytes = downscale_image(cropped_img)
+                
+                # Crop switch
+                crop_it = st.toggle("Crop chart before AI analysis?", value=chart.get("crop", True), key=f"{chart_key}_crop_switch_{i}")
+                chart["crop"] = crop_it
+
+                if crop_it:
+                    st.info("Only the cropped area will be analyzed by AI, but the full chart will be attached to the PDF.")
+                    cropped_img = st_cropper(
+                        img,
+                        aspect_ratio=None,
+                        box_color='red',
+                        return_type='image',
+                        realtime_update=True,
+                        key=f"{chart_key}_crop_{i}"
+                    )
+                    st.image(cropped_img, caption="Selected Area for AI Analysis")
+                    _, cropped_bytes = downscale_image(cropped_img)
+                else:
+                    cropped_img = img
+                    cropped_bytes = img_bytes
+                    st.info("The entire chart will be analyzed by AI.")
+
                 chart["cropped_img_bytes"] = cropped_bytes
-                # AI analysis only on cropped area
-                if "ai_text" not in chart or st.button(f"Regenerate AI analysis {i+1}", key=f"{chart_key}_regen_{i}"):
+                # AI analysis button label
+                gen_label = "Generate AI analysis" if not chart.get("ai_text") else "Regenerate AI analysis"
+                if st.button(f"{gen_label} {i+1}", key=f"{chart_key}_regen_{i}"):
                     img_b64 = base64.b64encode(cropped_bytes.getvalue()).decode("utf-8")
-                    # Compose chart_type for prompt
                     prompt_chart_type = ai_type or title_base
                     chart["ai_text"] = ai_chart_analysis(
                         img_b64,
@@ -524,18 +539,19 @@ def chart_block_multi(chart_key, label, title_base, desc_label="Area/focus for a
                         extra_instruction=chart.get("extra", ""),
                         summarized=summarized
                     )
-                chart["ai_text"] = st.text_area("Edit/Approve AI Analysis", value=chart.get("ai_text",""), key=f"{chart_key}_aitxt_{i}", height=150 if not summarized else 90)
+                if chart.get("ai_text"):
+                    chart["ai_text"] = st.text_area(
+                        "Edit/Approve AI Analysis", value=chart["ai_text"],
+                        key=f"{chart_key}_aitxt_{i}", height=150 if not summarized else 90
+                    )
             else:
                 chart["img_bytes"] = None
                 chart["ai_text"] = ""
     addcol, rmcol = st.columns([0.24,0.24])
     if addcol.button(f"Add {label}"):
-        # default fields per chart type
         new_chart = {"desc": "Portugal", "extra": "", "img_bytes": None, "ai_text": ""}
-        if has_source:
-            new_chart["source"] = ""
-        if has_levels:
-            new_chart["levels"] = ""
+        if has_source: new_chart["source"] = ""
+        if has_levels: new_chart["levels"] = ""
         st.session_state[chart_key].append(new_chart)
     if len(chart_list) > 1 and rmcol.button(f"Remove last {label}"):
         chart_list.pop()
@@ -634,7 +650,7 @@ if ready:
                         user_desc=chart.get("desc","")
                     )
             pdf.notam_section(st.session_state.notam_data)
-            out_pdf = f"weather_and_notam_{ascii_safe(mission)}.pdf"
+            out_pdf = f"weather_and_notam_mission_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
                 pdf_bytes = f.read()
@@ -666,6 +682,8 @@ if ready:
                 st.warning(f"PDF generated, but failed to email admin: {e}")
 else:
     st.info("Fill all sections and upload at least one chart of each type before generating your PDF.")
+
+
 
 
 
