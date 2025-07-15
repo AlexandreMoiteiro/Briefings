@@ -1,5 +1,5 @@
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image
 import openai
 import io
 import base64
@@ -10,7 +10,8 @@ import datetime
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-def downscale_image(img, width=900):
+def downscale_image(img, width=1200):
+    # Higher res for PDF quality
     if img.width > width:
         ratio = width / img.width
         new_size = (width, int(img.height * ratio))
@@ -20,149 +21,121 @@ def downscale_image(img, width=900):
     img_bytes.seek(0)
     return img, img_bytes
 
-def draw_crop_rectangle(img, crop_box, outline="red", width=5):
-    """Draws a rectangle (crop_box = left, upper, right, lower) on the image."""
-    img = img.copy()
-    draw = ImageDraw.Draw(img)
-    draw.rectangle(crop_box, outline=outline, width=width)
-    return img
-
-def ai_chart_analysis(img_base64, chart_type, bullet_style=True):
-    # Use "practical pilot preflight bullets" style
-    if chart_type == "SPC":
-        prompt = (
-            "You are a pilot preparing a preflight weather briefing. You've focused your attention on the boxed area shown in the attached surface pressure chart. "
-            "Summarize the synoptic situation, significant weather features, and expectations for VFR/IFR in that boxed region. "
-            + ("Present your notes as clear, concise bullet points, suitable for a real pilot's preflight briefing. Avoid technical jargon and robotic style."
-            if bullet_style else
-            "Write your notes in full sentences as if making personal pilot notes, without using bullet points or lists. Be concise.")
-        )
+def ai_spc_analysis(crop_base64, focus_desc):
+    prompt = (
+    "You are an aviation meteorology instructor. The image is a surface pressure chart (SPC) showing a selected region (e.g., Portugal or the Iberian Peninsula). "
+    "Provide a concise, structured report for a flight briefing PDF. Phrase your report as: "
+    "'In the area over [describe area in the image, e.g., Portugal or the Iberian Peninsula], the situation is as follows: ...'. "
+    "Summarize: synoptic situation, fronts, wind, cloud cover, and VFR/IFR/weather hazards. "
+    "Only base your analysis on the area shown in the image."
+)
+    if focus_desc.strip():
+        user_focus = f"Focus on: {focus_desc.strip()}"
     else:
-        prompt = (
-            "You are a pilot preparing a preflight weather briefing. After reviewing the attached significant weather chart (SIGWX), write practical briefing notes about weather, turbulence, clouds, icing, and flight hazards across the area shown. "
-            + ("Use clear, concise bullet points, suitable for a pilot's preflight briefing."
-            if bullet_style else
-            "Use full sentences as if making personal pilot notes, without using bullet points.")
-        )
-    messages = [
-        {"role": "system", "content": "You are a pilot writing a preflight weather briefing for other pilots."},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-            ]
-        }
-    ]
+        user_focus = "Brief only for the region in the cropped image."
     response = openai.chat.completions.create(
         model="gpt-4o",
-        messages=messages,
+        messages=[
+            {"role": "system", "content": prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_focus},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{crop_base64}"}}
+                ]
+            }
+        ],
         max_tokens=650,
-        temperature=0.4
+        temperature=0.45
+    )
+    return response.choices[0].message.content
+
+def ai_sigwx_analysis(full_base64, focus_desc):
+    prompt = (
+        "You are an aviation meteorology instructor. Analyze the attached significant weather chart (SIGWX) for a flight briefing PDF. "
+        "If a focus is provided, only analyze that region, otherwise cover the whole area. Structure your report with: "
+        "1) Cloud types, amounts, altitudes; 2) Turbulence areas/severity; 3) Significant phenomena (CBs, icing, etc.); "
+        "4) Freezing levels and flight hazards."
+    )
+    if focus_desc.strip():
+        user_focus = f"Focus on: {focus_desc.strip()}"
+    else:
+        user_focus = "Brief for the whole area of the chart."
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_focus},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{full_base64}"}}
+                ]
+            }
+        ],
+        max_tokens=650,
+        temperature=0.45
     )
     return response.choices[0].message.content
 
 class BriefingPDF(FPDF):
-    def cover_page(self, mission, pilot, aircraft, date, callsign, remarks=""):
+    def cover(self, mission, date, pilot, aircraft, callsign):
         self.add_page()
-        # Nice dark header
-        self.set_fill_color(36, 44, 74)
-        self.rect(0, 0, 210, 35, 'F')
-        self.set_xy(10, 8)
+        self.set_fill_color(34, 34, 34)
+        self.rect(0, 0, 210, 40, 'F')
+        self.set_font("Arial", 'B', 22)
         self.set_text_color(255,255,255)
-        self.set_font("Arial", 'B', 21)
-        self.cell(0, 11, "Preflight Weather Briefing", ln=True)
-        self.set_font("Arial", '', 12)
-        self.ln(2)
-        self.set_text_color(0,0,0)
+        self.set_xy(10, 14)
+        self.cell(0, 12, "Preflight Briefing Package", ln=1, align='L')
         self.set_font("Arial", '', 13)
-        self.ln(18)
-        self.set_x(12)
-        self.set_font("Arial", 'B', 12)
-        self.cell(37, 8, "Mission Number:", 0)
-        self.set_font("Arial", '', 12)
-        self.cell(0, 8, str(mission), ln=1)
-        self.set_x(12)
-        self.set_font("Arial", 'B', 12)
-        self.cell(37, 8, "Pilot:", 0)
-        self.set_font("Arial", '', 12)
-        self.cell(0, 8, pilot, ln=1)
-        self.set_x(12)
-        self.set_font("Arial", 'B', 12)
-        self.cell(37, 8, "Aircraft:", 0)
-        self.set_font("Arial", '', 12)
-        self.cell(0, 8, aircraft, ln=1)
-        self.set_x(12)
-        self.set_font("Arial", 'B', 12)
-        self.cell(37, 8, "Callsign:", 0)
-        self.set_font("Arial", '', 12)
-        self.cell(0, 8, callsign, ln=1)
-        self.set_x(12)
-        self.set_font("Arial", 'B', 12)
-        self.cell(37, 8, "Date:", 0)
-        self.set_font("Arial", '', 12)
-        self.cell(0, 8, date, ln=1)
-        if remarks:
-            self.set_x(12)
-            self.set_font("Arial", 'B', 12)
-            self.cell(37, 8, "Remarks:", 0)
-            self.set_font("Arial", '', 12)
-            self.multi_cell(0, 8, remarks)
-        self.ln(8)
+        self.cell(0, 8, f"Mission: {mission}", ln=1)
+        self.cell(0, 8, f"Date: {date}", ln=1)
+        self.cell(0, 8, f"Pilot: {pilot}", ln=1)
+        self.cell(0, 8, f"Aircraft: {aircraft}", ln=1)
+        self.cell(0, 8, f"Callsign: {callsign}", ln=1)
+        self.ln(10)
 
-    def chart_section_spc(self, full_img_bytes, cropped_img_bytes, ai_text):
+    def add_section(self, title, images, captions, ai_text):
         self.add_page()
-        self.set_font("Arial", 'B', 14)
-        self.cell(0, 9, "Surface Pressure Chart (SPC)", ln=True)
-        self.set_font("Arial", 'I', 11)
-        self.cell(0, 8, "Full chart with boxed analysis area (red).", ln=True)
-        # Insert full chart with rectangle
-        chart_img_path = "spc_full_rect.png"
-        with open(chart_img_path, "wb") as f:
-            f.write(full_img_bytes.getvalue())
-        self.image(chart_img_path, x=17, w=170)
+        self.set_font("Arial", 'B', 16)
+        self.set_text_color(0, 0, 0)
+        self.cell(0, 12, title, ln=1)
         self.ln(3)
-        self.set_font("Arial", 'I', 11)
-        self.cell(0, 8, "Cropped area (zoom-in):", ln=True)
-        # Insert cropped area
-        chart_img_crop_path = "spc_cropped.png"
-        with open(chart_img_crop_path, "wb") as f:
-            f.write(cropped_img_bytes.getvalue())
-        self.image(chart_img_crop_path, x=48, w=110)
-        self.ln(6)
-        # AI Notes
-        self.set_font("Arial", '', 11)
+        for img_bytes, cap in zip(images, captions):
+            if img_bytes:
+                img_path = f"tmp_{hash(img_bytes)}.png"
+                with open(img_path, "wb") as f:
+                    f.write(img_bytes.getvalue())
+                self.image(img_path, x=18, w=175)
+                if cap:
+                    self.set_font("Arial", 'I', 11)
+                    self.cell(0, 9, cap, ln=1)
+                self.ln(2)
+        self.set_font("Arial", '', 12)
         self.multi_cell(0, 8, ai_text)
-        self.ln(1)
+        self.ln(2)
 
-    def chart_section_sigwx(self, img_bytes, ai_text):
-        self.add_page()
-        self.set_font("Arial", 'B', 14)
-        self.cell(0, 9, "Significant Weather Chart (SIGWX)", ln=True)
-        self.set_font("Arial", 'I', 11)
-        self.cell(0, 8, "Full chart for briefing area.", ln=True)
-        chart_img_path = "sigwx_full.png"
-        with open(chart_img_path, "wb") as f:
-            f.write(img_bytes.getvalue())
-        self.image(chart_img_path, x=17, w=170)
-        self.ln(7)
-        self.set_font("Arial", '', 11)
-        self.multi_cell(0, 8, ai_text)
-        self.ln(1)
-
-st.title("Preflight Briefing Package (SPC & SIGWX)")
-
+st.title("Preflight Briefing PDF: SPC + SIGWX")
 st.markdown("""
-**1. Upload your SPC and crop the box for analysis (a red box will be shown on the full chart).**  
-**2. Upload SIGWX (full chart is used).**  
-**3. Fill in your briefing info and generate your PDF.**  
-**SPC: AI focuses only on the area inside the red box (do NOT mention an area name).**
-""")
+- Upload your **Surface Pressure Chart (SPC)** and crop/select your focus area.  
+- Upload your **Significant Weather Chart (SIGWX)** (full chart, no cropping).  
+- Add a note for AI to focus its analysis if you wish.  
+- The PDF will include: a cover, both full charts, the cropped SPC focus, and structured AI analyses.
+""", unsafe_allow_html=True)
 
-# --- SPC Upload and Crop ---
-st.subheader("Surface Pressure Chart (SPC)")
+col1, col2 = st.columns(2)
+with col1:
+    mission = st.text_input("Mission number", "")
+    date = st.date_input("Date", datetime.date.today())
+with col2:
+    pilot = st.text_input("Pilot", "")
+    aircraft = st.text_input("Aircraft", "")
+    callsign = st.text_input("Callsign", "")
+
+st.markdown("### Surface Pressure Chart (SPC)")
 spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
-cropped_spc_img, spc_img_bytes, spc_full_img_bytes, spc_full_img_for_box, crop_box = None, None, None, None, None
+spc_img, spc_img_bytes, cropped_spc_img, cropped_spc_bytes = None, None, None, None
+
 if spc_file:
     if spc_file.type == "application/pdf":
         pdf_bytes = spc_file.read()
@@ -172,7 +145,10 @@ if spc_file:
         spc_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
     else:
         spc_img = Image.open(spc_file).convert("RGB").copy()
-    st.markdown("**Crop the box for the area you want analyzed (AI focuses only inside this box, but the full chart with the box will appear in the PDF).**")
+    spc_img, spc_img_bytes = downscale_image(spc_img, width=1200)
+    st.image(spc_img, caption="Full SPC Chart (will be shown in PDF)")
+
+    st.markdown("**Crop/select the focus area for analysis (e.g., Portugal, Iberian Peninsula).**")
     cropped_spc_img = st_cropper(
         spc_img,
         aspect_ratio=None,
@@ -181,27 +157,16 @@ if spc_file:
         realtime_update=True,
         key="spc_crop"
     )
-    # Get crop coordinates from session state for rectangle overlay
-    crop_info = st.session_state.get("spc_crop_crop_box", None)
-    if crop_info:
-        left = int(crop_info['left'])
-        top = int(crop_info['top'])
-        right = left + int(crop_info['width'])
-        bottom = top + int(crop_info['height'])
-        crop_box = (left, top, right, bottom)
-        spc_img_with_box = draw_crop_rectangle(spc_img, crop_box, outline="red", width=5)
-    else:
-        spc_img_with_box = spc_img
-    _, spc_img_bytes = downscale_image(cropped_spc_img)
-    _, spc_full_img_bytes = downscale_image(spc_img_with_box)
-    _, spc_full_img_for_box = downscale_image(spc_img)  # for pdf
-    st.image(spc_img_with_box, caption="Full SPC Chart with Red Box (will appear in PDF)")
-    st.image(cropped_spc_img, caption="Cropped Area (AI analyzes this only, also in PDF)")
+    st.image(cropped_spc_img, caption="SPC Focus Area for AI Analysis")
+    cropped_spc_img, cropped_spc_bytes = downscale_image(cropped_spc_img, width=600)
 
-# --- SIGWX Upload (no crop) ---
-st.subheader("Significant Weather Chart (SIGWX)")
+spc_focus = st.text_input("SPC: Describe the focus area (e.g., 'over Portugal', optional)", "")
+
+st.markdown("---")
+st.markdown("### Significant Weather Chart (SIGWX)")
 sigwx_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="sigwx")
-sigwx_img_bytes = None
+sigwx_img, sigwx_img_bytes = None, None
+
 if sigwx_file:
     if sigwx_file.type == "application/pdf":
         pdf_bytes = sigwx_file.read()
@@ -211,40 +176,39 @@ if sigwx_file:
         sigwx_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
     else:
         sigwx_img = Image.open(sigwx_file).convert("RGB").copy()
-    _, sigwx_img_bytes = downscale_image(sigwx_img)
-    st.image(sigwx_img, caption="Full SIGWX Chart (will appear in PDF)")
+    sigwx_img, sigwx_img_bytes = downscale_image(sigwx_img, width=1200)
+    st.image(sigwx_img, caption="Full SIGWX Chart (will be shown in PDF)")
 
-# --- Briefing Metadata ---
-st.subheader("Briefing Information")
-col1, col2 = st.columns(2)
-with col1:
-    mission = st.text_input("Mission Number", "")
-    pilot = st.text_input("Pilot", "")
-with col2:
-    aircraft = st.text_input("Aircraft", "")
-    callsign = st.text_input("Callsign", "")
-    date = st.date_input("Date", datetime.date.today())
-remarks = st.text_area("Remarks / Route / Objectives (optional)", "")
+sigwx_focus = st.text_input("SIGWX: Describe the focus for AI (optional)", "")
 
-if st.button("Generate PDF Report", disabled=not (spc_img_bytes and sigwx_img_bytes and mission and pilot and aircraft and callsign)):
-    with st.spinner("Generating PDF and calling AI..."):
-        pdf = BriefingPDF()
-        pdf.set_auto_page_break(auto=True, margin=12)
-        pdf.cover_page(mission, pilot, aircraft, str(date), callsign, remarks)
-        # AI analysis: SPC (cropped box), full image for PDF
-        spc_base64 = base64.b64encode(spc_img_bytes.getvalue()).decode("utf-8")
-        spc_ai_text = ai_chart_analysis(spc_base64, "SPC", bullet_style=True)
-        pdf.chart_section_spc(
-            full_img_bytes=spc_full_img_bytes,
-            cropped_img_bytes=spc_img_bytes,
-            ai_text=spc_ai_text
-        )
-        # AI analysis: SIGWX (full chart)
+can_generate = all([
+    mission, pilot, aircraft, callsign, date,
+    spc_img_bytes, cropped_spc_bytes, sigwx_img_bytes
+])
+
+if st.button("Generate PDF Briefing", disabled=not can_generate):
+    with st.spinner("Calling AI and generating PDF..."):
+        # SPC AI
+        spc_crop_base64 = base64.b64encode(cropped_spc_bytes.getvalue()).decode("utf-8")
+        spc_report = ai_spc_analysis(spc_crop_base64, spc_focus)
+        # SIGWX AI
         sigwx_base64 = base64.b64encode(sigwx_img_bytes.getvalue()).decode("utf-8")
-        sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", bullet_style=True)
-        pdf.chart_section_sigwx(
-            img_bytes=sigwx_img_bytes,
-            ai_text=sigwx_ai_text
+        sigwx_report = ai_sigwx_analysis(sigwx_base64, sigwx_focus)
+
+        # PDF
+        pdf = BriefingPDF()
+        pdf.cover(mission, str(date), pilot, aircraft, callsign)
+        pdf.add_section(
+            "Surface Pressure Chart (SPC)",
+            images=[spc_img_bytes, cropped_spc_bytes],
+            captions=["Full SPC Chart", "Focus area for analysis (see report below)"],
+            ai_text=spc_report
+        )
+        pdf.add_section(
+            "Significant Weather Chart (SIGWX)",
+            images=[sigwx_img_bytes],
+            captions=["Full SIGWX Chart"],
+            ai_text=sigwx_report
         )
         out_pdf = "Preflight_Briefing.pdf"
         pdf.output(out_pdf)
@@ -257,7 +221,7 @@ if st.button("Generate PDF Report", disabled=not (spc_img_bytes and sigwx_img_by
             )
         st.success("PDF generated successfully!")
 
-st.caption("SPC: Full chart with red analysis box plus zoom-in and notes. SIGWX: Full chart and notes. Bullet points style, practical for real-world briefing.")
+st.caption("This PDF contains both full charts and structured AI briefings based on your selected/focus areas.")
 
 
 
