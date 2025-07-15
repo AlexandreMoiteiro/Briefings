@@ -64,7 +64,7 @@ def ai_chart_analysis(img_base64, chart_type, user_area_desc, extra_instruction=
     )
     area = user_area_desc.strip() or "Portugal"
     if summarized:
-        prompt = "In one or two sentences, summarize what we should expect at the indicated flight levels for our flight, in the first person plural, for this wind and temperature chart."
+        prompt = "Summarize what we should expect at the indicated flight levels for our flight, in the first person plural, for this wind and temperature chart."
     else:
         prompt = f"Focus on: {area}. {extra_instruction}"
     response = openai.chat.completions.create(
