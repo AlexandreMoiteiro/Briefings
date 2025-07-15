@@ -5,8 +5,8 @@ import io
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-def downscale_image(image_file, width=1200):
-    img = Image.open(image_file)
+def downscale_image(img, width=1200):
+    # Receives a PIL Image, returns (resized_img, img_bytes as PNG)
     if img.width > width:
         ratio = width / img.width
         new_size = (width, int(img.height * ratio))
@@ -17,10 +17,13 @@ def downscale_image(image_file, width=1200):
     return img, img_bytes
 
 st.title("SPC AI Analysis – Portugal Focused")
-spc_file = st.file_uploader("Upload SPC Chart (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"])
+spc_file = st.file_uploader(
+    "Upload SPC Chart (PDF, PNG, JPG, JPEG, GIF):",
+    type=["pdf", "png", "jpg", "jpeg", "gif"]
+)
 
 if spc_file:
-    # If PDF, extract first page as image
+    # Handle PDF (convert first page to image)
     if spc_file.type == "application/pdf":
         import fitz
         pdf_doc = fitz.open(stream=spc_file.read(), filetype="pdf")
@@ -29,8 +32,10 @@ if spc_file:
         img = Image.open(io.BytesIO(pix.tobytes("png")))
     else:
         img = Image.open(spc_file)
-    
+
+    # Downscale image for token/cost efficiency
     img, img_bytes = downscale_image(img)
+
     st.image(img, caption="SPC Chart for Analysis", use_column_width=True)
 
     if st.button("Analyze SPC (Portugal & Vicinity Only)"):
@@ -50,7 +55,7 @@ if spc_file:
                         ]
                     }
                 ],
-                max_tokens=500,  # Restricts reply length
+                max_tokens=500,
                 temperature=0.5
             )
             gpt_response = result.choices[0].message.content
@@ -60,5 +65,6 @@ else:
     st.info("Upload a Surface Pressure Chart to start.")
 
 st.caption("This analysis is limited to Portugal and vicinity for maximum efficiency.")
+
 
 
