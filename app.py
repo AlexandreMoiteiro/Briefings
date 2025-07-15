@@ -228,9 +228,9 @@ with st.expander("3. Significant Weather Chart (SIGWX)", expanded=True):
 
 # --- NOTAMs/METARs/TAFs (Multiple) ---
 with st.expander("4. NOTAMs, METARs, TAFs"):
-    notams = st.text_area("Paste NOTAMs here (one per line, or blank):", height=60, key="notam_area")
-    metars = st.text_area("Paste METARs here (one per line, or blank):", height=60, key="metar_area")
-    tafs = st.text_area("Paste TAFs here (one per line, or blank):", height=60, key="taf_area")
+    notams = st.text_area("Paste NOTAMs here (one per line, or blank):", height=80, key="notam_area")
+    metars = st.text_area("Paste METARs here (one per line, or blank):", height=80, key="metar_area")
+    tafs   = st.text_area("Paste TAFs here (one per line, or blank):", height=80, key="taf_area")
 
 ready = st.session_state.get("spc_full_bytes") and st.session_state.get("cropped_spc_bytes") and st.session_state.get("sigwx_img_bytes")
 if ready:
@@ -253,7 +253,7 @@ if ready:
             sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", st.session_state["sigwx_desc"])
             pdf.chart_section(
                 title="Significant Weather Chart (SIGWX)",
-                img_bytes=st.session_state["sigwx_img_bytes"],
+                img_bytes=st.session_state["sigwx_img_bytes"],  # <-- SIGWX image only!
                 ai_text=sigwx_ai_text,
                 user_desc=st.session_state["sigwx_desc"]
             )
@@ -289,5 +289,4 @@ else:
     st.info("Upload and crop the SPC, upload the SIGWX, and fill the info above before generating your PDF.")
 
 st.caption("Charts are included in the PDF. Paste NOTAMs, METARs, TAFs for natural-language decoding. Layout matches Mass & Balance PDF style. For further customizations, ask!")
-
 
