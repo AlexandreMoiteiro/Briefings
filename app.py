@@ -3,7 +3,6 @@ from PIL import Image
 import openai
 import io
 import base64
-from streamlit_cropper import st_cropper
 from fpdf import FPDF
 import fitz
 import datetime
@@ -23,6 +22,7 @@ SENDER_EMAIL = "alexandre.moiteiro@students.sevenair.com"
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 AIRPORTS = airportsdata.load('ICAO')
 
+# ---- UTILS ----
 def ascii_safe(text):
     if not isinstance(text, str):
         text = str(text)
@@ -232,6 +232,7 @@ def decode_taf(taf_code):
     lines.extend([wind_str, wind_speed, vis_str, clouds_str, wx_str])
     return "\n".join([l for l in lines if l.strip()])
 
+# --- PDF Class ---
 class BriefingPDF(FPDF):
     def header(self): pass
     def footer(self):
@@ -420,8 +421,7 @@ def send_report_email(to_email, subject, body, filename, filedata):
     if resp.status_code >= 400:
         st.warning(f"PDF generated but failed to send email (SendGrid error: {resp.text})")
 
-# ---- INPUT UI ----
-
+# --- INPUT BLOCKS ---
 st.title("Preflight Weather Briefing and NOTAMs")
 
 with st.expander("1. Pilot/Aircraft Info", expanded=True):
@@ -447,9 +447,6 @@ def metar_taf_block():
     if remove_pair:
         st.session_state.metar_taf_pairs.pop()
 
-metar_taf_block()
-
-# 3. MULTI-SIGWX block
 def multi_sigwx_block():
     if "sigwx_charts" not in st.session_state:
         st.session_state.sigwx_charts = []
@@ -480,51 +477,82 @@ def multi_sigwx_block():
         st.session_state.sigwx_charts.append({"source": "", "desc": "Portugal", "img_bytes": None})
     if num_sigwx > 1 and rmcol.button("Remove last SIGWX chart"):
         st.session_state.sigwx_charts.pop()
+
+def windtemp_block():
+    with st.expander("4. Wind and Temperature Chart", expanded=True):
+        windtemp_file = st.file_uploader("Upload Wind/Temp Chart (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="windtemp")
+        windtemp_desc = st.text_input("Area/focus for analysis (default: Portugal)", value="Portugal", key="windtempdesc")
+        if windtemp_file:
+            if windtemp_file.type == "application/pdf":
+                pdf_bytes = windtemp_file.read()
+                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                page = pdf_doc.load_page(0)
+                pix = page.get_pixmap()
+                windtemp_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
+            else:
+                windtemp_img = Image.open(windtemp_file).convert("RGB").copy()
+            _, windtemp_img_bytes = downscale_image(windtemp_img)
+            st.session_state["windtemp_img_bytes"] = windtemp_img_bytes
+            st.image(windtemp_img, caption="Wind & Temp Chart (included in PDF)")
+        else:
+            st.session_state["windtemp_img_bytes"] = None
+
+def spc_block():
+    with st.expander("5. Surface Pressure Chart (SPC)", expanded=True):
+        spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
+        spc_desc = st.text_input("Area/focus for analysis (default: Portugal)", value="Portugal", key="spcdesc")
+        if spc_file:
+            if spc_file.type == "application/pdf":
+                pdf_bytes = spc_file.read()
+                pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                page = pdf_doc.load_page(0)
+                pix = page.get_pixmap()
+                spc_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
+            else:
+                spc_img = Image.open(spc_file).convert("RGB").copy()
+            _, spc_full_bytes = downscale_image(spc_img)
+            st.session_state["spc_full_bytes"] = spc_full_bytes
+            st.image(spc_img, caption="SPC: Full Chart (included in PDF)")
+        else:
+            st.session_state["spc_full_bytes"] = None
+        st.session_state["spc_desc"] = spc_desc
+
+def sigmet_block():
+    st.subheader("6. En-route Weather Warnings (SIGMET/AIRMET/GAMET)")
+    return st.text_area("SIGMET/AIRMET/GAMET:", height=110, key="sigmet_area")
+
+def notam_block():
+    if "notam_data" not in st.session_state:
+        st.session_state.notam_data = [{"aero": "", "notams": [{"num":"", "text":""}]}]
+    st.subheader("7. NOTAMs by Aerodrome")
+    for idx, entry in enumerate(st.session_state.notam_data):
+        with st.expander(f"NOTAMs for Aerodrome {idx+1}", expanded=True):
+            entry["aero"] = st.text_input("Aerodrome ICAO or Name", value=entry["aero"], key=f"notam_aero_{idx}")
+            num_notams = len(entry["notams"])
+            for nidx in range(num_notams):
+                cols = st.columns([0.22, 0.78])
+                entry["notams"][nidx]["num"] = cols[0].text_input("NOTAM Number", value=entry["notams"][nidx]["num"], key=f"notam_num_{idx}_{nidx}")
+                entry["notams"][nidx]["text"] = cols[1].text_area(f"NOTAM {nidx+1} Text", value=entry["notams"][nidx]["text"], key=f"notam_text_{idx}_{nidx}")
+            col_add, col_rm = st.columns([0.22,0.22])
+            if col_add.button("Add NOTAM", key=f"addnotam_{idx}"):
+                entry["notams"].append({"num":"","text":""})
+            if num_notams > 1 and col_rm.button("Remove NOTAM", key=f"rmnotam_{idx}"):
+                entry["notams"].pop()
+    btncols = st.columns([0.23,0.23])
+    if btncols[0].button("Add Aerodrome NOTAM"):
+        st.session_state.notam_data.append({"aero":"", "notams":[{"num":"","text":""}]})
+    if len(st.session_state.notam_data)>1 and btncols[1].button("Remove Last Aerodrome NOTAM"):
+        st.session_state.notam_data.pop()
+
+# --- UI Flow ---
+metar_taf_block()
 multi_sigwx_block()
-
-# 4. WIND & TEMP CHART
-with st.expander("4. Wind and Temperature Chart", expanded=True):
-    windtemp_file = st.file_uploader("Upload Wind/Temp Chart (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="windtemp")
-    windtemp_desc = st.text_input("Area/focus for analysis (default: Portugal)", value="Portugal", key="windtempdesc")
-    if windtemp_file:
-        if windtemp_file.type == "application/pdf":
-            pdf_bytes = windtemp_file.read()
-            pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            page = pdf_doc.load_page(0)
-            pix = page.get_pixmap()
-            windtemp_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
-        else:
-            windtemp_img = Image.open(windtemp_file).convert("RGB").copy()
-        _, windtemp_img_bytes = downscale_image(windtemp_img)
-        st.session_state["windtemp_img_bytes"] = windtemp_img_bytes
-        st.image(windtemp_img, caption="Wind & Temp Chart (included in PDF)")
-    else:
-        st.session_state["windtemp_img_bytes"] = None
-
-# 5. SPC chart
-with st.expander("5. Surface Pressure Chart (SPC)", expanded=True):
-    spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
-    spc_desc = st.text_input("Area/focus for analysis (default: Portugal)", value="Portugal", key="spcdesc")
-    if spc_file:
-        if spc_file.type == "application/pdf":
-            pdf_bytes = spc_file.read()
-            pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            page = pdf_doc.load_page(0)
-            pix = page.get_pixmap()
-            spc_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
-        else:
-            spc_img = Image.open(spc_file).convert("RGB").copy()
-        _, spc_full_bytes = downscale_image(spc_img)
-        st.session_state["spc_full_bytes"] = spc_full_bytes
-        st.image(spc_img, caption="SPC: Full Chart (included in PDF)")
-    else:
-        st.session_state["spc_full_bytes"] = None
-    st.session_state["spc_desc"] = spc_desc
-
+windtemp_block()
+spc_block()
 sigmet_gamet_text = sigmet_block()
 notam_block()
 
-# READY LOGIC
+# --- READY STATE AND GENERATE PDF ---
 charts_ready = (
     st.session_state.get("spc_full_bytes")
     and st.session_state.get("windtemp_img_bytes")
@@ -545,7 +573,6 @@ if charts_ready:
                 pdf.metar_taf_section(metar_taf_pairs)
             sigmet_ai_summary = ai_sigmet_summary(sigmet_gamet_text) if sigmet_gamet_text.strip() else ""
             pdf.enroute_section(sigmet_gamet_text, sigmet_ai_summary)
-            # --- SIGWX section(s) ---
             sigwx_list = []
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
@@ -558,14 +585,12 @@ if charts_ready:
                         "ai_text": ai_text
                     })
             pdf.sigwx_sections(sigwx_list)
-            # --- Wind and Temperature Chart ---
             windtemp_bytes = st.session_state.get("windtemp_img_bytes")
             windtemp_desc = st.session_state.get("windtempdesc", "Portugal")
             if windtemp_bytes:
                 windtemp_base64 = base64.b64encode(windtemp_bytes.getvalue()).decode("utf-8")
                 windtemp_ai = ai_chart_analysis(windtemp_base64, "Wind and Temperature Chart", windtemp_desc)
                 pdf.chart_section("Wind & Temperature Chart", windtemp_bytes, windtemp_ai, user_desc=windtemp_desc)
-            # --- SPC (Full chart!) ---
             spc_bytes = st.session_state.get("spc_full_bytes")
             spc_desc = st.session_state.get("spc_desc", "Portugal")
             if spc_bytes:
@@ -583,7 +608,6 @@ if charts_ready:
                     file_name=out_pdf,
                     mime="application/pdf"
                 )
-            # Email to admin
             try:
                 email_body = (
                     f"Pilot: {pilot}\n"
@@ -606,9 +630,6 @@ if charts_ready:
                 st.warning(f"PDF generated, but failed to email admin: {e}")
 else:
     st.info("Fill all sections and upload all required charts before generating your PDF.")
-
-
-
 
 
 
