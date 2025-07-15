@@ -91,21 +91,16 @@ class BriefingPDF(FPDF):
         self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
         self.ln(10)
-    def code_decode_section(self, section_title, codes, decodes):
+    def pair_section(self, section_title, pairs):
         self.section_header(section_title)
-        self.set_font("Arial", 'B', 12)
-        self.cell(0, 8, ascii_safe("Raw Code(s):"), ln=True)
-        self.set_font("Arial", '', 11)
-        for line in codes:
-            self.multi_cell(0, 7, ascii_safe(line))
-            self.ln(1)
-        self.set_font("Arial", 'B', 12)
-        self.cell(0, 8, ascii_safe("Decoded/Plain Language:"), ln=True)
-        self.set_font("Arial", '', 11)
-        for line in decodes:
-            self.multi_cell(0, 7, ascii_safe(line))
-            self.ln(1)
-        self.ln(2)
+        for i, (code, decode) in enumerate(pairs, 1):
+            self.set_font("Arial", 'B', 12)
+            self.cell(0, 7, ascii_safe(f"{section_title[:-1]} #{i}"), ln=True)
+            self.set_font("Arial", '', 11)
+            self.multi_cell(0, 7, ascii_safe(code))
+            self.set_font("Arial", 'I', 11)
+            self.multi_cell(0, 7, ascii_safe(decode))
+            self.ln(2)
     def chart_section(self, title, img_bytes, ai_text, user_desc=""):
         self.add_page()
         self.section_header(title)
@@ -144,13 +139,51 @@ with st.expander("1. Pilot/Aircraft Info", expanded=True):
     callsign = st.text_input("Callsign", "")
     date = st.date_input("Date", datetime.date.today())
 
-with st.expander("2. METARs"):
-    metar_codes = st.text_area("Paste all METARs (one per line):", height=80, key="metar_code_area")
-    metar_decodes = st.text_area("Paste the corresponding decoded/summary (one per line):", height=80, key="metar_decode_area")
+# Dynamic METAR input
+if "metar_list" not in st.session_state:
+    st.session_state.metar_list = [("", "")]
+st.subheader("2. METARs")
+remove_metar = st.button("Remove last METAR") if len(st.session_state.metar_list) > 1 else None
+for i, (metar, metar_decoded) in enumerate(st.session_state.metar_list):
+    col1, col2 = st.columns(2)
+    with col1:
+        st.session_state.metar_list[i] = (
+            st.text_area(f"METAR #{i+1} (raw code)", value=metar, key=f"metar_{i}"),
+            st.session_state.metar_list[i][1]
+        )
+    with col2:
+        st.session_state.metar_list[i] = (
+            st.session_state.metar_list[i][0],
+            st.text_area(f"METAR #{i+1} (decoded/summary)", value=metar_decoded, key=f"metar_decoded_{i}")
+        )
+if st.button("Add another METAR"):
+    st.session_state.metar_list.append(("", ""))
 
-with st.expander("3. TAFs"):
-    taf_codes = st.text_area("Paste all TAFs (one per line):", height=80, key="taf_code_area")
-    taf_decodes = st.text_area("Paste the corresponding decoded/summary (one per line):", height=80, key="taf_decode_area")
+if remove_metar:
+    st.session_state.metar_list.pop()
+
+# Dynamic TAF input
+if "taf_list" not in st.session_state:
+    st.session_state.taf_list = [("", "")]
+st.subheader("3. TAFs")
+remove_taf = st.button("Remove last TAF") if len(st.session_state.taf_list) > 1 else None
+for i, (taf, taf_decoded) in enumerate(st.session_state.taf_list):
+    col1, col2 = st.columns(2)
+    with col1:
+        st.session_state.taf_list[i] = (
+            st.text_area(f"TAF #{i+1} (raw code)", value=taf, key=f"taf_{i}"),
+            st.session_state.taf_list[i][1]
+        )
+    with col2:
+        st.session_state.taf_list[i] = (
+            st.session_state.taf_list[i][0],
+            st.text_area(f"TAF #{i+1} (decoded/summary)", value=taf_decoded, key=f"taf_decoded_{i}")
+        )
+if st.button("Add another TAF"):
+    st.session_state.taf_list.append(("", ""))
+
+if remove_taf:
+    st.session_state.taf_list.pop()
 
 with st.expander("4. Significant Weather Chart (SIGWX)", expanded=True):
     sigwx_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="sigwx")
@@ -220,19 +253,25 @@ if ready:
             pdf.set_auto_page_break(auto=True, margin=12)
             pdf.cover_page(pilot, aircraft, str(date), callsign)
 
-            # 1. METARs
-            metar_code_lines = [line for line in (metar_codes or "").split('\n') if line.strip()]
-            metar_decode_lines = [line for line in (metar_decodes or "").split('\n') if line.strip()]
-            if metar_code_lines or metar_decode_lines:
-                pdf.code_decode_section("METARs", metar_code_lines, metar_decode_lines)
+            # METARs
+            metar_pairs = [
+                (metar, decode)
+                for metar, decode in st.session_state.metar_list
+                if metar.strip() or decode.strip()
+            ]
+            if metar_pairs:
+                pdf.pair_section("METARs", metar_pairs)
 
-            # 2. TAFs
-            taf_code_lines = [line for line in (taf_codes or "").split('\n') if line.strip()]
-            taf_decode_lines = [line for line in (taf_decodes or "").split('\n') if line.strip()]
-            if taf_code_lines or taf_decode_lines:
-                pdf.code_decode_section("TAFs", taf_code_lines, taf_decode_lines)
+            # TAFs
+            taf_pairs = [
+                (taf, decode)
+                for taf, decode in st.session_state.taf_list
+                if taf.strip() or decode.strip()
+            ]
+            if taf_pairs:
+                pdf.pair_section("TAFs", taf_pairs)
 
-            # 3. SIGWX
+            # SIGWX
             sigwx_base64 = base64.b64encode(st.session_state["sigwx_img_bytes"].getvalue()).decode("utf-8")
             sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", st.session_state["sigwx_desc"])
             pdf.chart_section(
@@ -242,7 +281,7 @@ if ready:
                 user_desc=st.session_state["sigwx_desc"]
             )
 
-            # 4. SPC
+            # SPC
             spc_base64 = base64.b64encode(st.session_state["cropped_spc_bytes"].getvalue()).decode("utf-8")
             spc_ai_text = ai_chart_analysis(spc_base64, "SPC", st.session_state["spc_desc"])
             pdf.chart_section(
@@ -252,10 +291,10 @@ if ready:
                 user_desc=st.session_state["spc_desc"]
             )
 
-            # 5. Conclusion
+            # Conclusion
             pdf.conclusion()
 
-            # 6. NOTAMs
+            # NOTAMs
             notam_lines = [n for n in (notams or "").split('\n') if n.strip()]
             if notam_lines:
                 pdf.section_header("NOTAM Information Pertinent to Operational Areas")
@@ -277,7 +316,5 @@ if ready:
 else:
     st.info("Fill all sections and upload/crop both charts before generating your PDF.")
 
-st.caption("Paste your raw METAR/TAF codes and their decoded versions. The program just lays them out in the PDF. Charts are analyzed automatically by AI. NOTAMs included as plain text.")
-
-
+st.caption("Add as many METAR or TAF/decoded pairs as needed. Charts are analyzed automatically. NOTAMs included as plain text.")
 
