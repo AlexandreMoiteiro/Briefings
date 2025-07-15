@@ -11,6 +11,14 @@ import unicodedata
 import re
 import airportsdata
 from metar.Metar import Metar
+import requests
+import json
+
+# --- EMAIL SETTINGS ---
+ADMIN_EMAIL = "alexandre.moiteiro@gmail.com"
+WEBSITE_LINK = "https://mass-balance.streamlit.app/"
+SENDGRID_API_KEY = st.secrets["SENDGRID_API_KEY"]
+SENDER_EMAIL = "alexandre.moiteiro@students.sevenair.com"
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 AIRPORTS = airportsdata.load('ICAO')
@@ -50,11 +58,10 @@ def clean_markdown(text):
 
 def ai_chart_analysis(img_base64, chart_type, user_area_desc):
     sys_prompt = (
-        "You are briefing a preflight. Write a flowing, student-style, operational weather analysis for the selected area of this aviation chart. "
-        "Do NOT write a bullet list or use formatting. Speak in the first person plural (e.g., 'We should expect...'). "
-        "Make it a practical, concise paragraph a student might present aloud. "
-        "Cover the main weather features for this area, including: fronts, clouds, winds, visibility, temperature, pressure, and any hazards. "
-        "Do not mention artificial intelligence or automation. Do not use bold, bullets, or Markdown. Do not use headings. Only a well-written paragraph."
+        "You are a student pilot preparing a preflight weather briefing. Analyze the attached aviation weather chart, focusing on the specified area but also considering the broader context and any significant patterns, movements, or developments shown elsewhere in the chart that could influence conditions in your area during the period of interest. "
+        "Describe how weather systems, trends, and nearby phenomena could evolve and impact the area of focus, including possible changes or risks during the flight window. "
+        "Avoid bullets, bold, lists, or headings. Write a detailed, readable, and practical paragraph as a student would brief out loud. "
+        "Mention the key weather features (fronts, clouds, winds, visibility, temperatures, pressure, hazards), and connect them to both the local area and the bigger weather picture."
     )
     area = user_area_desc.strip() or "Portugal"
     response = openai.chat.completions.create(
@@ -64,20 +71,20 @@ def ai_chart_analysis(img_base64, chart_type, user_area_desc):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Please focus only on: {area}"},
+                    {"type": "text", "text": f"Focus on: {area}."},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
                 ]
             }
         ],
-        max_tokens=700,
-        temperature=0.4
+        max_tokens=800,
+        temperature=0.35
     )
     return clean_markdown(response.choices[0].message.content)
 
 def ai_sigmet_summary(sigmet_text):
     prompt = (
         "You are a student pilot. Given these SIGMET/AIRMET/GAMET en-route weather warnings, write a short flowing English summary, no more than a paragraph, in practical preflight style. "
-        "Do NOT use bullet points or formatting. Mention the key weather hazards and main recommendations."
+        "Do NOT use bullet points or formatting. Mention the key weather hazards, their likely effect on the route, and main recommendations."
     )
     response = openai.chat.completions.create(
         model="gpt-4o",
@@ -86,7 +93,7 @@ def ai_sigmet_summary(sigmet_text):
             {"role": "user", "content": sigmet_text}
         ],
         max_tokens=160,
-        temperature=0.3
+        temperature=0.25
     )
     return clean_markdown(response.choices[0].message.content.strip())
 
@@ -104,6 +111,24 @@ def brief_metar_taf_comment(metar_code, taf_code):
         ],
         max_tokens=90,
         temperature=0.2
+    )
+    return clean_markdown(response.choices[0].message.content.strip())
+
+def brief_notam_comment(notams, icao):
+    text = "\n".join([f"{n['num']}: {n['text']}" for n in notams if n['num'].strip() or n['text'].strip()])
+    if not text.strip():
+        return ""
+    prompt = (
+        f"You are a student pilot. Given these NOTAMs for {icao}, write a very brief summary (one or two sentences, no formatting) of the main operational points and anything of special attention. Only mention what is truly relevant."
+    )
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": text}
+        ],
+        max_tokens=90,
+        temperature=0.18
     )
     return clean_markdown(response.choices[0].message.content.strip())
 
@@ -226,7 +251,7 @@ class BriefingPDF(FPDF):
     def add_section_page(self, title):
         self.add_page()
         self.section_header(title)
-    def cover_page(self, pilot, aircraft, date, callsign, mission):
+    def cover_page(self, pilot, aircraft, date, time_utc, callsign, mission):
         self.add_page()
         self.set_xy(0,38)
         self.set_font("Arial", 'B', 23)
@@ -240,6 +265,7 @@ class BriefingPDF(FPDF):
         self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Mission #: {mission}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
+        self.cell(0, 8, ascii_safe(f"Flight Time (UTC): {time_utc}"), ln=True, align='C')
         self.ln(30)
     def metar_taf_section(self, pairs):
         for i, entry in enumerate(pairs, 1):
@@ -336,7 +362,55 @@ class BriefingPDF(FPDF):
                     self.set_font("Arial",'',12)
                     self.multi_cell(0, 8, ascii_safe(notam["text"]))
                     self.ln(3)
-            self.ln(6)
+            # AI summary of NOTAMs for this aerodrome
+            ai_summary = brief_notam_comment(entry["notams"], entry["aero"])
+            if ai_summary:
+                self.set_font("Arial", 'I', 11)
+                self.set_text_color(80, 56, 0)
+                self.multi_cell(0, 8, f"Summary: {ascii_safe(ai_summary)}")
+                self.ln(6)
+            else:
+                self.ln(6)
+
+def send_report_email(to_email, subject, body, filename, filedata):
+    html_body = f"""
+    <html>
+    <body>
+        <h2>Weather & NOTAM Briefing Submitted</h2>
+        <pre>{body}</pre>
+        <p style='margin-top:1.5em;'>See attached PDF for details.</p>
+        <p>Generated via {WEBSITE_LINK}</p>
+    </body>
+    </html>
+    """
+    data = {
+        "personalizations": [
+            {
+                "to": [{"email": to_email}],
+                "subject": subject
+            }
+        ],
+        "from": {"email": SENDER_EMAIL},
+        "content": [
+            {
+                "type": "text/html",
+                "value": html_body
+            }
+        ],
+        "attachments": [{
+            "content": base64.b64encode(filedata).decode(),
+            "type": "application/pdf",
+            "filename": filename,
+            "disposition": "attachment"
+        }]
+    }
+    headers = {
+        "Authorization": f"Bearer {SENDGRID_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post("https://api.sendgrid.com/v3/mail/send", data=json.dumps(data), headers=headers)
+    if resp.status_code >= 400:
+        st.warning(f"PDF generated but failed to send email (SendGrid error: {resp.text})")
 
 def notam_block():
     if "notam_data" not in st.session_state:
@@ -395,6 +469,7 @@ with st.expander("1. Pilot/Aircraft Info", expanded=True):
     callsign = st.text_input("Callsign", "")
     mission = st.text_input("Mission #", "")
     date = st.date_input("Date", datetime.date.today())
+    time_utc = st.text_input("Expected Flight Time (UTC, e.g. 14:30-16:30)", "")
 
 metar_taf_block()
 
@@ -422,8 +497,7 @@ with st.expander("4. Surface Pressure Chart (SPC)", expanded=True):
     spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
     if "spc_full_bytes" not in st.session_state:
         st.session_state["spc_full_bytes"] = None
-        st.session_state["cropped_spc_bytes"] = None
-        st.session_state["spc_desc"] = "Portugal"  # Default Portugal
+        st.session_state["spc_desc"] = "Portugal"
     if spc_file:
         if spc_file.type == "application/pdf":
             pdf_bytes = spc_file.read()
@@ -436,18 +510,7 @@ with st.expander("4. Surface Pressure Chart (SPC)", expanded=True):
         _, spc_full_bytes = downscale_image(spc_img)
         st.session_state["spc_full_bytes"] = spc_full_bytes
         st.image(spc_img, caption="SPC: Full Chart (included in PDF)")
-        cropped_spc = st_cropper(
-            spc_img,
-            aspect_ratio=None,
-            box_color='red',
-            return_type='image',
-            realtime_update=True,
-            key="spc_crop"
-        )
-        st.image(cropped_spc, caption="SPC: Cropped Area (for analysis)")
         spc_desc = st.text_input("SPC: Area/focus for analysis (default: Portugal)", value=st.session_state["spc_desc"], key="spcdesc")
-        cropped_spc, cropped_spc_bytes = downscale_image(cropped_spc)
-        st.session_state["cropped_spc_bytes"] = cropped_spc_bytes
         st.session_state["spc_desc"] = spc_desc
 
 sigmet_gamet_text = sigmet_block()
@@ -462,7 +525,7 @@ if ready:
         with st.spinner("Preparing your preflight briefing..."):
             pdf = BriefingPDF()
             pdf.set_auto_page_break(auto=True, margin=14)
-            pdf.cover_page(pilot, aircraft, str(date), callsign, mission)
+            pdf.cover_page(pilot, aircraft, str(date), time_utc, callsign, mission)
             metar_taf_pairs = [
                 entry for entry in st.session_state.metar_taf_pairs
                 if entry['metar'].strip() or entry['taf'].strip() or entry['icao'].strip()
@@ -490,24 +553,39 @@ if ready:
                 user_desc=st.session_state["spc_desc"]
             )
             pdf.notam_section(st.session_state.notam_data)
-            out_pdf = f"Briefing_{ascii_safe(pilot)}_{ascii_safe(mission)}.pdf"
+            out_pdf = f"weather_and_notam_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
+                pdf_bytes = f.read()
                 st.download_button(
                     label="Download Preflight Weather Briefing PDF",
-                    data=f,
+                    data=pdf_bytes,
                     file_name=out_pdf,
                     mime="application/pdf"
                 )
-            st.success("PDF generated successfully!")
+            # Email to admin
+            try:
+                email_body = (
+                    f"Pilot: {pilot}\n"
+                    f"Aircraft: {aircraft}\n"
+                    f"Callsign: {callsign}\n"
+                    f"Mission: {mission}\n"
+                    f"Date: {date}\n"
+                    f"Expected Time (UTC): {time_utc}\n"
+                    f"PDF attached."
+                )
+                send_report_email(
+                    ADMIN_EMAIL,
+                    subject=f"Weather/NOTAM Report submitted: Mission {mission}",
+                    body=email_body,
+                    filename=out_pdf,
+                    filedata=pdf_bytes
+                )
+                st.success("PDF generated and sent to admin!")
+            except Exception as e:
+                st.warning(f"PDF generated, but failed to email admin: {e}")
 else:
     st.info("Fill all sections and upload both charts before generating your PDF.")
-
-
-
-
-
-
 
 
 
