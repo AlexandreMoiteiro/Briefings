@@ -1,80 +1,64 @@
 import streamlit as st
-import fitz  # PyMuPDF
 from PIL import Image
-import io
 import openai
+import io
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# Helper to extract text from a PDF (mission objectives)
-def extract_text_from_pdf(pdf_file):
-    text = ""
-    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-    for page in doc:
-        text += page.get_text()
-    return text
+def downscale_image(image_file, width=1200):
+    img = Image.open(image_file)
+    if img.width > width:
+        ratio = width / img.width
+        new_size = (width, int(img.height * ratio))
+        img = img.resize(new_size)
+    img_bytes = io.BytesIO()
+    img.save(img_bytes, format="PNG", optimize=True)
+    img_bytes.seek(0)
+    return img, img_bytes
 
-# Helper for displaying image from upload (PDF page as image)
-def get_pdf_first_page_image(pdf_file):
-    doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-    page = doc.load_page(0)
-    pix = page.get_pixmap()
-    img_bytes = pix.tobytes("png")
-    return Image.open(io.BytesIO(img_bytes))
+st.title("SPC AI Analysis – Portugal Focused")
+spc_file = st.file_uploader("Upload SPC Chart (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"])
 
-# ---- Mission Objectives Step ----
-mission_file = st.file_uploader("Upload Mission Objectives (PDF, PNG, JPG, GIF, or text file)", 
-                                type=["pdf", "png", "jpg", "jpeg", "gif", "txt"])
-mission_text = ""
-if mission_file:
-    if mission_file.type == "application/pdf":
-        mission_text = extract_text_from_pdf(mission_file)
-        st.success("PDF extracted.")
-    elif mission_file.type in ["image/png", "image/jpeg", "image/gif"]:
-        img = Image.open(mission_file)
-        st.image(img, caption="Uploaded Mission Image")
-        mission_text = st.text_area("Describe the mission objective in your own words (or paste text from image)")
-    elif mission_file.type == "text/plain":
-        mission_text = mission_file.read().decode("utf-8")
+if spc_file:
+    # If PDF, extract first page as image
+    if spc_file.type == "application/pdf":
+        import fitz
+        pdf_doc = fitz.open(stream=spc_file.read(), filetype="pdf")
+        page = pdf_doc.load_page(0)
+        pix = page.get_pixmap()
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
     else:
-        st.warning("Unsupported file type.")
+        img = Image.open(spc_file)
+    
+    img, img_bytes = downscale_image(img)
+    st.image(img, caption="SPC Chart for Analysis", use_column_width=True)
 
-if mission_text:
-    st.markdown("#### AI Summary of Mission Objectives")
-    if st.button("Summarize with AI"):
-        # -- GPT integration here --
-        import openai
-        summary = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "Summarize the following mission objectives for a pre-flight briefing, focusing on essential points:"},
-                {"role": "user", "content": mission_text}
-            ]
-        )["choices"][0]["message"]["content"]
-        st.info(summary)
+    if st.button("Analyze SPC (Portugal & Vicinity Only)"):
+        with st.spinner("GPT-4o is analyzing your chart..."):
+            result = openai.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content":
+                        "You are an aviation meteorologist instructor. Analyze the uploaded surface pressure chart image. "
+                        "Restrict your interpretation ONLY to Portugal and nearby airspace. "
+                        "Ignore the rest of the chart. Brief the synoptic situation, expected wind, clouds, precipitation, and any important hazards for VFR/IFR flights in Portugal and vicinity. Do not discuss areas outside Portugal and neighboring airspace."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": img_bytes.getvalue()}
+                        ]
+                    }
+                ],
+                max_tokens=500,  # Restricts reply length
+                temperature=0.5
+            )
+            gpt_response = result.choices[0].message.content
+        st.markdown("### AI Weather Briefing for Portugal")
+        st.info(gpt_response)
+else:
+    st.info("Upload a Surface Pressure Chart to start.")
 
-# ---- Weather Chart Step ----
-weather_files = st.file_uploader(
-    "Upload Weather Charts (Surface Pressure, Significant Weather, etc.; PDF, PNG, JPG, GIF)", 
-    type=["pdf", "png", "jpg", "jpeg", "gif"], 
-    accept_multiple_files=True
-)
-user_obs = st.text_area("Describe what you see in the weather charts (fronts, systems, etc.)")
-
-if st.button("AI Weather Interpretation"):
-    prompt = (
-        "You are an aviation meteorologist. Given the following description and chart types, "
-        "provide a detailed, operational weather briefing for a pilot. "
-        f"Description: {user_obs}"
-    )
-    # -- GPT integration here --
-    weather_summary = openai.ChatCompletion.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "Provide a weather interpretation for a pre-flight briefing."},
-            {"role": "user", "content": prompt}
-        ]
-    )["choices"][0]["message"]["content"]
-    st.info(weather_summary)
+st.caption("This analysis is limited to Portugal and vicinity for maximum efficiency.")
 
 
