@@ -3,11 +3,11 @@ from PIL import Image
 import openai
 import io
 import base64
-from streamlit_cropper import st_cropper
 from fpdf import FPDF
 import fitz
 import datetime
 
+# --- SET YOUR OPENAI API KEY ---
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 def downscale_image(img, width=900):
@@ -23,26 +23,25 @@ def downscale_image(img, width=900):
 def ai_chart_analysis(img_base64, chart_type, user_area_desc):
     if chart_type == "SPC":
         sys_prompt = (
-            "You are an aviation meteorologist. Analyze the uploaded surface pressure chart (SPC)."
-            " Focus your analysis on the cropped area (for example, over Portugal or the Iberian Peninsula),"
-            " but refer to what the area shows in a briefing format for pilots. Start your answer like: "
-            "'The area shown above Portugal...'. Include: "
+            "You are an aviation meteorology instructor. Analyze the uploaded surface pressure chart (SPC). "
+            "Generate a concise, structured report suitable for a flight briefing PDF. Your analysis should focus on the region described by the user (not the entire chart), and the region should be referenced by name in your text (e.g., 'the area over Portugal' or 'the Iberian Peninsula'). Structure your report to include:\n"
             "- Synoptic situation and pressure systems\n"
-            "- Fronts in/near the focus area\n"
-            "- Wind and cloud cover\n"
+            "- Location and type of fronts\n"
+            "- Wind direction/speed and general cloud cover\n"
             "- Expected weather and flight category (VFR/IFR)\n"
-            "Do not mention the word 'cropped'."
+            "Begin the report with a phrase clarifying the focus area as described by the user."
         )
     else:
         sys_prompt = (
-            "You are an aviation meteorologist. Analyze the uploaded significant weather chart (SIGWX). "
-            "Give a concise, structured briefing for pilots, including:\n"
+            "You are an aviation meteorology instructor. Analyze the uploaded significant weather chart (SIGWX). "
+            "Generate a concise, structured report suitable for a flight briefing PDF. Focus your analysis on the region described by the user (not the entire chart), referencing that region by name. Structure your report to include:\n"
             "- Cloud types/amounts, altitudes\n"
-            "- Turbulence, significant weather phenomena (CBs, icing, etc.)\n"
-            "- Freezing levels, visibility, and any flight hazards in the shown area.\n"
-            "Do not mention the word 'image' or 'uploaded'."
+            "- Turbulence (areas, severity)\n"
+            "- Significant weather phenomena (CBs, icing, mountain waves, etc.)\n"
+            "- Freezing levels, visibility, and flight hazards\n"
+            "Begin the report with a phrase clarifying the focus area as described by the user."
         )
-    user_prompt = "Please focus your analysis on: " + user_area_desc if user_area_desc.strip() else "Provide a pilot-oriented briefing for the area described."
+    user_prompt = f"Please focus your analysis on the following region: {user_area_desc.strip()}"
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -55,133 +54,142 @@ def ai_chart_analysis(img_base64, chart_type, user_area_desc):
                 ]
             }
         ],
-        max_tokens=700,
+        max_tokens=650,
         temperature=0.5
     )
     return response.choices[0].message.content
 
-class CleanBriefingPDF(FPDF):
-    def cover_page(self, mission_number, pilot, aircraft, date, callsign):
+class BriefingPDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 18)
+        self.cell(0, 14, "Preflight Briefing Package", align='C', ln=1)
+        self.ln(5)
+
+    def chart_section(self, title, img_bytes, ai_text, user_desc=""):
         self.add_page()
-        self.set_font("Helvetica", 'B', 28)
-        self.set_text_color(28, 34, 87)
-        self.cell(0, 25, "Preflight Weather Briefing", ln=1, align='C')
-        self.set_text_color(0,0,0)
-        self.ln(8)
-        self.set_font("Helvetica", '', 15)
-        self.cell(0, 12, f"Mission Number: {mission_number}", ln=1, align='C')
-        self.cell(0, 12, f"Pilot: {pilot}", ln=1, align='C')
-        self.cell(0, 12, f"Aircraft: {aircraft}", ln=1, align='C')
-        self.cell(0, 12, f"Callsign: {callsign}", ln=1, align='C')
-        self.cell(0, 12, f"Date: {date}", ln=1, align='C')
-        self.ln(15)
-
-    def section_header(self, title):
-        self.set_font("Helvetica", 'B', 19)
-        self.set_text_color(28, 34, 87)
-        self.cell(0, 14, title, ln=1)
-        self.set_text_color(0,0,0)
-        self.ln(2)
-
-    def add_chart_with_label(self, label, img_bytes):
-        self.set_font("Helvetica", 'I', 12)
-        self.cell(0, 8, label, ln=1)
-        self.ln(1)
-        chart_img_path = f"tmp_{label.replace(' ','_')}.png"
+        self.set_font("Arial", 'B', 15)
+        self.cell(0, 10, title, ln=True)
+        self.ln(3)
+        # Chart image (full, not cropped)
+        chart_img_path = "tmp_chart.png"
         with open(chart_img_path, "wb") as f:
             f.write(img_bytes.getvalue())
         self.image(chart_img_path, x=25, w=160)
+        self.set_font("Arial", 'I', 10)
+        self.set_text_color(120,120,120)
+        self.cell(0, 7, "Full chart as provided by user", ln=True)
         self.ln(4)
+        # Analysis focus
+        if user_desc.strip():
+            self.set_font("Arial", 'I', 11)
+            self.set_text_color(30,30,30)
+            self.multi_cell(0, 8, f"Analysis focus: {user_desc.strip()}")
+            self.ln(2)
+        # AI analysis
+        self.set_font("Arial", '', 12)
+        self.set_text_color(0,0,0)
+        self.multi_cell(0, 8, ai_text)
+        self.ln(1)
 
-    def add_analysis(self, text):
-        self.set_font("Helvetica", '', 12)
-        self.multi_cell(0, 9, text)
-        self.ln(4)
+    def cover_page(self, mission, pilot, aircraft, date, callsign):
+        self.add_page()
+        # -- Optional logo placement --
+        # self.image("logo.png", x=160, y=10, w=40)   # Uncomment and add logo path if needed
+        self.set_font("Arial", 'B', 28)
+        self.set_text_color(34, 34, 34)
+        self.cell(0, 24, "Preflight Briefing", ln=True, align='C')
+        self.ln(16)
+        self.set_font("Arial", '', 16)
+        self.set_text_color(0,0,0)
+        self.cell(0, 12, f"Mission Number: {mission}", ln=True, align='L')
+        self.cell(0, 12, f"Pilot: {pilot}", ln=True)
+        self.cell(0, 12, f"Aircraft: {aircraft}", ln=True)
+        self.cell(0, 12, f"Callsign: {callsign}", ln=True)
+        self.cell(0, 12, f"Date: {date}", ln=True)
+        self.ln(8)
 
-# --- STREAMLIT APP ---
+    def footer(self):
+        pass  # No footer
 
-st.title("Preflight Briefing Package: SPC & SIGWX")
+st.set_page_config(page_title="Preflight Briefing", page_icon="🛩️")
+st.title("Preflight Briefing Package (SPC & SIGWX)")
 
 st.markdown("""
-- **SPC**: Upload the chart, crop/select the area you want analyzed.  
-  The PDF will include the full chart and the cropped area.
-- **SIGWX**: Upload the chart (no crop; whole chart included and analyzed).
-- Enter mission info, then generate a clean, print-ready PDF briefing.
+1. Upload **full** SPC and SIGWX charts (no cropping).
+2. Enter mission number, pilot, aircraft, callsign, date, and describe the focus area for the AI analysis.
+3. Click **Generate PDF Report**.
 """, unsafe_allow_html=True)
 
-st.subheader("Mission Info")
-mission_number = st.text_input("Mission Number", "")
-pilot = st.text_input("Pilot", "")
-aircraft = st.text_input("Aircraft", "")
-callsign = st.text_input("Callsign", "")
-date = st.date_input("Date", datetime.date.today())
-
-st.subheader("Surface Pressure Chart (SPC)")
+# ---- Chart Uploads ----
+st.header("Surface Pressure Chart (SPC)")
 spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
-spc_focus = st.text_input("Describe area for AI to brief (e.g. 'Portugal', 'Iberian Peninsula', etc.):", key="spcfocus")
-
-spc_full_img, spc_cropped_img, spc_full_img_bytes, spc_cropped_img_bytes = None, None, None, None
+spc_img_bytes = None
 if spc_file:
     if spc_file.type == "application/pdf":
         pdf_bytes = spc_file.read()
         pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page = pdf_doc.load_page(0)
         pix = page.get_pixmap()
-        spc_full_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
+        spc_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
     else:
-        spc_full_img = Image.open(spc_file).convert("RGB").copy()
-    st.write("Crop/select the region you want AI to brief about (e.g., Portugal).")
-    spc_cropped_img = st_cropper(
-        spc_full_img,
-        aspect_ratio=None,
-        box_color='red',
-        return_type='image',
-        realtime_update=True,
-        key="spc_crop"
-    )
-    st.image(spc_cropped_img, caption="Selected SPC Area for AI Briefing")
-    spc_full_img, spc_full_img_bytes = downscale_image(spc_full_img)
-    spc_cropped_img, spc_cropped_img_bytes = downscale_image(spc_cropped_img)
+        spc_img = Image.open(spc_file).convert("RGB").copy()
+    st.image(spc_img, caption="SPC Chart Preview (full chart)")
+    spc_img, spc_img_bytes = downscale_image(spc_img)
 
-st.subheader("Significant Weather Chart (SIGWX)")
+st.header("Significant Weather Chart (SIGWX)")
 sigwx_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="sigwx")
-sigwx_focus = st.text_input("If you want, describe the region or weather to focus on (optional):", key="sigwxfocus")
-
-sigwx_full_img, sigwx_full_img_bytes = None, None
+sigwx_img_bytes = None
 if sigwx_file:
     if sigwx_file.type == "application/pdf":
         pdf_bytes = sigwx_file.read()
         pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         page = pdf_doc.load_page(0)
         pix = page.get_pixmap()
-        sigwx_full_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
+        sigwx_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
     else:
-        sigwx_full_img = Image.open(sigwx_file).convert("RGB").copy()
-    st.image(sigwx_full_img, caption="Full SIGWX Chart")
-    sigwx_full_img, sigwx_full_img_bytes = downscale_image(sigwx_full_img)
+        sigwx_img = Image.open(sigwx_file).convert("RGB").copy()
+    st.image(sigwx_img, caption="SIGWX Chart Preview (full chart)")
+    sigwx_img, sigwx_img_bytes = downscale_image(sigwx_img)
 
-if st.button("Generate PDF Report", disabled=not (spc_full_img_bytes and spc_cropped_img_bytes and sigwx_full_img_bytes)):
+# ---- Mission metadata and area descriptions ----
+st.header("Briefing Metadata & Area Focus")
+with st.form("meta_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+        mission = st.text_input("Mission Number", "")
+        pilot = st.text_input("Pilot", "")
+        aircraft = st.text_input("Aircraft", "")
+        callsign = st.text_input("Callsign", "")
+    with col2:
+        date = st.date_input("Date", datetime.date.today())
+    spc_desc = st.text_input("SPC: Briefly describe focus area (e.g., 'over Portugal')", key="spcdesc")
+    sigwx_desc = st.text_input("SIGWX: Briefly describe focus area (e.g., 'the Iberian Peninsula')", key="sigwxdesc")
+    generate = st.form_submit_button("Generate PDF Report", disabled=not (spc_img_bytes and sigwx_img_bytes))
+
+if generate:
     with st.spinner("Generating PDF and calling AI..."):
-        pdf = CleanBriefingPDF()
-        pdf.set_auto_page_break(auto=True, margin=16)
-        pdf.cover_page(mission_number, pilot, aircraft, str(date), callsign)
+        pdf = BriefingPDF()
+        pdf.set_auto_page_break(auto=True, margin=12)
+        pdf.cover_page(mission, pilot, aircraft, str(date), callsign)
 
-        # --- SPC Section ---
-        pdf.section_header("Surface Pressure Chart (SPC)")
-        pdf.add_chart_with_label("Full Chart", spc_full_img_bytes)
-        pdf.add_chart_with_label("Selected Area", spc_cropped_img_bytes)
-        # AI analysis using cropped image, but report refers to area/region
-        spc_cropped_base64 = base64.b64encode(spc_cropped_img_bytes.getvalue()).decode("utf-8")
-        spc_ai_text = ai_chart_analysis(spc_cropped_base64, "SPC", spc_focus)
-        pdf.add_analysis(spc_ai_text)
-
-        # --- SIGWX Section ---
-        pdf.section_header("Significant Weather Chart (SIGWX)")
-        pdf.add_chart_with_label("Full Chart", sigwx_full_img_bytes)
-        sigwx_base64 = base64.b64encode(sigwx_full_img_bytes.getvalue()).decode("utf-8")
-        sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", sigwx_focus)
-        pdf.add_analysis(sigwx_ai_text)
-
+        if spc_img_bytes:
+            spc_base64 = base64.b64encode(spc_img_bytes.getvalue()).decode("utf-8")
+            spc_ai_text = ai_chart_analysis(spc_base64, "SPC", spc_desc)
+            pdf.chart_section(
+                title="Surface Pressure Chart (SPC)",
+                img_bytes=spc_img_bytes,
+                ai_text=spc_ai_text,
+                user_desc=spc_desc
+            )
+        if sigwx_img_bytes:
+            sigwx_base64 = base64.b64encode(sigwx_img_bytes.getvalue()).decode("utf-8")
+            sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", sigwx_desc)
+            pdf.chart_section(
+                title="Significant Weather Chart (SIGWX)",
+                img_bytes=sigwx_img_bytes,
+                ai_text=sigwx_ai_text,
+                user_desc=sigwx_desc
+            )
         out_pdf = "Preflight_Briefing.pdf"
         pdf.output(out_pdf)
         with open(out_pdf, "rb") as f:
@@ -193,8 +201,7 @@ if st.button("Generate PDF Report", disabled=not (spc_full_img_bytes and spc_cro
             )
         st.success("PDF generated successfully!")
 
-st.caption("Charts and analysis will appear in the PDF, clean and ready for briefing or printing.")
-
+st.caption("Charts are used in full. Describe your focus area in text for the AI analysis.")
 
 
 
