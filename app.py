@@ -2,11 +2,11 @@ import streamlit as st
 from PIL import Image
 import openai
 import io
+import base64
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 def downscale_image(img, width=1200):
-    # Receives a PIL Image, returns (resized_img, img_bytes as PNG)
     if img.width > width:
         ratio = width / img.width
         new_size = (width, int(img.height * ratio))
@@ -33,10 +33,11 @@ if spc_file:
     else:
         img = Image.open(spc_file)
 
-    # Downscale image for token/cost efficiency
     img, img_bytes = downscale_image(img)
+    st.image(img, caption="SPC Chart for Analysis", use_container_width=True)
 
-    st.image(img, caption="SPC Chart for Analysis", use_column_width=True)
+    # Convert image to base64 for OpenAI API
+    img_base64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
     if st.button("Analyze SPC (Portugal & Vicinity Only)"):
         with st.spinner("GPT-4o is analyzing your chart..."):
@@ -51,7 +52,10 @@ if spc_file:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "image", "image": img_bytes.getvalue()}
+                            {
+                                "type": "image_url",
+                                "image_url": f"data:image/png;base64,{img_base64}"
+                            }
                         ]
                     }
                 ],
@@ -65,6 +69,7 @@ else:
     st.info("Upload a Surface Pressure Chart to start.")
 
 st.caption("This analysis is limited to Portugal and vicinity for maximum efficiency.")
+
 
 
 
