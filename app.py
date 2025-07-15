@@ -17,12 +17,12 @@ def downscale_image(img, width=900):
     img_bytes.seek(0)
     return img, img_bytes
 
-st.title("SPC AI Analysis – Crop to Portugal & Vicinity")
+st.title("SPC AI Analysis – Crop and Analyze Any Area")
 st.markdown(
     """
-    **Step 1:** Upload your Surface Pressure Chart (SPC).  
-    **Step 2:** Use the cropping tool below to select only Portugal and neighboring regions.  
-    <span style='color:red; font-weight:bold;'>⚠️ Only the selected (cropped) area will be analyzed by the AI!</span>
+    1. Upload your Surface Pressure Chart (SPC) as PDF, PNG, JPG, or GIF.  
+    2. Use the cropping tool to select **any region** you want analyzed.  
+    3. Click the analyze button to receive a detailed AI weather interpretation of your selected area.
     """, 
     unsafe_allow_html=True
 )
@@ -44,10 +44,7 @@ if spc_file:
         img = Image.open(spc_file).convert("RGB").copy()
     st.write(f"Type: {type(img)}, Mode: {img.mode}, Size: {img.size}")
 
-    st.markdown(
-        "<span style='color:red; font-weight:bold;'>Drag and resize the box to include just Portugal and neighboring airspace. Only the area inside the box will be analyzed.</span>",
-        unsafe_allow_html=True
-    )
+    st.markdown("Use the box below to crop any region of interest.")
     cropped_img = st_cropper(
         img,
         aspect_ratio=None,
@@ -60,33 +57,46 @@ if spc_file:
     cropped_img, img_bytes = downscale_image(cropped_img)
     img_base64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
+    user_area = st.text_input(
+        "Briefly describe the region or features you want the AI to focus on (optional):",
+        placeholder="e.g., Focus on central Portugal, or analyze the cold front in the selected area"
+    )
+
     if st.button("Analyze Cropped Area with AI"):
-        st.markdown("**Submitting only the selected (cropped) part to the AI. Please wait...**")
         with st.spinner("GPT-4o is analyzing your selected area..."):
+            system_prompt = (
+                "You are an aviation meteorology instructor. Analyze the uploaded surface pressure chart image. "
+                "Focus your interpretation ONLY on the cropped area of the chart. Summarize the synoptic situation, expected wind, clouds, precipitation, "
+                "and any important hazards for VFR/IFR flights. If the user provided a description of the area or specific features to focus on, tailor your answer accordingly."
+            )
+            if user_area.strip():
+                user_prompt = f"Please focus your analysis on: {user_area.strip()}"
+            else:
+                user_prompt = "Please provide a detailed weather interpretation for the cropped area."
+
             try:
                 result = openai.chat.completions.create(
                     model="gpt-4o",
                     messages=[
-                        {"role": "system", "content":
-                            "You are an aviation meteorologist instructor. Analyze the uploaded surface pressure chart image. "
-                            "Restrict your interpretation ONLY to the visible area (Portugal and nearby airspace). Ignore any information outside the cropped area. "
-                            "Brief the synoptic situation, expected wind, clouds, precipitation, and any important hazards for VFR/IFR flights in Portugal and vicinity. Do not discuss areas outside the cropped chart."
-                        },
+                        {"role": "system", "content": system_prompt},
                         {
                             "role": "user",
                             "content": [
+                                {"type": "text", "text": user_prompt},
                                 {
                                     "type": "image_url",
-                                    "image_url": f"data:image/png;base64,{img_base64}"
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{img_base64}"
+                                    }
                                 }
                             ]
                         }
                     ],
-                    max_tokens=500,
+                    max_tokens=600,
                     temperature=0.5
                 )
                 gpt_response = result.choices[0].message.content
-                st.markdown("### AI Weather Briefing (Portugal & Vicinity – Cropped Area)")
+                st.markdown("### AI Weather Briefing (Cropped Area)")
                 st.info(gpt_response)
             except openai.RateLimitError:
                 st.error("OpenAI RateLimitError: You have hit your OpenAI API rate or usage limit. Please wait and try again, or check your usage/quota in your OpenAI dashboard.")
@@ -96,9 +106,7 @@ if spc_file:
 else:
     st.info("Upload a Surface Pressure Chart to begin.")
 
-st.caption("🟢 Only the selected (cropped) area of the chart will be sent for AI analysis. Make sure Portugal is fully included for best results!")
-
-
+st.caption("The AI analyzes only the region you've selected in the cropper. The interpretation will focus on the cropped area or your description.")
 
 
 
