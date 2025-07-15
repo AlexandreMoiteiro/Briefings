@@ -40,17 +40,22 @@ def get_aerodrome_info(icao):
     return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
 def clean_markdown(text):
-    # Remove bold, headings, and similar markdown
+    # Remove Markdown and bullet styling
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
-    text = re.sub(r"#+\s?", "", text)   # Remove headings ####
-    text = text.replace("**", "")
-    return text
+    text = re.sub(r"#+\s?", "", text)
+    text = re.sub(r"[*•\-]\s+", "", text)
+    text = text.replace("**", "").replace("__", "")
+    text = re.sub(r"[_`]", "", text)
+    text = re.sub(r"\n{2,}", "\n\n", text)  # max double linebreaks
+    return text.strip()
 
 def ai_chart_analysis(img_base64, chart_type, user_area_desc):
     sys_prompt = (
-        "Write a detailed, operational, student-style preflight weather analysis for the selected area of this aviation chart. "
-        "Speak in the first person plural (e.g., 'We should expect...'). Analyze: fronts, clouds, winds, visibility, temperature, pressure, any potential hazards and relevant operational details. "
-        "Do not mention artificial intelligence or automation. Give a practical and readable report as a student would prepare."
+        "You are briefing a preflight. Write a flowing, student-style, operational weather analysis for the selected area of this aviation chart. "
+        "Do NOT write a bullet list or use formatting. Speak in the first person plural (e.g., 'We should expect...'). "
+        "Make it a practical, concise paragraph a student might present aloud. "
+        "Cover the main weather features for this area, including: fronts, clouds, winds, visibility, temperature, pressure, and any hazards. "
+        "Do not mention artificial intelligence or automation. Do not use bold, bullets, or Markdown. Do not use headings. Only a well-written paragraph."
     )
     area = user_area_desc.strip() or "Portugal"
     response = openai.chat.completions.create(
@@ -68,12 +73,13 @@ def ai_chart_analysis(img_base64, chart_type, user_area_desc):
         max_tokens=700,
         temperature=0.4
     )
-    return response.choices[0].message.content
+    # Clean up output
+    return clean_markdown(response.choices[0].message.content)
 
 def brief_metar_taf_comment(metar_code, taf_code):
     prompt = (
         "Given this METAR and TAF, write a very brief and practical summary for pilots (one or two sentences max). "
-        "Mention main weather concerns or favorable aspects, but keep it short and simple. No markdown or formatting, just plain English."
+        "Mention main weather concerns or favorable aspects, but keep it short and simple. No formatting or Markdown, just clear English."
     )
     content = f"METAR:\n{metar_code}\nTAF:\n{taf_code}"
     response = openai.chat.completions.create(
@@ -85,7 +91,7 @@ def brief_metar_taf_comment(metar_code, taf_code):
         max_tokens=90,
         temperature=0.2
     )
-    return response.choices[0].message.content.strip()
+    return clean_markdown(response.choices[0].message.content.strip())
 
 def decode_metar(metar_code):
     try:
@@ -187,6 +193,40 @@ def decode_taf(taf_code):
     lines.extend([wind_str, wind_speed, vis_str, clouds_str, wx_str])
     return "\n".join([l for l in lines if l.strip()])
 
+def ai_conclusion(metar_taf_pairs, sigmet_text, chart_analyses, notam_data, aircraft="", mission=""):
+    summary = []
+    summary.append("METAR/TAF Briefing:")
+    for idx, (metar, taf) in enumerate(metar_taf_pairs):
+        summary.append(f"Aerodrome {idx+1}:")
+        summary.append(f"METAR: {metar}")
+        summary.append(f"TAF: {taf}")
+    summary.append("SIGMET/AIRMET/GAMET:")
+    summary.append(sigmet_text)
+    for chart_type, analysis in chart_analyses.items():
+        summary.append(f"{chart_type} Analysis: {analysis}")
+    summary.append("NOTAMs:")
+    for entry in notam_data:
+        aerodrome = entry["aero"]
+        for n in entry["notams"]:
+            summary.append(f"{aerodrome}: {n['num']} {n['text']}")
+    full_context = "\n".join(summary)
+    prompt = (
+        "You are a flight dispatcher. Based on the following preflight weather briefing and NOTAM information, "
+        "write a short but practical operational dispatch decision (go/no-go) considering all the data. "
+        "Evaluate weather conditions for departure, arrival, and enroute; consider meteorological minima; highlight critical NOTAMs and any operational limitations. "
+        "Give a conclusion for dispatch, using clear aviation English. Do not mention being an AI or generating the report. No formatting or Markdown, just well-written text."
+    )
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": full_context}
+        ],
+        max_tokens=260,
+        temperature=0.2
+    )
+    return clean_markdown(response.choices[0].message.content.strip())
+
 class BriefingPDF(FPDF):
     def header(self): pass
     def footer(self):
@@ -220,10 +260,7 @@ class BriefingPDF(FPDF):
         self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Mission #: {mission}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
-        self.ln(20)
-        self.set_font("Arial", 'I', 12)
-        self.set_text_color(80,80,80)
-        self.multi_cell(0, 10, ascii_safe("This report is intended for operational preflight briefing use by students and pilots. Generated with briefing tool, based on current meteorological and NOTAM data."))
+        self.ln(30)
     def metar_taf_section(self, pairs):
         for i, (metar_code, taf_code) in enumerate(pairs, 1):
             icao = ""
@@ -251,7 +288,7 @@ class BriefingPDF(FPDF):
             self.cell(0, 8, "Decoded METAR:", ln=True)
             self.set_font("Arial", '', 11)
             self.multi_cell(0, 8, ascii_safe(decode_metar(metar_code)))
-            self.ln(7)  # More space here
+            self.ln(7)
             # TAF
             self.set_font("Arial", 'B', 13)
             self.set_text_color(40,40,40)
@@ -296,8 +333,7 @@ class BriefingPDF(FPDF):
         self.image(chart_img_path, x=22, w=168)
         self.ln(7)
         self.set_font("Arial", '', 12)
-        clean_text = clean_markdown(ai_text)
-        self.multi_cell(0, 8, ascii_safe(clean_text))
+        self.multi_cell(0, 8, ascii_safe(ai_text))
         self.ln(2)
     def notam_section(self, notam_data):
         if not notam_data:
@@ -306,7 +342,6 @@ class BriefingPDF(FPDF):
         for entry in notam_data:
             if entry["aero"].strip():
                 info, name = get_aerodrome_info(entry["aero"])
-                # Large subsection for aerodrome
                 self.set_font("Arial", 'B', 18)
                 self.set_text_color(28, 44, 80)
                 self.cell(0, 12, ascii_safe(f"{entry['aero'].upper()} ({name})"), ln=True)
@@ -320,16 +355,11 @@ class BriefingPDF(FPDF):
                     self.set_font("Arial",'',12)
                     self.multi_cell(0, 8, ascii_safe(notam["text"]))
                     self.ln(3)
-            self.ln(6)  # Extra space between aerodromes
-    def conclusion(self):
-        self.add_section_page("Conclusion")
+            self.ln(6)
+    def conclusion(self, ai_text):
+        self.add_section_page("Operational Dispatch Conclusion")
         self.set_font("Arial", '', 13)
-        txt = (
-            "Dispatch criteria include assessing weather conditions for both departure and arrival, "
-            "ensuring that the meteorological minima and operational requirements are met, "
-            "and verifying the suitability of NOTAMs and other operational information."
-        )
-        self.multi_cell(0,8, ascii_safe(txt))
+        self.multi_cell(0, 8, ascii_safe(ai_text))
         self.ln(2)
 
 def notam_block():
@@ -483,7 +513,20 @@ if ready:
                 user_desc=st.session_state["spc_desc"]
             )
             pdf.notam_section(st.session_state.notam_data)
-            pdf.conclusion()
+            # --- AI conclusion generation here!
+            chart_analyses = {
+                "SIGWX": sigwx_ai_text,
+                "SPC": spc_ai_text
+            }
+            ai_conc = ai_conclusion(
+                metar_taf_pairs,
+                sigmet_gamet_text,
+                chart_analyses,
+                st.session_state.notam_data,
+                aircraft=aircraft,
+                mission=mission
+            )
+            pdf.conclusion(ai_conc)
             out_pdf = f"Briefing_{ascii_safe(pilot)}_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
@@ -496,7 +539,6 @@ if ready:
             st.success("PDF generated successfully!")
 else:
     st.info("Fill all sections and upload/crop both charts before generating your PDF.")
-
 
 
 
