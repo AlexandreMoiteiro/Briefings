@@ -70,9 +70,7 @@ def parse_metar(metar_str):
         txt = txt.replace('Clouds', 'We have clouds')
         txt = txt.replace("The wind is", "We have wind")
         txt = txt.replace("Temperature", "We have temperature")
-        # Shorten
         txt = txt.split('=',1)[0]
-        # First person, short
         txt = re.sub(r'(The|We have|Winds|Clouds)', r'We have', txt)
         txt = txt.replace("CAVOK", "sky clear and visibility OK")
         return txt.strip()
@@ -80,11 +78,9 @@ def parse_metar(metar_str):
         return f"Could not decode METAR: {e}"
 
 def parse_taf(taf_str):
-    # For now, just show plain text
     return f"We have the following TAF forecast: {taf_str}"
 
 def decode_notam(notam_str):
-    # You may want to use a real decoder here.
     return f"NOTAM: {notam_str}"
 
 class BriefingPDF(FPDF):
@@ -104,7 +100,7 @@ class BriefingPDF(FPDF):
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
         self.ln(4)
         self.set_line_width(0.2)
-    def cover_page(self, mission, pilot, aircraft, date, callsign):
+    def cover_page(self, pilot, aircraft, date, callsign):
         self.add_page()
         self.set_xy(0,30)
         self.set_font("Arial", 'B', 21)
@@ -113,7 +109,6 @@ class BriefingPDF(FPDF):
         self.ln(8)
         self.set_font("Arial", '', 13)
         self.set_text_color(0,0,0)
-        self.cell(0, 8, ascii_safe(f"Mission: {mission}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Pilot: {pilot}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Aircraft: {aircraft}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True, align='C')
@@ -157,8 +152,7 @@ class BriefingPDF(FPDF):
 
 st.title("Preflight Briefing PDF (METAR/TAF/SIGWX/SPC/NOTAMs)")
 
-with st.expander("1. Mission Information", expanded=True):
-    mission = st.text_input("Mission (overview/route/objective)", "")
+with st.expander("1. Pilot/Aircraft Info", expanded=True):
     pilot = st.text_input("Pilot", "")
     aircraft = st.text_input("Aircraft", "")
     callsign = st.text_input("Callsign", "")
@@ -235,7 +229,7 @@ if ready:
         with st.spinner("Preparing your preflight briefing..."):
             pdf = BriefingPDF()
             pdf.set_auto_page_break(auto=True, margin=12)
-            pdf.cover_page(mission, pilot, aircraft, str(date), callsign)
+            pdf.cover_page(pilot, aircraft, str(date), callsign)
 
             # 1. Weather briefing (METAR/TAF/GAMET)
             decoded_metars = [parse_metar(m) for m in (metars or "").split('\n') if m.strip()]
@@ -289,5 +283,6 @@ else:
     st.info("Fill all sections and upload/crop both charts before generating your PDF.")
 
 st.caption("Charts are included in the PDF. METAR/TAF/NOTAMs are decoded using Python, not AI. Weather sections use first person. For upgrades, just ask!")
+
 
 
