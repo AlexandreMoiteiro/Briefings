@@ -116,19 +116,65 @@ class BriefingPDF(FPDF):
 st.title("Preflight Briefing Package (SPC & SIGWX)")
 
 st.markdown("""
-1. Enter mission info below.  
-2. Upload each chart, **crop to desired area**, and write focus if needed.  
-3. Only then click **Generate PDF Report**.
+1. Upload and crop each chart.  
+2. Enter mission info and area descriptions.  
+3. Click **Generate PDF Report** (tokens are only spent at this point).
 """, unsafe_allow_html=True)
 
-if "cropped_spc_bytes" not in st.session_state:
-    st.session_state.cropped_spc_bytes = None
-    st.session_state.spc_desc = ""
-if "cropped_sigwx_bytes" not in st.session_state:
-    st.session_state.cropped_sigwx_bytes = None
-    st.session_state.sigwx_desc = ""
+# ---- Cropping logic OUTSIDE any forms ----
 
-with st.form("briefing_form"):
+st.header("Surface Pressure Chart (SPC)")
+spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
+cropped_spc_img, spc_img_bytes = None, None
+if spc_file:
+    if spc_file.type == "application/pdf":
+        pdf_bytes = spc_file.read()
+        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = pdf_doc.load_page(0)
+        pix = page.get_pixmap()
+        spc_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
+    else:
+        spc_img = Image.open(spc_file).convert("RGB").copy()
+    st.markdown("Crop the SPC chart as needed.")
+    cropped_spc_img = st_cropper(
+        spc_img,
+        aspect_ratio=None,
+        box_color='red',
+        return_type='image',
+        realtime_update=True,
+        key="spc_crop"
+    )
+    st.image(cropped_spc_img, caption="Cropped SPC Area")
+    cropped_spc_img, spc_img_bytes = downscale_image(cropped_spc_img)
+
+st.header("Significant Weather Chart (SIGWX)")
+sigwx_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="sigwx")
+cropped_sigwx_img, sigwx_img_bytes = None, None
+if sigwx_file:
+    if sigwx_file.type == "application/pdf":
+        pdf_bytes = sigwx_file.read()
+        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = pdf_doc.load_page(0)
+        pix = page.get_pixmap()
+        sigwx_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
+    else:
+        sigwx_img = Image.open(sigwx_file).convert("RGB").copy()
+    st.markdown("Crop the SIGWX chart as needed.")
+    cropped_sigwx_img = st_cropper(
+        sigwx_img,
+        aspect_ratio=None,
+        box_color='red',
+        return_type='image',
+        realtime_update=True,
+        key="sigwx_crop"
+    )
+    st.image(cropped_sigwx_img, caption="Cropped SIGWX Area")
+    cropped_sigwx_img, sigwx_img_bytes = downscale_image(cropped_sigwx_img)
+
+# ---- Mission metadata and area descriptions ----
+
+st.header("Briefing Metadata & Area Focus")
+with st.form("meta_form"):
     col1, col2 = st.columns(2)
     with col1:
         mission = st.text_input("Mission (overview/route/objective)", "")
@@ -137,64 +183,9 @@ with st.form("briefing_form"):
         callsign = st.text_input("Callsign", "")
     with col2:
         date = st.date_input("Date", datetime.date.today())
-
-    # --- SPC Chart Upload & Crop ---
-    st.markdown("### Surface Pressure Chart (SPC)")
-    spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
-    if spc_file:
-        if spc_file.type == "application/pdf":
-            pdf_bytes = spc_file.read()
-            pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            page = pdf_doc.load_page(0)
-            pix = page.get_pixmap()
-            spc_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
-        else:
-            spc_img = Image.open(spc_file).convert("RGB").copy()
-        st.markdown("**Crop the SPC chart as needed, then click 'Crop SPC'.**")
-        cropped_spc = st_cropper(
-            spc_img,
-            aspect_ratio=None,
-            box_color='red',
-            return_type='image',
-            realtime_update=True,
-            key="spc_crop"
-        )
-        st.image(cropped_spc, caption="Cropped SPC Area")
-        if st.form_submit_button("Crop SPC"):
-            cropped_spc, spc_img_bytes = downscale_image(cropped_spc)
-            st.session_state.cropped_spc_bytes = spc_img_bytes
-    spc_desc = st.text_input("SPC: Briefly describe area/focus for AI (optional)", value=st.session_state.spc_desc, key="spcdesc")
-    st.session_state.spc_desc = spc_desc
-
-    # --- SIGWX Chart Upload & Crop ---
-    st.markdown("### Significant Weather Chart (SIGWX)")
-    sigwx_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="sigwx")
-    if sigwx_file:
-        if sigwx_file.type == "application/pdf":
-            pdf_bytes = sigwx_file.read()
-            pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            page = pdf_doc.load_page(0)
-            pix = page.get_pixmap()
-            sigwx_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB").copy()
-        else:
-            sigwx_img = Image.open(sigwx_file).convert("RGB").copy()
-        st.markdown("**Crop the SIGWX chart as needed, then click 'Crop SIGWX'.**")
-        cropped_sigwx = st_cropper(
-            sigwx_img,
-            aspect_ratio=None,
-            box_color='red',
-            return_type='image',
-            realtime_update=True,
-            key="sigwx_crop"
-        )
-        st.image(cropped_sigwx, caption="Cropped SIGWX Area")
-        if st.form_submit_button("Crop SIGWX"):
-            cropped_sigwx, sigwx_img_bytes = downscale_image(cropped_sigwx)
-            st.session_state.cropped_sigwx_bytes = sigwx_img_bytes
-    sigwx_desc = st.text_input("SIGWX: Briefly describe area/focus for AI (optional)", value=st.session_state.sigwx_desc, key="sigwxdesc")
-    st.session_state.sigwx_desc = sigwx_desc
-
-    generate = st.form_submit_button("Generate PDF Report")
+    spc_desc = st.text_input("SPC: Briefly describe area/focus for AI (optional)", key="spcdesc")
+    sigwx_desc = st.text_input("SIGWX: Briefly describe area/focus for AI (optional)", key="sigwxdesc")
+    generate = st.form_submit_button("Generate PDF Report", disabled=not (spc_img_bytes and sigwx_img_bytes))
 
 if generate:
     with st.spinner("Generating PDF and calling AI..."):
@@ -202,23 +193,23 @@ if generate:
         pdf.set_auto_page_break(auto=True, margin=12)
         pdf.cover_page(mission, pilot, aircraft, str(date), callsign)
 
-        if st.session_state.cropped_spc_bytes:
-            spc_base64 = base64.b64encode(st.session_state.cropped_spc_bytes.getvalue()).decode("utf-8")
-            spc_ai_text = ai_chart_analysis(spc_base64, "SPC", st.session_state.spc_desc)
+        if spc_img_bytes:
+            spc_base64 = base64.b64encode(spc_img_bytes.getvalue()).decode("utf-8")
+            spc_ai_text = ai_chart_analysis(spc_base64, "SPC", spc_desc)
             pdf.chart_section(
                 title="Surface Pressure Chart (SPC)",
-                img_bytes=st.session_state.cropped_spc_bytes,
+                img_bytes=spc_img_bytes,
                 ai_text=spc_ai_text,
-                user_desc=st.session_state.spc_desc
+                user_desc=spc_desc
             )
-        if st.session_state.cropped_sigwx_bytes:
-            sigwx_base64 = base64.b64encode(st.session_state.cropped_sigwx_bytes.getvalue()).decode("utf-8")
-            sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", st.session_state.sigwx_desc)
+        if sigwx_img_bytes:
+            sigwx_base64 = base64.b64encode(sigwx_img_bytes.getvalue()).decode("utf-8")
+            sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", sigwx_desc)
             pdf.chart_section(
                 title="Significant Weather Chart (SIGWX)",
-                img_bytes=st.session_state.cropped_sigwx_bytes,
+                img_bytes=sigwx_img_bytes,
                 ai_text=sigwx_ai_text,
-                user_desc=st.session_state.sigwx_desc
+                user_desc=sigwx_desc
             )
         out_pdf = "Preflight_Briefing.pdf"
         pdf.output(out_pdf)
@@ -231,7 +222,7 @@ if generate:
             )
         st.success("PDF generated successfully!")
 
-st.caption("Crop both charts as needed before generating your PDF report. Only then will your tokens be used and a PDF be created.")
+st.caption("Crop both charts and check previews before entering mission data and generating your PDF report. Tokens are only used after you click the final button.")
 
 
 
