@@ -58,10 +58,7 @@ def clean_markdown(text):
 
 def ai_chart_analysis(img_base64, chart_type, user_area_desc, extra_instruction="", summarized=False):
     geo_hint = (
-        "For reference: Portugal is located in southwestern Europe, bordering Spain to the east and the Atlantic Ocean to the west. "
-        "On most aviation charts, Portugal appears west of Spain and is a narrow country along the Atlantic coast. "
-        "Assume north is up, west is to the left, east is to the right on the chart. "
-        "Do not mention weather outside Portugal and the immediately adjacent Atlantic approaches. "
+        "Assume north is up, west is to the left, east is to the right on the chart and south is down. "
         "If information for Portugal is not clearly visible, state that and do not invent details."
     )
     if chart_type.lower().startswith("sigwx"):
