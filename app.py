@@ -30,17 +30,17 @@ def downscale_image(img, width=900):
 def ai_chart_analysis(img_base64, chart_type, user_area_desc):
     if chart_type == "SPC":
         sys_prompt = (
-            "Write a flight briefing in a natural, student-like style, as if you are writing it by hand after reviewing the surface pressure chart (SPC). "
-            "Don't use bullet points or sections, just a coherent paragraph or two. Summarize the weather over the selected area, including synoptic situation, pressure systems, fronts, expected winds, clouds, and VFR/IFR implications. "
-            "Do not mention that this was generated automatically or reference AI."
+            "Write a preflight weather analysis as a student, in natural language, for the cropped area of the Surface Pressure Chart (SPC). "
+            "No bullet points, just a paragraph or two: synoptic situation, pressure systems, fronts, expected winds, clouds, VFR/IFR impact. "
+            "Do not mention this is automatic or use technical language."
         )
     else:
         sys_prompt = (
-            "Write a natural, student-like flight briefing after analyzing the significant weather chart (SIGWX). "
-            "Do not use bullet points or headings, just write a few paragraphs as you would for a preflight briefing, focusing on clouds, turbulence, significant weather, freezing level, visibility, and any hazards for the area described. "
-            "Do not reference AI or automation; it should read like a student's summary."
+            "Write a natural-language, student-style analysis for the Significant Weather Chart (SIGWX). "
+            "Paragraphs only (no bullets), focus on clouds, turbulence, significant weather, freezing level, visibility, hazards for the given area. "
+            "Do not reference AI or automation."
         )
-    user_prompt = f"Please focus your analysis on: {user_area_desc.strip()}" if user_area_desc.strip() else "Please focus on Portugal."
+    user_prompt = f"Please focus on: {user_area_desc.strip()}" if user_area_desc.strip() else "Please focus on Portugal."
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -55,6 +55,30 @@ def ai_chart_analysis(img_base64, chart_type, user_area_desc):
         ],
         max_tokens=650,
         temperature=0.5
+    )
+    return response.choices[0].message.content
+
+def ai_decode(code, code_type):
+    prompts = {
+        "NOTAM": (
+            "Rewrite the following NOTAM in plain, student-style English or Portuguese as needed, with all abbreviations decoded and meaning explained clearly and briefly, suitable for a preflight briefing."
+        ),
+        "METAR": (
+            "Decode the following METAR into a natural-language weather summary for a preflight briefing. Use a student-like style, explain all codes and abbreviations, and comment on VFR/IFR suitability."
+        ),
+        "TAF": (
+            "Decode the following TAF into a plain-language forecast suitable for a student preflight briefing. Explain time periods, wind, weather, visibility, and cloud information in a way anyone can understand."
+        ),
+    }
+    sys_prompt = prompts.get(code_type, "Rewrite this code in plain language.")
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": code}
+        ],
+        max_tokens=500,
+        temperature=0.3
     )
     return response.choices[0].message.content
 
@@ -74,53 +98,73 @@ class BriefingPDF(FPDF):
         if self.page_no() == 1:
             pass
         else:
-            self.set_font('Arial', 'B', 14)
-            self.cell(0, 7, ascii_safe("Preflight Briefing"), align='C', ln=1)
+            self.set_font('Arial', 'B', 15)
+            self.set_text_color(34, 34, 34)
+            self.cell(0, 10, ascii_safe("Preflight Briefing"), align='C', ln=1)
             self.ln(2)
     def footer(self):
-        self.set_y(-12)
-        self.set_font('Arial', 'I', 8)
-        self.set_text_color(110, 110, 110)
-        self.cell(0, 8, ascii_safe(f"Page {self.page_no()}"), align='C')
+        self.set_y(-13)
+        self.set_font('Arial', 'I', 7)
+        self.set_text_color(120, 120, 120)
+        self.cell(0, 7, ascii_safe(f"Page {self.page_no()}"), align='C')
+    def section_header(self, title):
+        self.set_font("Arial", 'B', 14)
+        self.set_text_color(0,0,0)
+        self.cell(0, 9, ascii_safe(title), ln=True)
+        self.set_draw_color(70, 130, 180) # blue
+        self.set_line_width(0.8)
+        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
+        self.ln(4)
+        self.set_line_width(0.2)
     def cover_page(self, mission, pilot, aircraft, date, callsign):
         self.add_page()
-        self.set_font("Arial", 'B', 22)
-        self.set_text_color(40,40,40)
-        self.cell(0, 22, ascii_safe("Preflight Briefing"), ln=True, align='C')
-        self.ln(10)
-        self.set_font("Arial", '', 13)
+        self.set_fill_color(34,34,34)
+        self.rect(0, 0, 210, 40, 'F')
+        self.set_font("Arial", 'B', 21)
+        self.set_text_color(255,255,255)
+        self.set_xy(12,12)
+        self.cell(0, 14, ascii_safe("Preflight Briefing Package"), ln=True, align='L')
         self.set_text_color(0,0,0)
-        self.cell(0, 8, ascii_safe(f"Mission: {mission}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Pilot: {pilot}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Aircraft: {aircraft}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
-        self.ln(15)
+        self.set_xy(10, 40)
+        self.set_font("Arial", '', 13)
+        self.cell(0, 8, ascii_safe(f"Mission: {mission}"), ln=True)
+        self.cell(0, 8, ascii_safe(f"Pilot: {pilot}"), ln=True)
+        self.cell(0, 8, ascii_safe(f"Aircraft: {aircraft}"), ln=True)
+        self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True)
+        self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True)
+        self.ln(18)
     def chart_section(self, title, img_bytes, ai_text, user_desc=""):
         self.add_page()
-        self.set_font("Arial", 'B', 15)
-        self.cell(0, 10, ascii_safe(title), ln=True)
+        self.section_header(title)
         if user_desc.strip():
             self.set_font("Arial", 'I', 11)
-            self.set_text_color(50,50,50)
-            self.cell(0, 8, ascii_safe(f"Area/focus: {user_desc.strip()}"), ln=True)
+            self.set_text_color(70,70,70)
+            self.cell(0, 7, ascii_safe(f"Area/focus: {user_desc.strip()}"), ln=True)
             self.set_text_color(0,0,0)
-        self.ln(2)
-        self.set_font("Arial", '', 12)
+        self.ln(1)
+        # Center and size image nicely
         chart_img_path = "tmp_chart.png"
         with open(chart_img_path, "wb") as f:
             f.write(img_bytes.getvalue())
-        self.image(chart_img_path, x=22, w=165)
-        self.ln(6)
-        self.set_font("Arial", '', 12)
+        self.set_font("Arial", '', 11)
+        # Always fit width but never more than 165mm
+        self.image(chart_img_path, x=23, w=165)
+        self.ln(7)
         clean_text = render_markdown_like(ai_text)
+        self.set_font("Arial", '', 12)
         self.multi_cell(0, 8, ascii_safe(clean_text))
+        self.ln(1)
+    def met_section(self, raw_code, decoded, section_title="METAR/TAF/NOTAM"):
+        self.section_header(section_title)
+        self.set_font("Arial", 'I', 11)
+        self.cell(0, 7, ascii_safe(raw_code), ln=True)
+        self.ln(2)
+        self.set_font("Arial", '', 12)
+        self.multi_cell(0, 8, ascii_safe(render_markdown_like(decoded)))
         self.ln(2)
 
-st.title("Preflight Briefing Package (SPC & SIGWX)")
-st.caption("Fill your mission details, crop the SPC for analysis, upload the SIGWX (full chart used), specify area of focus, and generate a natural-style PDF.")
+st.title("Preflight Briefing (SPC, SIGWX, NOTAMs, METARs, TAFs)")
 
-# Mission info fields
 with st.expander("1. Mission Information", expanded=True):
     mission = st.text_input("Mission (overview/route/objective)", "")
     pilot = st.text_input("Pilot", "")
@@ -128,7 +172,7 @@ with st.expander("1. Mission Information", expanded=True):
     callsign = st.text_input("Callsign", "")
     date = st.date_input("Date", datetime.date.today())
 
-# --- SPC (Surface Pressure Chart) ---
+# --- SPC Chart ---
 with st.expander("2. Surface Pressure Chart (SPC)", expanded=True):
     spc_file = st.file_uploader("Upload SPC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="spc")
     if "spc_full_bytes" not in st.session_state:
@@ -147,7 +191,6 @@ with st.expander("2. Surface Pressure Chart (SPC)", expanded=True):
         _, spc_full_bytes = downscale_image(spc_img)
         st.session_state["spc_full_bytes"] = spc_full_bytes
         st.image(spc_img, caption="SPC: Full Chart (included in PDF)")
-        st.markdown("Crop the SPC chart below (used only for analysis, not for the PDF).")
         cropped_spc = st_cropper(
             spc_img,
             aspect_ratio=None,
@@ -158,12 +201,11 @@ with st.expander("2. Surface Pressure Chart (SPC)", expanded=True):
         )
         st.image(cropped_spc, caption="SPC: Cropped Area (for analysis)")
         spc_desc = st.text_input("SPC: Area/focus for analysis (optional)", value=st.session_state["spc_desc"], key="spcdesc")
-        # Always keep last crop/focus live
         cropped_spc, cropped_spc_bytes = downscale_image(cropped_spc)
         st.session_state["cropped_spc_bytes"] = cropped_spc_bytes
         st.session_state["spc_desc"] = spc_desc
 
-# --- SIGWX (Significant Weather Chart) ---
+# --- SIGWX Chart ---
 with st.expander("3. Significant Weather Chart (SIGWX)", expanded=True):
     sigwx_file = st.file_uploader("Upload SIGWX/SWC (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key="sigwx")
     if "sigwx_img_bytes" not in st.session_state:
@@ -184,6 +226,12 @@ with st.expander("3. Significant Weather Chart (SIGWX)", expanded=True):
         sigwx_desc = st.text_input("SIGWX: Area/focus for analysis (default: Portugal)", value=st.session_state["sigwx_desc"], key="sigwxdesc")
         st.session_state["sigwx_desc"] = sigwx_desc
 
+# --- NOTAMs/METARs/TAFs (Multiple) ---
+with st.expander("4. NOTAMs, METARs, TAFs"):
+    notams = st.text_area("Paste NOTAMs here (one per line, or blank):", height=60, key="notam_area")
+    metars = st.text_area("Paste METARs here (one per line, or blank):", height=60, key="metar_area")
+    tafs = st.text_area("Paste TAFs here (one per line, or blank):", height=60, key="taf_area")
+
 ready = st.session_state.get("spc_full_bytes") and st.session_state.get("cropped_spc_bytes") and st.session_state.get("sigwx_img_bytes")
 if ready:
     if st.button("Generate PDF Report"):
@@ -191,7 +239,7 @@ if ready:
             pdf = BriefingPDF()
             pdf.set_auto_page_break(auto=True, margin=12)
             pdf.cover_page(mission, pilot, aircraft, str(date), callsign)
-            # SPC: Use crop for analysis, full chart for PDF
+            # SPC
             spc_base64 = base64.b64encode(st.session_state["cropped_spc_bytes"].getvalue()).decode("utf-8")
             spc_ai_text = ai_chart_analysis(spc_base64, "SPC", st.session_state["spc_desc"])
             pdf.chart_section(
@@ -200,7 +248,7 @@ if ready:
                 ai_text=spc_ai_text,
                 user_desc=st.session_state["spc_desc"]
             )
-            # SIGWX: Full chart, focus for analysis as given
+            # SIGWX
             sigwx_base64 = base64.b64encode(st.session_state["sigwx_img_bytes"].getvalue()).decode("utf-8")
             sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", st.session_state["sigwx_desc"])
             pdf.chart_section(
@@ -209,6 +257,24 @@ if ready:
                 ai_text=sigwx_ai_text,
                 user_desc=st.session_state["sigwx_desc"]
             )
+            # NOTAMs
+            for n in (notams or "").split('\n'):
+                n = n.strip()
+                if n:
+                    decoded = ai_decode(n, "NOTAM")
+                    pdf.met_section(n, decoded, section_title="NOTAM")
+            # METARs
+            for m in (metars or "").split('\n'):
+                m = m.strip()
+                if m:
+                    decoded = ai_decode(m, "METAR")
+                    pdf.met_section(m, decoded, section_title="METAR")
+            # TAFs
+            for t in (tafs or "").split('\n'):
+                t = t.strip()
+                if t:
+                    decoded = ai_decode(t, "TAF")
+                    pdf.met_section(t, decoded, section_title="TAF")
             out_pdf = "Preflight_Briefing.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
@@ -222,9 +288,6 @@ if ready:
 else:
     st.info("Upload and crop the SPC, upload the SIGWX, and fill the info above before generating your PDF.")
 
-st.caption("The full SPC and SIGWX charts will be included in your PDF. Crop the SPC for analysis, upload SIGWX and specify area, and you'll get a briefing that sounds natural and ready to present.")
-
-
-
+st.caption("Charts are included in the PDF. Paste NOTAMs, METARs, TAFs for natural-language decoding. Layout matches Mass & Balance PDF style. For further customizations, ask!")
 
 
