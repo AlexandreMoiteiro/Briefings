@@ -39,26 +39,45 @@ def get_aerodrome_info(icao):
     name = info['name'].title()
     return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
+# PROMPT (MANTIDO DETALHADO E FOCO OPERACIONAL)
 def ai_chart_analysis(img_base64, chart_type, user_area_desc):
-    sys_prompt = (
-        "Write a detailed, operational, student-style preflight weather analysis for the selected area of this aviation chart. "
-        "Speak in the first person plural (e.g., 'We should expect...'). Analyze: fronts, clouds, winds, visibility, temperature, pressure, any potential hazards and relevant operational details. "
-        "Do not mention artificial intelligence or automation. Give a practical and readable report as a student would prepare."
+    prompt = (
+        "Faz uma análise detalhada, operacional e em linguagem de estudante para briefing pré-voo, do gráfico meteorológico fornecido, para a zona indicada."
+        " Usa 1ª pessoa do plural: 'Devemos prever...'."
+        " Analisa: sistemas frontais, pressão, ventos, nuvens, visibilidade, temperaturas e riscos para o voo, dando foco operacional e só para o setor especificado."
+        " Não menciones inteligência artificial ou automação."
+        " Sê prático, conciso e objetivo. Explica como um aluno experiente mas humano faria para o seu briefing escrito."
     )
     area = user_area_desc.strip() or "Portugal"
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": sys_prompt},
+            {"role": "system", "content": prompt},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Please focus only on: {area}"},
+                    {"type": "text", "text": f"Área a analisar: {area}"},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
                 ]
             }
         ],
         max_tokens=700,
+        temperature=0.4
+    )
+    return response.choices[0].message.content
+
+# BREVE COMENTÁRIO METAR/TAF
+def ai_metar_taf_summary(metar, taf, name):
+    base = (
+        f"Comenta muito brevemente e de forma operacional, em 1-2 linhas, as condições meteorológicas de {name} (usando METAR e TAF abaixo)."
+        " Foca só no essencial para despachar ou operar."
+        " Não menciones IA, só escreve como um estudante."
+    )
+    prompt = base + f"\n\nMETAR:\n{metar}\nTAF:\n{taf}\n"
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": prompt}],
+        max_tokens=120,
         temperature=0.4
     )
     return response.choices[0].message.content
@@ -199,36 +218,35 @@ class BriefingPDF(FPDF):
         self.ln(20)
         self.set_font("Arial", 'I', 12)
         self.set_text_color(80,80,80)
-        self.multi_cell(0, 10, ascii_safe("This report is intended for operational preflight briefing use by students and pilots. Generated with briefing tool, based on current meteorological and NOTAM data."))
+        self.multi_cell(0, 10, ascii_safe("Este relatório destina-se a briefing pré-voo operacional de alunos/pilotos. Gerado a partir de dados meteorológicos e NOTAMs atuais."))
     def metar_taf_section(self, pairs):
-        for i, (metar_code, taf_code) in enumerate(pairs, 1):
-            icao = ""
-            metar_lines = metar_code.strip().split()
-            if metar_lines:
-                match = re.match(r'([A-Z]{4})', metar_lines[0])
-                if match:
-                    icao = match.group(1)
-            info, name = get_aerodrome_info(icao) if icao else ("", f"Aerodrome {i}")
-            self.add_section_page(f"{name} ({icao})")
-            self.set_font("Arial", 'B', 12)
+        for i, (metar_code, taf_code, icao, name, ai_brief) in enumerate(pairs, 1):
+            self.add_section_page(f"{icao} ({name})")
+            self.set_font("Arial", 'B', 13)
             self.set_text_color(40,40,40)
-            self.cell(0, 7, "METAR:", ln=True)
+            self.cell(0, 8, "METAR:", ln=True)
             self.set_font("Arial", '', 11)
             self.set_text_color(0,0,0)
             self.multi_cell(0, 7, ascii_safe(metar_code))
             self.set_font("Arial", 'I', 11)
-            self.set_text_color(80,80,80)
+            self.set_text_color(100,100,100)
             self.multi_cell(0, 7, ascii_safe(decode_metar(metar_code)))
-            self.ln(1)
-            self.set_font("Arial", 'B', 12)
+            self.ln(2)
+            self.set_font("Arial", 'B', 13)
             self.set_text_color(40,40,40)
-            self.cell(0, 7, "TAF:", ln=True)
+            self.cell(0, 8, "TAF:", ln=True)
             self.set_font("Arial", '', 11)
             self.set_text_color(0,0,0)
             self.multi_cell(0, 7, ascii_safe(taf_code))
             self.set_font("Arial", 'I', 11)
-            self.set_text_color(80,80,80)
+            self.set_text_color(100,100,100)
             self.multi_cell(0, 7, ascii_safe(decode_taf(taf_code)))
+            self.ln(1)
+            # Pequeno resumo AI
+            if ai_brief:
+                self.set_font("Arial", 'I', 11)
+                self.set_text_color(0,64,150)
+                self.multi_cell(0, 7, ascii_safe(ai_brief))
             self.ln(3)
     def enroute_section(self, text):
         if text.strip():
@@ -240,7 +258,7 @@ class BriefingPDF(FPDF):
         if user_desc.strip():
             self.set_font("Arial", 'I', 11)
             self.set_text_color(70,70,70)
-            self.cell(0, 7, ascii_safe(f"Area/focus: {user_desc.strip()}"), ln=True)
+            self.cell(0, 7, ascii_safe(f"Área/Foco: {user_desc.strip()}"), ln=True)
             self.set_text_color(0,0,0)
         self.ln(2)
         chart_img_path = "tmp_chart.png"
@@ -264,68 +282,63 @@ class BriefingPDF(FPDF):
                 self.cell(0, 10, ascii_safe(f"{entry['aero'].upper()} ({name})"), ln=True)
             self.set_text_color(0,0,0)
             self.set_font("Arial", '', 12)
-            for nidx, notam in enumerate(entry["notams"], 1):
-                if notam.strip():
-                    # Extrai FROM, TO e número (ex: A1234/24)
-                    code_match = re.search(r'\b([A-Z]\d{4}/\d{2})\b', notam)
-                    notam_num = code_match.group(1) if code_match else ""
-                    from_match = re.search(r'FROM:([^\n]*)', notam, re.IGNORECASE)
-                    to_match = re.search(r'TO:([^\n]*)', notam, re.IGNORECASE)
-                    from_str = from_match.group(1).strip() if from_match else ""
-                    to_str = to_match.group(1).strip() if to_match else ""
-                    content = re.sub(r'FROM:[^\n]*', '', notam, flags=re.IGNORECASE)
-                    content = re.sub(r'TO:[^\n]*', '', content, flags=re.IGNORECASE)
-                    content = content.replace(notam_num, '').strip()
-                    self.cell(8,8,'+', align='L')
-                    self.set_font("Arial",'',12)
-                    self.multi_cell(170, 8, ascii_safe(content))
-                    self.set_font("Arial",'B',11)
-                    self.cell(15,8,ascii_safe(f"{notam_num}"), align='R')
-                    self.ln(1)
-                    if from_str or to_str:
-                        self.set_font("Arial",'',11)
-                        self.cell(15,8,"")
-                        if from_str:
-                            self.cell(0,8,f"FROM: {from_str} ", align='L')
-                        if to_str:
-                            self.cell(0,8,f"TO: {to_str}", align='L')
-                        self.ln(6)
+            for nidx, notam_dict in enumerate(entry["notams"], 1):
+                notam_num = notam_dict.get("num", "")
+                content = notam_dict.get("txt", "")
+                from_str = notam_dict.get("from", "")
+                to_str = notam_dict.get("to", "")
+                # Visual estilo print enviado
+                self.cell(8,8,'+', align='L')
+                self.set_font("Arial",'',12)
+                self.multi_cell(170, 8, ascii_safe(content))
+                self.set_font("Arial",'B',11)
+                self.cell(15,8,ascii_safe(f"{notam_num}"), align='R')
+                self.ln(1)
+                if from_str or to_str:
+                    self.set_font("Arial",'',11)
+                    self.cell(15,8,"")
+                    if from_str:
+                        self.cell(0,8,f"FROM: {from_str} ", align='L')
+                    if to_str:
+                        self.cell(0,8,f"TO: {to_str}", align='L')
+                    self.ln(6)
             self.ln(3)
     def conclusion(self):
-        self.add_section_page("Conclusion")
+        self.add_section_page("Conclusão")
         self.set_font("Arial", '', 13)
         txt = (
-            "Dispatch criteria include assessing weather conditions for both departure and arrival, "
-            "ensuring that the meteorological minima and operational requirements are met, "
-            "and verifying the suitability of NOTAMs and other operational information."
+            "Para despacho, considerámos as condições meteorológicas nos aeródromos de partida e destino, os avisos enroute e NOTAMs relevantes. "
+            "A decisão deve garantir que todos os requisitos operacionais e meteorológicos estão cumpridos, e que os procedimentos de contingência estão previstos conforme necessário."
         )
         self.multi_cell(0,8, ascii_safe(txt))
         self.ln(2)
 
+# --- FUNÇÃO PARA OS NOTAMS ---
 def notam_block():
     if "notam_data" not in st.session_state:
-        st.session_state.notam_data = [{"aero": "", "notams": [""]}]
-    st.subheader("6. NOTAMs by Aerodrome")
+        st.session_state.notam_data = [{"aero": "", "notams": [{"num": "", "txt": "", "from": "", "to": ""}]}]
+    st.subheader("6. NOTAMs por Aeródromo")
     for idx, entry in enumerate(st.session_state.notam_data):
-        with st.expander(f"NOTAMs for Aerodrome {idx+1}", expanded=True):
-            entry["aero"] = st.text_input("Aerodrome ICAO or Name", value=entry["aero"], key=f"notam_aero_{idx}")
+        with st.expander(f"NOTAMs para {entry['aero'] or 'Aeródromo'}", expanded=True):
+            entry["aero"] = st.text_input("ICAO ou Nome do Aeródromo", value=entry["aero"], key=f"notam_aero_{idx}")
             num_notams = len(entry["notams"])
             for nidx in range(num_notams):
-                entry["notams"][nidx] = st.text_area(f"NOTAM {nidx+1}", value=entry["notams"][nidx], key=f"notam_{idx}_{nidx}")
-            col_add, col_rm = st.columns([0.22,0.22])
-            if col_add.button("Add NOTAM", key=f"addnotam_{idx}"):
-                entry["notams"].append("")
-            if num_notams > 1 and col_rm.button("Remove NOTAM", key=f"rmnotam_{idx}"):
+                notam = entry["notams"][nidx]
+                cols = st.columns([0.25,0.5,0.12,0.13])
+                notam["num"] = cols[0].text_input("Nº NOTAM", value=notam["num"], key=f"notam_num_{idx}_{nidx}")
+                notam["txt"] = cols[1].text_area("Texto principal", value=notam["txt"], key=f"notam_txt_{idx}_{nidx}", height=50)
+                notam["from"] = cols[2].text_input("FROM", value=notam["from"], key=f"notam_from_{idx}_{nidx}")
+                notam["to"] = cols[3].text_input("TO", value=notam["to"], key=f"notam_to_{idx}_{nidx}")
+            col_add, col_rm = st.columns([0.18,0.18])
+            if col_add.button("Adicionar NOTAM", key=f"addnotam_{idx}"):
+                entry["notams"].append({"num": "", "txt": "", "from": "", "to": ""})
+            if num_notams > 1 and col_rm.button("Remover NOTAM", key=f"rmnotam_{idx}"):
                 entry["notams"].pop()
     btncols = st.columns([0.23,0.23])
-    if btncols[0].button("Add Aerodrome NOTAM"):
-        st.session_state.notam_data.append({"aero":"", "notams":[""]})
-    if len(st.session_state.notam_data)>1 and btncols[1].button("Remove Last Aerodrome NOTAM"):
+    if btncols[0].button("Adicionar Aeródromo"):
+        st.session_state.notam_data.append({"aero":"", "notams":[{"num": "", "txt": "", "from": "", "to": ""}]})
+    if len(st.session_state.notam_data)>1 and btncols[1].button("Remover Último Aeródromo"):
         st.session_state.notam_data.pop()
-
-def sigmet_block():
-    st.subheader("5. En-route Weather Warnings (SIGMET/AIRMET/GAMET)")
-    return st.text_area("SIGMET/AIRMET/GAMET:", height=110, key="sigmet_area")
 
 # -------- STREAMLIT APP ----------
 st.title("Preflight Weather Briefing and NOTAMs")
@@ -339,8 +352,8 @@ with st.expander("1. Pilot/Aircraft Info", expanded=True):
 
 if "metar_taf_pairs" not in st.session_state:
     st.session_state.metar_taf_pairs = [("", "")]
-st.subheader("2. METAR/TAF Pairs (by Aerodrome)")
-remove_pair = st.button("Remove last Aerodrome") if len(st.session_state.metar_taf_pairs) > 1 else None
+st.subheader("2. METAR/TAF Pairs (por Aeródromo)")
+remove_pair = st.button("Remover último Aeródromo") if len(st.session_state.metar_taf_pairs) > 1 else None
 for i, (metar, taf) in enumerate(st.session_state.metar_taf_pairs):
     col1, col2 = st.columns(2)
     with col1:
@@ -353,7 +366,7 @@ for i, (metar, taf) in enumerate(st.session_state.metar_taf_pairs):
             st.session_state.metar_taf_pairs[i][0],
             st.text_area(f"TAF (raw code)", value=taf, key=f"taf_{i}")
         )
-if st.button("Add another Aerodrome"):
+if st.button("Adicionar outro Aeródromo"):
     st.session_state.metar_taf_pairs.append(("", ""))
 if remove_pair:
     st.session_state.metar_taf_pairs.pop()
@@ -410,7 +423,7 @@ with st.expander("4. Surface Pressure Chart (SPC)", expanded=True):
         st.session_state["cropped_spc_bytes"] = cropped_spc_bytes
         st.session_state["spc_desc"] = spc_desc
 
-sigmet_gamet_text = sigmet_block()
+sigmet_gamet_text = st.text_area("5. SIGMET/AIRMET/GAMET (raw or decoded):", height=110, key="sigmet_area")
 notam_block()
 
 ready = (
@@ -424,15 +437,22 @@ if ready:
             pdf = BriefingPDF()
             pdf.set_auto_page_break(auto=True, margin=14)
             pdf.cover_page(pilot, aircraft, str(date), callsign, mission)
-            metar_taf_pairs = [
-                (metar, taf)
-                for metar, taf in st.session_state.metar_taf_pairs
-                if metar.strip() or taf.strip()
-            ]
+            metar_taf_pairs = []
+            for metar_code, taf_code in st.session_state.metar_taf_pairs:
+                icao = ""
+                metar_lines = metar_code.strip().split()
+                if metar_lines:
+                    match = re.match(r'([A-Z]{4})', metar_lines[0])
+                    if match:
+                        icao = match.group(1)
+                info, name = get_aerodrome_info(icao) if icao else ("", f"Aerodrome")
+                # Pequeno comentário AI para o par
+                ai_brief = ai_metar_taf_summary(metar_code, taf_code, name) if metar_code or taf_code else ""
+                metar_taf_pairs.append((metar_code, taf_code, icao, name, ai_brief))
             if metar_taf_pairs:
                 pdf.metar_taf_section(metar_taf_pairs)
             pdf.enroute_section(sigmet_gamet_text)
-            # SIGWX page (CORRECT)
+            # SIGWX correto!
             sigwx_base64 = base64.b64encode(st.session_state["sigwx_img_bytes"].getvalue()).decode("utf-8")
             sigwx_ai_text = ai_chart_analysis(sigwx_base64, "SIGWX", st.session_state["sigwx_desc"])
             pdf.chart_section(
@@ -441,7 +461,7 @@ if ready:
                 ai_text=sigwx_ai_text,
                 user_desc=st.session_state["sigwx_desc"]
             )
-            # SPC page (CORRECT)
+            # SPC correto!
             spc_base64 = base64.b64encode(st.session_state["cropped_spc_bytes"].getvalue()).decode("utf-8")
             spc_ai_text = ai_chart_analysis(spc_base64, "SPC", st.session_state["spc_desc"])
             pdf.chart_section(
@@ -463,7 +483,10 @@ if ready:
                 )
             st.success("PDF generated successfully!")
 else:
-    st.info("Fill all sections and upload/crop both charts before generating your PDF.")
+    st.info("Preencha todas as seções e carregue ambos os charts antes de gerar o PDF.")
+
+
+
 
 
 
