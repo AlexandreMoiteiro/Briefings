@@ -26,8 +26,7 @@ AIRPORTS = airportsdata.load('ICAO')
 st.set_page_config(
     page_title="Briefings Sevenair",
     page_icon="📑",   # <-- abacus emoji
-    layout="wide"
-)
+    layout="wide")
 
 def ascii_safe(text):
     if not isinstance(text, str):
