@@ -7,9 +7,7 @@ from fpdf import FPDF
 import fitz
 import datetime
 import unicodedata
-
 import airportsdata
-import re
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 AIRPORTS = airportsdata.load('ICAO')
@@ -17,7 +15,7 @@ AIRPORTS = airportsdata.load('ICAO')
 def ascii_safe(text):
     return unicodedata.normalize('NFKD', str(text)).encode('ascii', 'ignore').decode('ascii')
 
-def downscale_image(img, width=1200):
+def downscale_image(img, width=1300):
     if img.width > width:
         ratio = width / img.width
         img = img.resize((width, int(img.height * ratio)))
@@ -38,8 +36,8 @@ def get_aerodrome_info(icao):
 def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao=""):
     prompt = (
         f"You are a meteorology instructor. Analyse the following {msg_type} as if explaining every code and section to a pilot preparing for an exam. "
-        "For every element (even the less usual ones like wind shifts, BECMG, TEMPO, remarks, QNH, etc), provide a line-by-line detailed explanation. "
-        "Do not summarize or omit anything. Write in bullet points. If the message refers to more than one time period or line, explain each one."
+        "For every element (including wind shifts, BECMG, TEMPO, remarks, QNH, etc), provide a line-by-line detailed explanation in bullet points. "
+        "Do not summarize or omit anything. If the message refers to more than one time period or line, explain each one."
     )
     if icao:
         prompt += f" The ICAO is {icao}."
@@ -71,10 +69,9 @@ def ai_gamet_analysis(gamet_text):
     return response.choices[0].message.content.strip()
 
 def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc):
-    area = user_area_desc.strip() or "the selected area"
     if "sigwx" in chart_type.lower():
         prompt = (
-            f"You are a meteorology instructor. For this Significant Weather (SIGWX) chart, "
+            "You are a meteorology instructor. For this Significant Weather (SIGWX) chart, "
             "list and explain in exhaustive bullet points EVERY symbol, abbreviation, comment, line, and meteorological feature visible in the chart. "
             "For each symbol or line, describe what it means in detail, its significance for pilots, and possible operational implications. "
             "Do not summarize. Include explanations of all jet streams, turbulence zones, cloud types, fronts, pressure patterns, tropopause levels, and any written comments, even abbreviations. "
@@ -148,58 +145,55 @@ class BriefingPDF(FPDF):
         self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Flight Time (UTC): {time_utc}"), ln=True, align='C')
         self.ln(30)
-    def metar_taf_gamet_section(self, metars, tafs, gamet):
-        # METARs
-        for entry in metars:
+    def metar_taf_gamet_section(self, pairs, gamet):
+        self.add_section_page("METAR/TAF/GAMET")
+        self.set_font("Arial", '', 12)
+        for entry in pairs:
             icao = entry['icao'].upper()
-            self.add_section_page(f"METAR {icao}")
-            self.set_font("Arial", 'B', 13)
-            self.cell(0, 8, "METAR (Raw):", ln=True)
+            self.set_font("Arial", 'B', 14)
+            self.cell(0, 9, f"{icao}", ln=True)
             self.set_font("Arial", '', 12)
-            self.multi_cell(0, 8, ascii_safe(entry["metar"]))
-            ai_text = ai_metar_taf_analysis(entry["metar"], msg_type="METAR", icao=icao)
-            self.ln(2)
-            self.set_font("Arial", 'B', 13)
-            self.cell(0, 8, "AI Decoded METAR:", ln=True)
-            self.set_font("Arial", '', 12)
-            self.multi_cell(0, 8, ascii_safe(ai_text))
-        # TAFs
-        for entry in tafs:
-            icao = entry['icao'].upper()
-            self.add_section_page(f"TAF {icao}")
-            self.set_font("Arial", 'B', 13)
-            self.cell(0, 8, "TAF (Raw):", ln=True)
-            self.set_font("Arial", '', 12)
-            self.multi_cell(0, 8, ascii_safe(entry["taf"]))
-            ai_text = ai_metar_taf_analysis(entry["taf"], msg_type="TAF", icao=icao)
-            self.ln(2)
-            self.set_font("Arial", 'B', 13)
-            self.cell(0, 8, "AI Decoded TAF:", ln=True)
-            self.set_font("Arial", '', 12)
-            self.multi_cell(0, 8, ascii_safe(ai_text))
-        # GAMET
+            if entry.get("metar","").strip():
+                self.cell(0, 7, "METAR (Raw):", ln=True)
+                self.multi_cell(0, 7, ascii_safe(entry['metar']))
+                ai_text = ai_metar_taf_analysis(entry["metar"], msg_type="METAR", icao=icao)
+                self.set_font("Arial", 'I', 11)
+                self.multi_cell(0, 7, ascii_safe(ai_text))
+            if entry.get("taf","").strip():
+                self.cell(0, 7, "TAF (Raw):", ln=True)
+                self.multi_cell(0, 7, ascii_safe(entry['taf']))
+                ai_text = ai_metar_taf_analysis(entry["taf"], msg_type="TAF", icao=icao)
+                self.set_font("Arial", 'I', 11)
+                self.multi_cell(0, 7, ascii_safe(ai_text))
+            self.ln(5)
         if gamet and gamet.strip():
-            self.add_section_page("GAMET/SIGMET/AIRMET")
-            self.set_font("Arial", 'B', 13)
-            self.cell(0, 8, "GAMET (Raw):", ln=True)
+            self.set_font("Arial", 'B', 14)
+            self.cell(0, 8, "GAMET/SIGMET/AIRMET (Raw):", ln=True)
             self.set_font("Arial", '', 12)
-            self.multi_cell(0, 8, ascii_safe(gamet))
+            self.multi_cell(0, 7, ascii_safe(gamet))
             ai_text = ai_gamet_analysis(gamet)
-            self.ln(2)
-            self.set_font("Arial", 'B', 13)
-            self.cell(0, 8, "AI Decoded GAMET/SIGMET/AIRMET:", ln=True)
-            self.set_font("Arial", '', 12)
-            self.multi_cell(0, 8, ascii_safe(ai_text))
+            self.set_font("Arial", 'I', 11)
+            self.multi_cell(0, 7, ascii_safe(ai_text))
     def chart_section(self, charts):
         for chart in charts:
             self.add_section_page(chart['title'])
+            if chart.get("subtitle"):
+                self.set_font("Arial", 'I', 12)
+                self.cell(0, 8, ascii_safe(chart['subtitle']), ln=True)
             if chart.get("img_bytes"):
+                max_w = self.w - 30
+                max_h = self.h - 60
                 img_bytes = chart["img_bytes"]
+                img = Image.open(img_bytes)
+                iw, ih = img.size
+                ratio = min(max_w/iw, max_h/ih)
+                final_w, final_h = int(iw*ratio), int(ih*ratio)
                 chart_img_path = f"tmp_chart_{ascii_safe(chart['title']).replace(' ','_')}.png"
-                with open(chart_img_path, "wb") as f:
-                    f.write(img_bytes.getvalue())
-                self.image(chart_img_path, x=22, w=168)
-                self.ln(5)
+                img.save(chart_img_path)
+                x = (self.w-final_w)//2
+                y = self.get_y() + 8
+                self.image(chart_img_path, x=x, y=y, w=final_w, h=final_h)
+                self.ln(final_h+5)
             ai_text = chart.get("ai_text", "")
             if ai_text:
                 self.set_font("Arial", '', 12)
@@ -221,40 +215,48 @@ class RawLandscapePDF(FPDF):
         self.cell(0, 10, ascii_safe(f"Pilot: {pilot}    Aircraft: {aircraft}    Callsign: {callsign}"), ln=True, align='C')
         self.cell(0, 10, ascii_safe(f"Mission: {mission}    Date: {date}    UTC: {time_utc}"), ln=True, align='C')
         self.ln(30)
-    def metar_taf_gamet_section(self, metars, tafs, gamet):
-        # METARs
-        for entry in metars:
+    def metar_taf_gamet_section(self, pairs, gamet):
+        self.add_page()
+        self.set_font("Arial", 'B', 20)
+        self.cell(0, 12, "METAR/TAF/GAMET", ln=True, align='C')
+        self.set_font("Arial", '', 13)
+        for entry in pairs:
             icao = entry['icao'].upper()
-            self.add_page()
-            self.set_font("Arial", 'B', 22)
-            self.cell(0, 15, f"METAR {icao}", ln=True, align='C')
-            self.set_font("Arial", '', 13)
-            self.multi_cell(0, 10, ascii_safe(entry["metar"]))
-        # TAFs
-        for entry in tafs:
-            icao = entry['icao'].upper()
-            self.add_page()
-            self.set_font("Arial", 'B', 22)
-            self.cell(0, 15, f"TAF {icao}", ln=True, align='C')
-            self.set_font("Arial", '', 13)
-            self.multi_cell(0, 10, ascii_safe(entry["taf"]))
-        # GAMET
+            self.set_font("Arial", 'B', 14)
+            self.cell(0, 9, f"{icao}", ln=True)
+            self.set_font("Arial", '', 12)
+            if entry.get("metar","").strip():
+                self.cell(0, 7, "METAR:", ln=True)
+                self.multi_cell(0, 7, ascii_safe(entry['metar']))
+            if entry.get("taf","").strip():
+                self.cell(0, 7, "TAF:", ln=True)
+                self.multi_cell(0, 7, ascii_safe(entry['taf']))
+            self.ln(3)
         if gamet and gamet.strip():
-            self.add_page()
-            self.set_font("Arial", 'B', 22)
-            self.cell(0, 15, "GAMET/SIGMET/AIRMET", ln=True, align='C')
-            self.set_font("Arial", '', 13)
-            self.multi_cell(0, 10, ascii_safe(gamet))
+            self.set_font("Arial", 'B', 14)
+            self.cell(0, 8, "GAMET/SIGMET/AIRMET:", ln=True)
+            self.set_font("Arial", '', 12)
+            self.multi_cell(0, 7, ascii_safe(gamet))
     def chart_fullpage(self, charts):
         for chart in charts:
             self.add_page()
             self.set_font("Arial", 'B', 18)
             self.cell(0, 10, ascii_safe(chart['title']), ln=True, align='C')
+            if chart.get('subtitle'):
+                self.set_font("Arial", 'I', 14)
+                self.cell(0, 8, ascii_safe(chart['subtitle']), ln=True, align='C')
             if chart.get("img_bytes"):
+                max_w = self.w - 30
+                max_h = self.h - 55
+                img = Image.open(chart["img_bytes"])
+                iw, ih = img.size
+                ratio = min(max_w/iw, max_h/ih)
+                final_w, final_h = int(iw*ratio), int(ih*ratio)
                 chart_img_path = f"tmp_chart_{ascii_safe(chart['title']).replace(' ','_')}.png"
-                with open(chart_img_path, "wb") as f:
-                    f.write(chart["img_bytes"].getvalue())
-                self.image(chart_img_path, x=15, y=25, w=270)
+                img.save(chart_img_path)
+                x = (self.w-final_w)//2
+                y = self.get_y() + 8
+                self.image(chart_img_path, x=x, y=y, w=final_w, h=final_h)
 
 # ----------------- STREAMLIT APP ----------------
 st.title("Preflight Weather Briefing")
@@ -270,26 +272,25 @@ with st.expander("1. Pilot/Aircraft Info", expanded=True):
 def metar_taf_block():
     if "metar_taf_pairs" not in st.session_state:
         st.session_state.metar_taf_pairs = []
-    st.subheader("2. METAR/TAF by Aerodrome")
-    add_metar = st.button("Add another Aerodrome (METAR/TAF)")
-    if add_metar:
+    st.subheader("2. METAR/TAF por Aeródromo")
+    if st.button("Adicionar Aeródromo (METAR/TAF)"):
         st.session_state.metar_taf_pairs.append({"icao":"", "metar":"", "taf":""})
     for i, entry in enumerate(st.session_state.metar_taf_pairs):
-        cols = st.columns([0.15,0.45,0.4])
+        cols = st.columns([0.18,0.41,0.41])
         entry["icao"] = cols[0].text_input("ICAO", value=entry.get("icao",""), key=f"icao_{i}")
-        entry["metar"] = cols[1].text_area("METAR", value=entry.get("metar",""), key=f"metar_{i}", height=80)
-        entry["taf"] = cols[2].text_area("TAF", value=entry.get("taf",""), key=f"taf_{i}", height=80)
+        entry["metar"] = cols[1].text_area("METAR", value=entry.get("metar",""), key=f"metar_{i}", height=70)
+        entry["taf"] = cols[2].text_area("TAF", value=entry.get("taf",""), key=f"taf_{i}", height=70)
 
-def chart_block_multi(chart_key, label, title_base, desc_label="Area/focus for analysis"):
+def chart_block_multi(chart_key, label, title_base, subtitle_label):
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
     st.subheader(label)
-    add_chart = st.button(f"Add {label}")
-    if add_chart:
-        st.session_state[chart_key].append({"desc": "Portugal", "img_bytes": None, "title": title_base})
+    if st.button(f"Adicionar {label}"):
+        st.session_state[chart_key].append({"desc": "Portugal", "img_bytes": None, "title": title_base, "subtitle": ""})
     for i, chart in enumerate(st.session_state[chart_key]):
         with st.expander(f"{label} {i+1}", expanded=True):
-            chart["desc"] = st.text_input(desc_label, value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
+            chart["desc"] = st.text_input("Área/foco para análise", value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
+            chart["subtitle"] = st.text_input(subtitle_label, value=chart.get("subtitle",""), key=f"{chart_key}_subtitle_{i}")
             chart_file = st.file_uploader(f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{chart_key}_file_{i}")
             if chart_file:
                 if chart_file.type == "application/pdf":
@@ -302,16 +303,15 @@ def chart_block_multi(chart_key, label, title_base, desc_label="Area/focus for a
                 _, img_bytes = downscale_image(img)
                 chart["img_bytes"] = img_bytes
 
-st.session_state.setdefault("gamet_raw", "")
-
+# Main form blocks
 metar_taf_block()
-chart_block_multi("sigwx_charts", "Significant Weather Chart (SIGWX)", "Significant Weather Chart (SIGWX)")
-chart_block_multi("windtemp_charts", "Wind and Temperature Chart", "Wind and Temperature Chart")
-chart_block_multi("spc_charts", "Surface Pressure Chart (SPC)", "Surface Pressure Chart (SPC)")
+chart_block_multi("sigwx_charts", "Significant Weather Chart (SIGWX)", "Significant Weather Chart (SIGWX)", "Issuing Organization")
+chart_block_multi("windtemp_charts", "Wind and Temperature Chart", "Wind and Temperature Chart", "Flight Levels (e.g. FL050-FL340)")
+chart_block_multi("spc_charts", "Surface Pressure Chart (SPC)", "Surface Pressure Chart (SPC)", "Chart Validity Time (e.g. 09Z-12Z)")
+
 st.subheader("6. GAMET/SIGMET/AIRMET (Raw)")
 st.session_state["gamet_raw"] = st.text_area("Paste GAMET/SIGMET/AIRMET here (raw text):", value=st.session_state.get("gamet_raw", ""), height=100)
 
-# -------- PDF GENERATION --------------
 ready = (
     len(st.session_state.get("metar_taf_pairs", [])) > 0
     and len([c for c in st.session_state.get("sigwx_charts", []) if c.get("img_bytes")]) > 0
@@ -324,31 +324,31 @@ if ready:
     if col1.button("Gerar PDF COMPLETO (detalhado)"):
         with st.spinner("Preparando PDF detalhado..."):
             pdf = BriefingPDF()
-            pdf.set_auto_page_break(auto=True, margin=14)
+            pdf.set_auto_page_break(auto=True, margin=15)
             pdf.cover_page(pilot, aircraft, str(date), time_utc, callsign, mission)
-            metars = [{"icao": e["icao"], "metar": e["metar"]} for e in st.session_state["metar_taf_pairs"] if e["metar"].strip()]
-            tafs = [{"icao": e["icao"], "taf": e["taf"]} for e in st.session_state["metar_taf_pairs"] if e["taf"].strip()]
+            metar_taf_pairs = [
+                entry for entry in st.session_state.get("metar_taf_pairs", [])
+                if entry.get("metar","").strip() or entry.get("taf","").strip()
+            ]
             gamet = st.session_state.get("gamet_raw", "")
-            pdf.metar_taf_gamet_section(metars, tafs, gamet)
-            # SIGWX
+            pdf.metar_taf_gamet_section(metar_taf_pairs, gamet)
+            # Charts section (all with image + detailed analysis)
             charts_all = []
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
                     img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis_instructor(img_b64, "Significant Weather Chart (SIGWX)", chart.get("desc", "Portugal"))
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text})
-            # Wind/Temp
+                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
+                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
             for chart in st.session_state.get("windtemp_charts", []):
                 if chart.get("img_bytes"):
                     img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis_instructor(img_b64, "Wind and Temperature Chart", chart.get("desc", "Portugal"))
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text})
-            # SPC
+                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
+                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
             for chart in st.session_state.get("spc_charts", []):
                 if chart.get("img_bytes"):
                     img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis_instructor(img_b64, "Surface Pressure Chart (SPC)", chart.get("desc", "Portugal"))
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text})
+                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
+                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
             pdf.chart_section(charts_all)
             out_pdf = f"weather_briefing_detailed_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
@@ -363,20 +363,22 @@ if ready:
         with st.spinner("Preparando PDF raw..."):
             pdf = RawLandscapePDF()
             pdf.cover_page(pilot, aircraft, str(date), time_utc, callsign, mission)
-            metars = [{"icao": e["icao"], "metar": e["metar"]} for e in st.session_state["metar_taf_pairs"] if e["metar"].strip()]
-            tafs = [{"icao": e["icao"], "taf": e["taf"]} for e in st.session_state["metar_taf_pairs"] if e["taf"].strip()]
+            metar_taf_pairs = [
+                entry for entry in st.session_state.get("metar_taf_pairs", [])
+                if entry.get("metar","").strip() or entry.get("taf","").strip()
+            ]
             gamet = st.session_state.get("gamet_raw", "")
-            pdf.metar_taf_gamet_section(metars, tafs, gamet)
+            pdf.metar_taf_gamet_section(metar_taf_pairs, gamet)
             charts_all = []
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"]})
+                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle","")})
             for chart in st.session_state.get("windtemp_charts", []):
                 if chart.get("img_bytes"):
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"]})
+                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle","")})
             for chart in st.session_state.get("spc_charts", []):
                 if chart.get("img_bytes"):
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"]})
+                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle","")})
             pdf.chart_fullpage(charts_all)
             out_pdf = f"weather_briefing_raw_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
@@ -388,7 +390,7 @@ if ready:
                     mime="application/pdf"
                 )
 else:
-    st.info("Fill all sections and upload at least one chart of each type before generating your PDFs.")
+    st.info("Preenche todas as secções e faz upload de pelo menos um chart de cada tipo para gerar os PDFs.")
 
 
 
