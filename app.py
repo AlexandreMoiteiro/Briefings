@@ -250,7 +250,7 @@ class RawLandscapePDF(FPDF):
                 self.image(chart_img_path, x=x, y=y, w=final_w, h=final_h)
 
 # ----------------- STREAMLIT APP ----------------
-st.title("Preflight Weather Briefin")
+st.title("Preflight Weather Briefing")
 
 with st.expander("Pilot/Aircraft Info", expanded=True):
     pilot = st.text_input("Pilot", "")
