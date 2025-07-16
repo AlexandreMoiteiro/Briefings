@@ -10,29 +10,17 @@ import unicodedata
 import re
 import airportsdata
 from metar.Metar import Metar
-import requests
-import json
-from streamlit_cropper import st_cropper
 
-ADMIN_EMAIL = "alexandre.moiteiro@gmail.com"
-WEBSITE_LINK = "https://mass-balance.streamlit.app/"
-SENDGRID_API_KEY = st.secrets["SENDGRID_API_KEY"]
-SENDER_EMAIL = "alexandre.moiteiro@students.sevenair.com"
+# -------- SETUP & CONSTANTS --------
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 AIRPORTS = airportsdata.load('ICAO')
-
-st.set_page_config(
-    page_title="Briefings Sevenair",
-    page_icon="📑",
-    layout="wide"
-)
 
 def ascii_safe(text):
     if not isinstance(text, str):
         text = str(text)
     return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
 
-def downscale_image(img, width=900):
+def downscale_image(img, width=1100):
     if img.width > width:
         ratio = width / img.width
         new_size = (width, int(img.height * ratio))
@@ -51,48 +39,49 @@ def get_aerodrome_info(icao):
     name = info['name'].title()
     return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
-def clean_markdown(text):
-    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
-    text = re.sub(r"#+\s?", "", text)
-    text = re.sub(r"[*•\-]\s+", "", text)
-    text = text.replace("**", "").replace("__", "")
-    text = re.sub(r"[_`]", "", text)
-    text = re.sub(r"\n{2,}", "\n\n", text)
-    return text.strip()
-
-#################
-# AI EXPLICAÇÃO #
-#################
-
-def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc, extra_instruction=""):
+# ------------- AI PROMPTS (ULTRA-DETAILED) -------------
+def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc):
     area = user_area_desc.strip() or "the selected area"
-    prompt = (
-        f"You are a meteorology instructor. Analyze in exhaustive bullet points this {chart_type} chart for {area}. "
-        "Explain ALL visible meteorological phenomena, symbols, and details, with their operational meaning and relevance for pilots. "
-        "List every significant element. Be didactic and explicit. Respond in English."
-    )
-    if extra_instruction:
-        prompt += " " + extra_instruction.strip()
+    if "sigwx" in chart_type.lower():
+        prompt = (
+            f"You are a meteorology instructor. For this Significant Weather (SIGWX) chart, "
+            f"list and explain in exhaustive bullet points EVERY symbol, abbreviation, comment, line, and meteorological feature visible in the chart. "
+            f"For each symbol or line, describe what it means in detail, its significance for pilots, and the possible operational implications. "
+            f"Do not summarize. Include explanations of all jet streams, turbulence zones, cloud types, fronts, pressure patterns, tropopause levels, and any written comments, even abbreviations. "
+            f"Start by decoding the legend if any symbols are present. "
+            f"Cover everything visible, especially over Portugal and adjacent Atlantic, but do not skip any feature elsewhere."
+        )
+    elif "pressure" in chart_type.lower() or "spc" in chart_type.lower():
+        prompt = (
+            f"You are a meteorology instructor. For this surface pressure chart, in exhaustive bullet points, "
+            f"explain every pressure system, front, isobar, symbol, abbreviation, and comment visible. "
+            f"For each feature, explain its meteorological meaning, what it tells pilots, and possible operational impact. "
+            f"Explicitly decode all numbers, symbols, and lines on the chart, as if teaching a student for an exam. "
+            f"Do not summarize or omit any detail. Focus especially on Portugal, but cover all visible details."
+        )
+    elif "wind" in chart_type.lower():
+        prompt = (
+            f"You are a meteorology instructor. For this wind and temperature chart, explain in exhaustive bullet points every wind barb, symbol, temperature value, and any other meteorological indicator on the chart, and what it means for a pilot. "
+            f"Explicitly decode all symbols and abbreviations. Cover all visible details, focusing on Portugal but not skipping other regions."
+        )
+    else:
+        prompt = (
+            f"You are a meteorology instructor. For this chart, explain in exhaustive bullet points every visible symbol, line, meteorological indicator, and text, and decode them in detail for a pilot. "
+            f"Cover all features on the chart, focusing on Portugal but explaining every element visible."
+        )
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"Focus only on {area}."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-                ]
-            }
+            {"role": "user", "content": [
+                {"type": "text", "text": f"Analyze the entire chart. Pay special attention to Portugal, but explain every symbol or code anywhere in the chart. Do not summarize, be explicit and didactic."},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+            ]}
         ],
-        max_tokens=1100,
-        temperature=0.22
+        max_tokens=3200,  # maximum possible
+        temperature=0.12
     )
-    return clean_markdown(response.choices[0].message.content)
-
-##########################
-# METAR/TAF DESCODIFICAÇÃO
-##########################
+    return response.choices[0].message.content.strip()
 
 def decode_metar_as_narrative(metar_code):
     try:
@@ -197,9 +186,7 @@ def decode_taf_as_narrative(taf_code):
     parts.append(wx_str)
     return " ".join([l for l in parts if l.strip()])
 
-#################
-# PDF Templates #
-#################
+# --------------- PDF ---------------
 
 class BriefingPDF(FPDF):
     def header(self): pass
@@ -273,33 +260,35 @@ class BriefingPDF(FPDF):
                 self.set_text_color(0,0,0)
                 self.multi_cell(0, 8, ascii_safe(decode_taf_as_narrative(taf_code)))
                 self.ln(4)
-    def chart_section(self, title, img_bytes, ai_text="", user_desc="", extra_labels=None, mode="detailed"):
-        self.add_section_page(title)
-        if extra_labels:
-            self.set_font("Arial", 'B', 12)
-            for lab in extra_labels:
-                self.cell(0, 7, ascii_safe(lab), ln=True)
+
+class RawLandscapePDF(FPDF):
+    def __init__(self):
+        super().__init__(orientation='L', unit='mm', format='A4')
+    def header(self): pass
+    def footer(self): pass
+    def cover_page(self, pilot, aircraft, date, time_utc, callsign, mission):
+        self.add_page()
+        self.set_xy(0, 65)
+        self.set_font("Arial", 'B', 30)
+        self.cell(0, 22, ascii_safe("RAW Preflight Briefing Charts"), ln=True, align='C')
+        self.ln(10)
+        self.set_font("Arial", '', 17)
+        self.cell(0, 10, ascii_safe(f"Pilot: {pilot}    Aircraft: {aircraft}    Callsign: {callsign}"), ln=True, align='C')
+        self.cell(0, 10, ascii_safe(f"Mission: {mission}    Date: {date}    UTC: {time_utc}"), ln=True, align='C')
+        self.ln(30)
+    def chart_fullpage(self, title, img_bytes, user_desc=""):
+        self.add_page()
+        self.set_font("Arial", 'B', 18)
+        self.cell(0, 10, ascii_safe(title), ln=True, align='C')
         if user_desc.strip():
-            self.set_font("Arial", 'I', 11)
-            self.set_text_color(70,70,70)
-            self.cell(0, 7, ascii_safe(f"Area/focus: {user_desc.strip()}"), ln=True)
-            self.set_text_color(0,0,0)
-        self.ln(2)
+            self.set_font("Arial", 'I', 13)
+            self.cell(0, 10, ascii_safe(f"Area/focus: {user_desc.strip()}"), ln=True, align='C')
         chart_img_path = f"tmp_chart_{ascii_safe(title).replace(' ','_')}.png"
         with open(chart_img_path, "wb") as f:
             f.write(img_bytes.getvalue())
-        self.set_font("Arial", '', 11)
-        self.image(chart_img_path, x=22, w=168)
-        self.ln(7)
-        if mode == "detailed" and ai_text:
-            self.set_font("Arial", '', 12)
-            self.multi_cell(0, 8, ascii_safe(ai_text))
-            self.ln(2)
+        self.image(chart_img_path, x=10, y=30, w=270)
 
-##################
-# STREAMLIT APP  #
-##################
-
+# -------------- STREAMLIT --------------
 st.title("Preflight Weather Briefing")
 
 with st.expander("1. Pilot/Aircraft Info", expanded=True):
@@ -313,7 +302,8 @@ with st.expander("1. Pilot/Aircraft Info", expanded=True):
 def metar_taf_block():
     if "metar_taf_pairs" not in st.session_state:
         st.session_state.metar_taf_pairs = [{"icao":"", "metar":"", "taf":""}]
-    st.subheader("METAR/TAF by Aerodrome")
+    st.subheader("2. METAR/TAF by Aerodrome")
+    remove_pair = st.button("Remove last Aerodrome") if len(st.session_state.metar_taf_pairs) > 1 else None
     for i, entry in enumerate(st.session_state.metar_taf_pairs):
         with st.expander(f"METAR/TAF for Aerodrome {i+1}", expanded=True):
             entry["icao"] = st.text_input("ICAO", value=entry["icao"], key=f"icao_{i}")
@@ -321,15 +311,10 @@ def metar_taf_block():
             entry["taf"] = st.text_area(f"TAF (raw code)", value=entry["taf"], key=f"taf_{i}")
     if st.button("Add another Aerodrome"):
         st.session_state.metar_taf_pairs.append({"icao":"", "metar":"", "taf":""})
-    remove_pair = st.button("Remove last Aerodrome") if len(st.session_state.metar_taf_pairs) > 1 else None
     if remove_pair:
         st.session_state.metar_taf_pairs.pop()
 
-def chart_block_multi(
-    chart_key, label, title_base,
-    desc_label="Area/focus for analysis", extra_label="Extra instructions to AI (optional)",
-    has_levels=False, has_source=False
-):
+def chart_block_multi(chart_key, label, title_base, desc_label="Area/focus for analysis", has_levels=False, has_source=False):
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
     st.subheader(label)
@@ -342,7 +327,6 @@ def chart_block_multi(
             if has_levels:
                 chart["levels"] = st.text_input("Applicable Flight Levels (e.g., FL050-FL120)", value=chart.get("levels",""), key=f"{chart_key}_levels_{i}")
             chart["desc"] = st.text_input(desc_label, value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
-            chart["extra"] = st.text_area(extra_label, value=chart.get("extra",""), key=f"{chart_key}_extra_{i}")
             chart_file = st.file_uploader(
                 f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):",
                 type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{chart_key}_file_{i}"
@@ -357,46 +341,11 @@ def chart_block_multi(
                     img = Image.open(chart_file).convert("RGB").copy()
                 _, img_bytes = downscale_image(img)
                 chart["img_bytes"] = img_bytes
-                st.image(img, caption="Full Chart (included in PDF)")
-                crop_it = st.toggle("Crop chart before AI analysis?", value=chart.get("crop", True), key=f"{chart_key}_crop_switch_{i}")
-                chart["crop"] = crop_it
-                if crop_it:
-                    st.info("Only the cropped area will be analyzed by AI, but the full chart will be attached to the PDF.")
-                    cropped_img = st_cropper(
-                        img,
-                        aspect_ratio=None,
-                        box_color='red',
-                        return_type='image',
-                        realtime_update=True,
-                        key=f"{chart_key}_crop_{i}"
-                    )
-                    st.image(cropped_img, caption="Selected Area for AI Analysis")
-                    _, cropped_bytes = downscale_image(cropped_img)
-                else:
-                    cropped_img = img
-                    cropped_bytes = img_bytes
-                    st.info("The entire chart will be analyzed by AI.")
-                chart["cropped_img_bytes"] = cropped_bytes
-                gen_label = "Generate AI analysis" if not chart.get("ai_text") else "Regenerate AI analysis"
-                if st.button(f"{gen_label} {i+1}", key=f"{chart_key}_regen_{i}"):
-                    img_b64 = base64.b64encode(cropped_bytes.getvalue()).decode("utf-8")
-                    chart["ai_text"] = ai_chart_analysis_instructor(
-                        img_b64,
-                        chart_type=title_base,
-                        user_area_desc=chart["desc"],
-                        extra_instruction=chart.get("extra", "")
-                    )
-                if chart.get("ai_text"):
-                    chart["ai_text"] = st.text_area(
-                        "Edit/Approve AI Analysis", value=chart["ai_text"],
-                        key=f"{chart_key}_aitxt_{i}", height=220
-                    )
             else:
                 chart["img_bytes"] = None
-                chart["ai_text"] = ""
     addcol, rmcol = st.columns([0.24,0.24])
     if addcol.button(f"Add {label}"):
-        new_chart = {"desc": "Portugal", "extra": "", "img_bytes": None, "ai_text": ""}
+        new_chart = {"desc": "Portugal", "img_bytes": None}
         if has_source: new_chart["source"] = ""
         if has_levels: new_chart["levels"] = ""
         st.session_state[chart_key].append(new_chart)
@@ -418,7 +367,6 @@ chart_block_multi(
     title_base="Surface Pressure Chart (SPC)"
 )
 
-# Ready when there is at least one of each
 ready = (
     len([c for c in st.session_state.get("sigwx_charts", []) if c.get("img_bytes")]) > 0
     and len([c for c in st.session_state.get("windtemp_charts", []) if c.get("img_bytes")]) > 0
@@ -441,35 +389,39 @@ if ready:
             # SIGWX
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
-                    pdf.chart_section(
-                        title=f"Significant Weather Chart (SIGWX) [{chart.get('source','')}]",
-                        img_bytes=chart["img_bytes"],
-                        ai_text=chart.get("ai_text",""),
-                        user_desc=chart.get("desc",""),
-                        extra_labels=[f"Source: {chart.get('source','')}".strip()] if chart.get('source','') else None,
-                        mode="detailed"
+                    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
+                    ai_text = ai_chart_analysis_instructor(
+                        img_b64,
+                        chart_type="Significant Weather Chart (SIGWX)",
+                        user_area_desc=chart.get("desc", "Portugal")
                     )
+                    pdf.add_section_page(f"Significant Weather Chart (SIGWX) [{chart.get('source','')}]")
+                    pdf.set_font("Arial", '', 12)
+                    pdf.multi_cell(0, 8, ai_text)
             # Wind/Temp
             for chart in st.session_state.get("windtemp_charts", []):
                 if chart.get("img_bytes"):
-                    pdf.chart_section(
-                        title="Wind and Temperature Chart",
-                        img_bytes=chart["img_bytes"],
-                        ai_text=chart.get("ai_text",""),
-                        user_desc=chart.get("desc",""),
-                        extra_labels=[f"Flight Levels: {chart.get('levels','')}"] if chart.get('levels','') else None,
-                        mode="detailed"
+                    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
+                    ai_text = ai_chart_analysis_instructor(
+                        img_b64,
+                        chart_type="Wind and Temperature Chart",
+                        user_area_desc=chart.get("desc", "Portugal")
                     )
+                    pdf.add_section_page("Wind and Temperature Chart")
+                    pdf.set_font("Arial", '', 12)
+                    pdf.multi_cell(0, 8, ai_text)
             # SPC
             for chart in st.session_state.get("spc_charts", []):
                 if chart.get("img_bytes"):
-                    pdf.chart_section(
-                        title="Surface Pressure Chart (SPC)",
-                        img_bytes=chart["img_bytes"],
-                        ai_text=chart.get("ai_text",""),
-                        user_desc=chart.get("desc",""),
-                        mode="detailed"
+                    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
+                    ai_text = ai_chart_analysis_instructor(
+                        img_b64,
+                        chart_type="Surface Pressure Chart (SPC)",
+                        user_area_desc=chart.get("desc", "Portugal")
                     )
+                    pdf.add_section_page("Surface Pressure Chart (SPC)")
+                    pdf.set_font("Arial", '', 12)
+                    pdf.multi_cell(0, 8, ai_text)
             out_pdf = f"weather_briefing_detailed_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
@@ -482,47 +434,23 @@ if ready:
                 )
     if col2.button("Gerar PDF RAW (para entregar)"):
         with st.spinner("Preparando PDF raw..."):
-            pdf = BriefingPDF()
-            pdf.set_auto_page_break(auto=True, margin=14)
+            pdf = RawLandscapePDF()
             pdf.cover_page(pilot, aircraft, str(date), time_utc, callsign, mission)
-            metar_taf_pairs = [
-                entry for entry in st.session_state.metar_taf_pairs
-                if entry['metar'].strip() or entry['taf'].strip() or entry['icao'].strip()
-            ]
-            if metar_taf_pairs:
-                pdf.metar_taf_section(metar_taf_pairs, mode="raw")
             # SIGWX
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
-                    pdf.chart_section(
-                        title=f"Significant Weather Chart (SIGWX) [{chart.get('source','')}]",
-                        img_bytes=chart["img_bytes"],
-                        ai_text="",  # Sem análise!
-                        user_desc=chart.get("desc",""),
-                        extra_labels=[f"Source: {chart.get('source','')}".strip()] if chart.get('source','') else None,
-                        mode="raw"
-                    )
+                    title = f"Significant Weather Chart (SIGWX) [{chart.get('source','')}]"
+                    pdf.chart_fullpage(title, chart["img_bytes"], user_desc=chart.get("desc",""))
             # Wind/Temp
             for chart in st.session_state.get("windtemp_charts", []):
                 if chart.get("img_bytes"):
-                    pdf.chart_section(
-                        title="Wind and Temperature Chart",
-                        img_bytes=chart["img_bytes"],
-                        ai_text="",
-                        user_desc=chart.get("desc",""),
-                        extra_labels=[f"Flight Levels: {chart.get('levels','')}"] if chart.get('levels','') else None,
-                        mode="raw"
-                    )
+                    title = f"Wind and Temperature Chart [{chart.get('levels','')}]"
+                    pdf.chart_fullpage(title, chart["img_bytes"], user_desc=chart.get("desc",""))
             # SPC
             for chart in st.session_state.get("spc_charts", []):
                 if chart.get("img_bytes"):
-                    pdf.chart_section(
-                        title="Surface Pressure Chart (SPC)",
-                        img_bytes=chart["img_bytes"],
-                        ai_text="",
-                        user_desc=chart.get("desc",""),
-                        mode="raw"
-                    )
+                    title = "Surface Pressure Chart (SPC)"
+                    pdf.chart_fullpage(title, chart["img_bytes"], user_desc=chart.get("desc",""))
             out_pdf = f"weather_briefing_raw_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
