@@ -12,14 +12,12 @@ import airportsdata
 from metar.Metar import Metar
 import requests
 import json
-
 from streamlit_cropper import st_cropper
 
 ADMIN_EMAIL = "alexandre.moiteiro@gmail.com"
 WEBSITE_LINK = "https://mass-balance.streamlit.app/"
 SENDGRID_API_KEY = st.secrets["SENDGRID_API_KEY"]
 SENDER_EMAIL = "alexandre.moiteiro@students.sevenair.com"
-
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 AIRPORTS = airportsdata.load('ICAO')
 
@@ -62,15 +60,16 @@ def clean_markdown(text):
     text = re.sub(r"\n{2,}", "\n\n", text)
     return text.strip()
 
-# -------- AI CHART ANÁLISE COMO INSTRUTOR (BULLET POINTS) --------
-def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc, extra_instruction="", summarized=False):
+#################
+# AI EXPLICAÇÃO #
+#################
+
+def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc, extra_instruction=""):
     area = user_area_desc.strip() or "the selected area"
     prompt = (
-        f"You are a meteorology instructor. Analyze this {chart_type} chart. "
-        f"List in bullet points ALL meteorologically relevant features, symbols, or phenomena visible in the selected area ({area}), explaining their meaning and possible operational impact for flight. "
-        "Do not summarize, explain in detail as if teaching a student who may be questioned about any feature. "
-        "Be exhaustive: explain everything visible, including weather systems, jet streams, turbulence, cloud types, abbreviations, fronts, isobars, patterns. "
-        "Use clear and didactic language. Respond in English."
+        f"You are a meteorology instructor. Analyze in exhaustive bullet points this {chart_type} chart for {area}. "
+        "Explain ALL visible meteorological phenomena, symbols, and details, with their operational meaning and relevance for pilots. "
+        "List every significant element. Be didactic and explicit. Respond in English."
     )
     if extra_instruction:
         prompt += " " + extra_instruction.strip()
@@ -81,72 +80,75 @@ def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc, extra_i
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Selected area: {area}."},
+                    {"type": "text", "text": f"Focus only on {area}."},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
                 ]
             }
         ],
         max_tokens=1100,
-        temperature=0.19
+        temperature=0.22
     )
     return clean_markdown(response.choices[0].message.content)
 
-# -------- METAR/TAF: DESCODIFICAÇÃO EM "NARRATIVA" --------
-def decode_metar_narrative(metar_code):
+##########################
+# METAR/TAF DESCODIFICAÇÃO
+##########################
+
+def decode_metar_as_narrative(metar_code):
     try:
         m = Metar(metar_code)
         info, name = get_aerodrome_info(m.station_id or "")
         parts = []
         if info:
-            parts.append(f"{info}.")
+            parts.append(f"At {info},")
+        else:
+            parts.append(f"At {m.station_id or 'Unknown'},")
         if m.time:
-            parts.append(f"Observed on day {m.time.day:02d} at {m.time.hour:02d}:{m.time.minute:02d} UTC.")
+            parts.append(f"on day {m.time.day:02d} at {m.time.hour:02d}:{m.time.minute:02d} Zulu,")
         if m.wind_speed:
             ws = m.wind_speed.value('KT')
             wd = m.wind_dir.value() if m.wind_dir else None
             if wd:
-                parts.append(f"Wind from {wd} degrees at {ws:.0f} knots.")
+                parts.append(f"the wind is from {wd} degrees at {ws:.0f} knots,")
             else:
-                parts.append(f"Wind variable at {ws:.0f} knots.")
+                parts.append(f"the wind is variable at {ws:.0f} knots,")
         if m.vis:
             vis = m.vis.value('KM')
             if "CAVOK" in metar_code:
-                parts.append("Visibility is 10 kilometers or more (CAVOK).")
+                parts.append("visibility is 10 kilometers or more,")
             else:
-                parts.append(f"Visibility is {vis} kilometers.")
+                parts.append(f"visibility is {vis} kilometers,")
         skystr = []
         if m.sky:
-            cb = any([s[0] == "CB" for s in m.sky])
-            if "CAVOK" in metar_code:
-                skystr.append("No cloud below 1500 meters and no Cumulonimbus.")
+            for s in m.sky:
+                typ, height = s[0], s[1]*30.48 if s[1] else None
+                if typ == "CB":
+                    skystr.append("Cumulonimbus present")
+                elif height is not None:
+                    skystr.append(f"{typ} at {int(height)} meters")
+            if skystr:
+                parts.append("clouds: " + "; ".join(skystr) + ",")
             else:
-                for s in m.sky:
-                    typ, height = s[0], s[1]*30.48 if s[1] else None
-                    if typ == "CB":
-                        skystr.append("Cumulonimbus present.")
-                    elif height is not None:
-                        skystr.append(f"{typ} at {int(height)} meters.")
-                if not skystr:
-                    skystr.append("No significant clouds reported.")
-            parts.extend(skystr)
+                parts.append("no significant clouds reported,")
         else:
-            parts.append("No cloud below 1500 meters and no Cumulonimbus.")
+            parts.append("no cloud below 1500 meters and no cumulonimbus,")
         wx = getattr(m, "weather", [])
         if not wx or (len(wx) == 1 and wx[0] == ""):
-            parts.append("No significant weather phenomena.")
+            parts.append("no significant weather phenomena,")
         else:
-            parts.append(f"Weather phenomena: {'; '.join(wx)}.")
+            parts.append(f"weather phenomena: {'; '.join(wx)},")
         if m.temp:
-            parts.append(f"Temperature {m.temp.value():.0f}°C.")
+            parts.append(f"temperature {m.temp.value():.0f}°C,")
         if m.dewpt:
-            parts.append(f"Dew Point {m.dewpt.value():.0f}°C.")
+            parts.append(f"dew point {m.dewpt.value():.0f}°C,")
         if m.press:
-            parts.append(f"QNH {m.press.value():.0f} hPa.")
-        return " ".join(parts)
+            parts.append(f"QNH {m.press.value():.0f} hPa,")
+        text = " ".join(parts).strip(",") + "."
+        return text.replace(" ,", ",")
     except Exception as e:
         return f"Could not decode METAR: {e}"
 
-def decode_taf_narrative(taf_code):
+def decode_taf_as_narrative(taf_code):
     airports = AIRPORTS
     match = re.search(r'\b([A-Z]{4})\b', taf_code)
     icao = match.group(1) if match else "UNKNOWN"
@@ -157,27 +159,28 @@ def decode_taf_narrative(taf_code):
     lon = info['lon'] if info else 0
     lat_str = f"{abs(lat):.4f}{'N' if lat >= 0 else 'S'}"
     lon_str = f"{abs(lon):.4f}{'E' if lon >= 0 else 'W'}"
-    lines = [f"{icao}: {name}, {country} {lat_str} {lon_str}."]
+    parts = [f"{icao}: {name}, {country} {lat_str} {lon_str}."]
     obs_time = re.search(r'(\d{2})(\d{2})(\d{2})Z', taf_code)
     if obs_time:
-        lines.append(f"Forecast issued on day {obs_time.group(1)} at {obs_time.group(2)}:00 UTC.")
+        parts.append(f"Observed at day {obs_time.group(1)} at {obs_time.group(2)}:00 Zulu.")
     period = re.search(r'(\d{2})(\d{2})/(\d{2})(\d{2})', taf_code)
     if period:
-        lines.append(f"Valid from day {period.group(1)} at {period.group(2)}:00 UTC until day {period.group(3)} at {period.group(4)}:00 UTC.")
+        parts.append(f"Forecast valid from day {period.group(1)} at {period.group(2)}:00 until day {period.group(3)} at {period.group(4)}:00 Zulu.")
     taf_main = taf_code.split('\n')[0]
     wind_match = re.search(r'(VRB|\d{3})(\d{2,3})KT', taf_main)
     wind_dir = wind_match.group(1) if wind_match else "variable"
     wind_spd = wind_match.group(2) if wind_match else ""
-    if wind_spd:
-        lines.append(f"Wind {wind_dir if wind_dir != 'VRB' else 'variable'} at {wind_spd} knots.")
+    if wind_dir:
+        wind_phrase = f"Wind is variable at {wind_spd} knots." if wind_dir == "VRB" else f"Wind from {wind_dir} degrees at {wind_spd} knots."
+        parts.append(wind_phrase)
     vis_match = re.search(r' (\d{4}) ', taf_main)
     if "CAVOK" in taf_main or (vis_match and int(vis_match.group(1)) >= 9999):
-        lines.append("Visibility 10 kilometers or more (CAVOK).")
+        parts.append("Visibility is 10 kilometers or more (CAVOK).")
     elif vis_match:
-        lines.append(f"Visibility {int(vis_match.group(1))/1000:.0f} km.")
+        parts.append(f"Visibility is {int(vis_match.group(1))/1000:.0f} km.")
     clouds = []
     if "CAVOK" in taf_main:
-        clouds.append("No cloud below 1500 meters and no Cumulonimbus.")
+        clouds.append("No cloud below 1500 meters and no cumulonimbus.")
     else:
         cloud_matches = re.findall(r'(FEW|SCT|BKN|OVC)(\d{3})', taf_main)
         for typ, lvl in cloud_matches:
@@ -185,15 +188,19 @@ def decode_taf_narrative(taf_code):
             clouds.append(f"{typ} at {int(height)} meters.")
         if not clouds:
             clouds.append("No significant clouds reported.")
-    lines.extend(clouds)
-    wx_match = re.search(r'(RA|SN|TS|FG|BR)', taf_main)
-    if wx_match:
-        lines.append(f"Weather phenomena: {wx_match.group(1)}.")
+    parts.extend(clouds)
+    wx_str = ""
+    if re.search(r'(RA|SN|TS|FG|BR)', taf_main):
+        wx_str = "Significant weather phenomena are expected."
     else:
-        lines.append("No significant weather phenomena.")
-    return " ".join([l for l in lines if l.strip()])
+        wx_str = "No significant weather phenomena expected."
+    parts.append(wx_str)
+    return " ".join([l for l in parts if l.strip()])
 
-# -------- PDF CLASSES --------
+#################
+# PDF Templates #
+#################
+
 class BriefingPDF(FPDF):
     def header(self): pass
     def footer(self):
@@ -229,7 +236,7 @@ class BriefingPDF(FPDF):
         self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
         self.cell(0, 8, ascii_safe(f"Flight Time (UTC): {time_utc}"), ln=True, align='C')
         self.ln(30)
-    def metar_taf_section(self, pairs, decode=True):
+    def metar_taf_section(self, pairs, mode="detailed"):
         for i, entry in enumerate(pairs, 1):
             icao = entry['icao'].upper()
             info, aerodrome = get_aerodrome_info(icao)
@@ -243,14 +250,14 @@ class BriefingPDF(FPDF):
             self.set_text_color(0,0,0)
             self.multi_cell(0, 8, ascii_safe(metar_code))
             self.ln(2)
-            if decode and metar_code.strip():
+            if mode == "detailed":
                 self.set_font("Arial", 'B', 13)
                 self.set_text_color(40,40,40)
-                self.cell(0, 8, "Decoded METAR:", ln=True)
+                self.cell(0, 8, "Decoded METAR (as read):", ln=True)
                 self.set_font("Arial", '', 12)
                 self.set_text_color(0,0,0)
-                self.multi_cell(0, 8, ascii_safe(decode_metar_narrative(metar_code)))
-                self.ln(3)
+                self.multi_cell(0, 8, ascii_safe(decode_metar_as_narrative(metar_code)))
+                self.ln(5)
             self.set_font("Arial", 'B', 13)
             self.set_text_color(40,40,40)
             self.cell(0, 8, "TAF (Raw):", ln=True)
@@ -258,15 +265,15 @@ class BriefingPDF(FPDF):
             self.set_text_color(0,0,0)
             self.multi_cell(0, 8, ascii_safe(taf_code))
             self.ln(2)
-            if decode and taf_code.strip():
+            if mode == "detailed":
                 self.set_font("Arial", 'B', 13)
                 self.set_text_color(40,40,40)
-                self.cell(0, 8, "Decoded TAF:", ln=True)
+                self.cell(0, 8, "Decoded TAF (as read):", ln=True)
                 self.set_font("Arial", '', 12)
                 self.set_text_color(0,0,0)
-                self.multi_cell(0, 8, ascii_safe(decode_taf_narrative(taf_code)))
+                self.multi_cell(0, 8, ascii_safe(decode_taf_as_narrative(taf_code)))
                 self.ln(4)
-    def chart_section(self, title, img_bytes, ai_text, user_desc="", extra_labels=None, show_ai=True):
+    def chart_section(self, title, img_bytes, ai_text="", user_desc="", extra_labels=None, mode="detailed"):
         self.add_section_page(title)
         if extra_labels:
             self.set_font("Arial", 'B', 12)
@@ -284,52 +291,15 @@ class BriefingPDF(FPDF):
         self.set_font("Arial", '', 11)
         self.image(chart_img_path, x=22, w=168)
         self.ln(7)
-        if show_ai and ai_text.strip():
+        if mode == "detailed" and ai_text:
             self.set_font("Arial", '', 12)
             self.multi_cell(0, 8, ascii_safe(ai_text))
-        self.ln(2)
+            self.ln(2)
 
-def send_report_email(to_email, subject, body, filename, filedata):
-    html_body = f"""
-    <html>
-    <body>
-        <h2>Weather Briefing Submitted</h2>
-        <pre>{body}</pre>
-        <p style='margin-top:1.5em;'>See attached PDF for details.</p>
-        <p>Generated via {WEBSITE_LINK}</p>
-    </body>
-    </html>
-    """
-    data = {
-        "personalizations": [
-            {
-                "to": [{"email": to_email}],
-                "subject": subject
-            }
-        ],
-        "from": {"email": SENDER_EMAIL},
-        "content": [
-            {
-                "type": "text/html",
-                "value": html_body
-            }
-        ],
-        "attachments": [{
-            "content": base64.b64encode(filedata).decode(),
-            "type": "application/pdf",
-            "filename": filename,
-            "disposition": "attachment"
-        }]
-    }
-    headers = {
-        "Authorization": f"Bearer {SENDGRID_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    resp = requests.post("https://api.sendgrid.com/v3/mail/send", data=json.dumps(data), headers=headers)
-    if resp.status_code >= 400:
-        st.warning(f"PDF generated but failed to send email (SendGrid error: {resp.text})")
+##################
+# STREAMLIT APP  #
+##################
 
-# --------------- STREAMLIT APP -----------------
 st.title("Preflight Weather Briefing")
 
 with st.expander("1. Pilot/Aircraft Info", expanded=True):
@@ -358,7 +328,7 @@ def metar_taf_block():
 def chart_block_multi(
     chart_key, label, title_base,
     desc_label="Area/focus for analysis", extra_label="Extra instructions to AI (optional)",
-    has_levels=False, has_source=False, ai_type=None, summarized=False
+    has_levels=False, has_source=False
 ):
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
@@ -388,11 +358,8 @@ def chart_block_multi(
                 _, img_bytes = downscale_image(img)
                 chart["img_bytes"] = img_bytes
                 st.image(img, caption="Full Chart (included in PDF)")
-
-                # Crop switch
                 crop_it = st.toggle("Crop chart before AI analysis?", value=chart.get("crop", True), key=f"{chart_key}_crop_switch_{i}")
                 chart["crop"] = crop_it
-
                 if crop_it:
                     st.info("Only the cropped area will be analyzed by AI, but the full chart will be attached to the PDF.")
                     cropped_img = st_cropper(
@@ -409,24 +376,20 @@ def chart_block_multi(
                     cropped_img = img
                     cropped_bytes = img_bytes
                     st.info("The entire chart will be analyzed by AI.")
-
                 chart["cropped_img_bytes"] = cropped_bytes
-                # AI analysis button label
                 gen_label = "Generate AI analysis" if not chart.get("ai_text") else "Regenerate AI analysis"
                 if st.button(f"{gen_label} {i+1}", key=f"{chart_key}_regen_{i}"):
                     img_b64 = base64.b64encode(cropped_bytes.getvalue()).decode("utf-8")
-                    prompt_chart_type = ai_type or title_base
                     chart["ai_text"] = ai_chart_analysis_instructor(
                         img_b64,
-                        chart_type=prompt_chart_type,
+                        chart_type=title_base,
                         user_area_desc=chart["desc"],
-                        extra_instruction=chart.get("extra", ""),
-                        summarized=summarized
+                        extra_instruction=chart.get("extra", "")
                     )
                 if chart.get("ai_text"):
                     chart["ai_text"] = st.text_area(
                         "Edit/Approve AI Analysis", value=chart["ai_text"],
-                        key=f"{chart_key}_aitxt_{i}", height=230
+                        key=f"{chart_key}_aitxt_{i}", height=220
                     )
             else:
                 chart["img_bytes"] = None
@@ -448,21 +411,20 @@ chart_block_multi(
 )
 chart_block_multi(
     chart_key="windtemp_charts", label="Wind and Temperature Chart",
-    title_base="Wind and Temperature Chart", has_levels=True, summarized=True
+    title_base="Wind and Temperature Chart", has_levels=True
 )
 chart_block_multi(
     chart_key="spc_charts", label="Surface Pressure Chart (SPC)",
     title_base="Surface Pressure Chart (SPC)"
 )
 
-# ---- READY STATE ----
+# Ready when there is at least one of each
 ready = (
     len([c for c in st.session_state.get("sigwx_charts", []) if c.get("img_bytes")]) > 0
     and len([c for c in st.session_state.get("windtemp_charts", []) if c.get("img_bytes")]) > 0
     and len([c for c in st.session_state.get("spc_charts", []) if c.get("img_bytes")]) > 0
 )
 
-# ------------ BOTÕES DE PDF RAW E DETALHADO -----------------
 col1, col2 = st.columns(2)
 if ready:
     if col1.button("Gerar PDF COMPLETO (detalhado)"):
@@ -475,7 +437,7 @@ if ready:
                 if entry['metar'].strip() or entry['taf'].strip() or entry['icao'].strip()
             ]
             if metar_taf_pairs:
-                pdf.metar_taf_section(metar_taf_pairs, decode=True)
+                pdf.metar_taf_section(metar_taf_pairs, mode="detailed")
             # SIGWX
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
@@ -485,7 +447,7 @@ if ready:
                         ai_text=chart.get("ai_text",""),
                         user_desc=chart.get("desc",""),
                         extra_labels=[f"Source: {chart.get('source','')}".strip()] if chart.get('source','') else None,
-                        show_ai=True
+                        mode="detailed"
                     )
             # Wind/Temp
             for chart in st.session_state.get("windtemp_charts", []):
@@ -496,7 +458,7 @@ if ready:
                         ai_text=chart.get("ai_text",""),
                         user_desc=chart.get("desc",""),
                         extra_labels=[f"Flight Levels: {chart.get('levels','')}"] if chart.get('levels','') else None,
-                        show_ai=True
+                        mode="detailed"
                     )
             # SPC
             for chart in st.session_state.get("spc_charts", []):
@@ -506,41 +468,20 @@ if ready:
                         img_bytes=chart["img_bytes"],
                         ai_text=chart.get("ai_text",""),
                         user_desc=chart.get("desc",""),
-                        show_ai=True
+                        mode="detailed"
                     )
-            out_pdf = f"weather_briefing_detalhado_{ascii_safe(mission)}.pdf"
+            out_pdf = f"weather_briefing_detailed_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
                 pdf_bytes = f.read()
                 st.download_button(
-                    label="Download PDF Detalhado",
+                    label="Download Detailed Weather Briefing PDF",
                     data=pdf_bytes,
                     file_name=out_pdf,
                     mime="application/pdf"
                 )
-            try:
-                email_body = (
-                    f"Pilot: {pilot}\n"
-                    f"Aircraft: {aircraft}\n"
-                    f"Callsign: {callsign}\n"
-                    f"Mission: {mission}\n"
-                    f"Date: {date}\n"
-                    f"Expected Time (UTC): {time_utc}\n"
-                    f"PDF attached."
-                )
-                send_report_email(
-                    ADMIN_EMAIL,
-                    subject=f"Weather Report submitted: Mission {mission}",
-                    body=email_body,
-                    filename=out_pdf,
-                    filedata=pdf_bytes
-                )
-                st.success("PDF detalhado gerado e enviado para o admin!")
-            except Exception as e:
-                st.warning(f"PDF detalhado gerado, mas falhou o envio de email: {e}")
-
-    if col2.button("Gerar PDF RAW (entregar ao instrutor)"):
-        with st.spinner("Preparando PDF RAW..."):
+    if col2.button("Gerar PDF RAW (para entregar)"):
+        with st.spinner("Preparando PDF raw..."):
             pdf = BriefingPDF()
             pdf.set_auto_page_break(auto=True, margin=14)
             pdf.cover_page(pilot, aircraft, str(date), time_utc, callsign, mission)
@@ -549,17 +490,17 @@ if ready:
                 if entry['metar'].strip() or entry['taf'].strip() or entry['icao'].strip()
             ]
             if metar_taf_pairs:
-                pdf.metar_taf_section(metar_taf_pairs, decode=False)
+                pdf.metar_taf_section(metar_taf_pairs, mode="raw")
             # SIGWX
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
                     pdf.chart_section(
                         title=f"Significant Weather Chart (SIGWX) [{chart.get('source','')}]",
                         img_bytes=chart["img_bytes"],
-                        ai_text="",
+                        ai_text="",  # Sem análise!
                         user_desc=chart.get("desc",""),
                         extra_labels=[f"Source: {chart.get('source','')}".strip()] if chart.get('source','') else None,
-                        show_ai=False
+                        mode="raw"
                     )
             # Wind/Temp
             for chart in st.session_state.get("windtemp_charts", []):
@@ -570,7 +511,7 @@ if ready:
                         ai_text="",
                         user_desc=chart.get("desc",""),
                         extra_labels=[f"Flight Levels: {chart.get('levels','')}"] if chart.get('levels','') else None,
-                        show_ai=False
+                        mode="raw"
                     )
             # SPC
             for chart in st.session_state.get("spc_charts", []):
@@ -580,20 +521,21 @@ if ready:
                         img_bytes=chart["img_bytes"],
                         ai_text="",
                         user_desc=chart.get("desc",""),
-                        show_ai=False
+                        mode="raw"
                     )
             out_pdf = f"weather_briefing_raw_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
                 pdf_bytes = f.read()
                 st.download_button(
-                    label="Download PDF RAW (entregar ao instrutor)",
+                    label="Download RAW Weather Briefing PDF",
                     data=pdf_bytes,
                     file_name=out_pdf,
                     mime="application/pdf"
                 )
 else:
     st.info("Fill all sections and upload at least one chart of each type before generating your PDFs.")
+
 
 
 
