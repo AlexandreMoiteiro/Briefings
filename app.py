@@ -23,6 +23,12 @@ SENDER_EMAIL = "alexandre.moiteiro@students.sevenair.com"
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 AIRPORTS = airportsdata.load('ICAO')
 
+st.set_page_config(
+    page_title="Briefings Sevenair",
+    page_icon="📑",   # <-- abacus emoji
+    layout="wide"
+)
+
 def ascii_safe(text):
     if not isinstance(text, str):
         text = str(text)
