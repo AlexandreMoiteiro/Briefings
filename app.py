@@ -117,36 +117,20 @@ class BriefingPDF(FPDF):
         self.set_font('Arial', 'I', 8)
         self.set_text_color(120, 120, 120)
         self.cell(0, 7, ascii_safe(f"Page {self.page_no()}"), align='C')
-    def section_header(self, title):
-        self.set_font("Arial", 'B', 15)
-        self.set_text_color(28, 44, 80)
-        self.cell(0, 10, ascii_safe(title), ln=True)
-        self.set_draw_color(70, 130, 180)
-        self.set_line_width(1.0)
-        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
-        self.ln(5)
-        self.set_line_width(0.2)
-    def add_section_page(self, title):
-        self.add_page()
-        self.section_header(title)
     def cover_page(self, pilot, aircraft, date, time_utc, callsign, mission):
-        self.add_page()
-        self.set_xy(0,38)
-        self.set_font("Arial", 'B', 23)
-        self.set_text_color(28, 44, 80)
-        self.cell(0, 15, ascii_safe("Preflight Weather Briefing"), ln=True, align='C')
+        self.add_page(orientation='L')
+        self.set_xy(0,65)
+        self.set_font("Arial", 'B', 30)
+        self.cell(0, 22, ascii_safe("Preflight Weather Briefing"), ln=True, align='C')
         self.ln(10)
-        self.set_font("Arial", '', 14)
-        self.set_text_color(44,44,44)
-        self.cell(0, 8, ascii_safe(f"Pilot: {pilot}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Aircraft: {aircraft}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Callsign: {callsign}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Mission: {mission}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Date: {date}"), ln=True, align='C')
-        self.cell(0, 8, ascii_safe(f"Flight Time (UTC): {time_utc}"), ln=True, align='C')
+        self.set_font("Arial", '', 17)
+        self.cell(0, 10, ascii_safe(f"Pilot: {pilot}    Aircraft: {aircraft}    Callsign: {callsign}"), ln=True, align='C')
+        self.cell(0, 10, ascii_safe(f"Mission: {mission}    Date: {date}    UTC: {time_utc}"), ln=True, align='C')
         self.ln(30)
-    def metar_taf_gamet_section(self, pairs, gamet):
-        self.add_section_page("METAR/TAF/GAMET")
+    def metar_taf_section(self, pairs):
+        self.add_page(orientation='P')
+        self.set_font("Arial", 'B', 20)
+        self.cell(0, 12, "METAR/TAF", ln=True, align='C')
         self.set_font("Arial", '', 12)
         for entry in pairs:
             icao = entry['icao'].upper()
@@ -166,9 +150,12 @@ class BriefingPDF(FPDF):
                 self.set_font("Arial", 'I', 11)
                 self.multi_cell(0, 7, ascii_safe(ai_text))
             self.ln(5)
+    def gamet_page(self, gamet):
         if gamet and gamet.strip():
-            self.set_font("Arial", 'B', 14)
-            self.cell(0, 8, "GAMET/SIGMET/AIRMET (Raw):", ln=True)
+            self.add_page(orientation='P')
+            self.set_font("Arial", 'B', 16)
+            self.cell(0, 12, "GAMET/SIGMET/AIRMET", ln=True, align='C')
+            self.ln(2)
             self.set_font("Arial", '', 12)
             self.multi_cell(0, 7, ascii_safe(gamet))
             ai_text = ai_gamet_analysis(gamet)
@@ -176,13 +163,15 @@ class BriefingPDF(FPDF):
             self.multi_cell(0, 7, ascii_safe(ai_text))
     def chart_section(self, charts):
         for chart in charts:
-            self.add_section_page(chart['title'])
+            self.add_page(orientation='L')
+            self.set_font("Arial", 'B', 18)
+            self.cell(0, 10, ascii_safe(chart['title']), ln=True, align='C')
             if chart.get("subtitle"):
-                self.set_font("Arial", 'I', 12)
-                self.cell(0, 8, ascii_safe(chart['subtitle']), ln=True)
+                self.set_font("Arial", 'I', 14)
+                self.cell(0, 8, ascii_safe(chart['subtitle']), ln=True, align='C')
             if chart.get("img_bytes"):
                 max_w = self.w - 30
-                max_h = self.h - 60
+                max_h = self.h - 55
                 img_bytes = chart["img_bytes"]
                 img = Image.open(img_bytes)
                 iw, ih = img.size
@@ -202,12 +191,12 @@ class BriefingPDF(FPDF):
 
 class RawLandscapePDF(FPDF):
     def __init__(self):
-        super().__init__(orientation='L', unit='mm', format='A4')
+        super().__init__()
     def header(self): pass
     def footer(self): pass
     def cover_page(self, pilot, aircraft, date, time_utc, callsign, mission):
-        self.add_page()
-        self.set_xy(0, 65)
+        self.add_page(orientation='L')
+        self.set_xy(0,65)
         self.set_font("Arial", 'B', 30)
         self.cell(0, 22, ascii_safe("RAW Preflight Briefing"), ln=True, align='C')
         self.ln(10)
@@ -215,10 +204,10 @@ class RawLandscapePDF(FPDF):
         self.cell(0, 10, ascii_safe(f"Pilot: {pilot}    Aircraft: {aircraft}    Callsign: {callsign}"), ln=True, align='C')
         self.cell(0, 10, ascii_safe(f"Mission: {mission}    Date: {date}    UTC: {time_utc}"), ln=True, align='C')
         self.ln(30)
-    def metar_taf_gamet_section(self, pairs, gamet):
-        self.add_page()
+    def metar_taf_section(self, pairs):
+        self.add_page(orientation='P')
         self.set_font("Arial", 'B', 20)
-        self.cell(0, 12, "METAR/TAF/GAMET", ln=True, align='C')
+        self.cell(0, 12, "METAR/TAF", ln=True, align='C')
         self.set_font("Arial", '', 13)
         for entry in pairs:
             icao = entry['icao'].upper()
@@ -232,14 +221,17 @@ class RawLandscapePDF(FPDF):
                 self.cell(0, 7, "TAF:", ln=True)
                 self.multi_cell(0, 7, ascii_safe(entry['taf']))
             self.ln(3)
+    def gamet_page(self, gamet):
         if gamet and gamet.strip():
-            self.set_font("Arial", 'B', 14)
-            self.cell(0, 8, "GAMET/SIGMET/AIRMET:", ln=True)
+            self.add_page(orientation='P')
+            self.set_font("Arial", 'B', 16)
+            self.cell(0, 12, "GAMET/SIGMET/AIRMET", ln=True, align='C')
+            self.ln(2)
             self.set_font("Arial", '', 12)
             self.multi_cell(0, 7, ascii_safe(gamet))
     def chart_fullpage(self, charts):
         for chart in charts:
-            self.add_page()
+            self.add_page(orientation='L')
             self.set_font("Arial", 'B', 18)
             self.cell(0, 10, ascii_safe(chart['title']), ln=True, align='C')
             if chart.get('subtitle'):
@@ -261,7 +253,7 @@ class RawLandscapePDF(FPDF):
 # ----------------- STREAMLIT APP ----------------
 st.title("Preflight Weather Briefing")
 
-with st.expander("1. Pilot/Aircraft Info", expanded=True):
+with st.expander("Pilot/Aircraft Info", expanded=True):
     pilot = st.text_input("Pilot", "")
     aircraft = st.text_input("Aircraft", "")
     callsign = st.text_input("Callsign", "")
@@ -272,7 +264,7 @@ with st.expander("1. Pilot/Aircraft Info", expanded=True):
 def metar_taf_block():
     if "metar_taf_pairs" not in st.session_state:
         st.session_state.metar_taf_pairs = []
-    st.subheader("2. METAR/TAF por Aeródromo")
+    st.subheader("METAR/TAF por Aeródromo")
     if st.button("Adicionar Aeródromo (METAR/TAF)"):
         st.session_state.metar_taf_pairs.append({"icao":"", "metar":"", "taf":""})
     for i, entry in enumerate(st.session_state.metar_taf_pairs):
@@ -309,7 +301,7 @@ chart_block_multi("sigwx_charts", "Significant Weather Chart (SIGWX)", "Signific
 chart_block_multi("windtemp_charts", "Wind and Temperature Chart", "Wind and Temperature Chart", "Flight Levels (e.g. FL050-FL340)")
 chart_block_multi("spc_charts", "Surface Pressure Chart (SPC)", "Surface Pressure Chart (SPC)", "Chart Validity Time (e.g. 09Z-12Z)")
 
-st.subheader("6. GAMET/SIGMET/AIRMET (Raw)")
+st.subheader("GAMET/SIGMET/AIRMET (Raw)")
 st.session_state["gamet_raw"] = st.text_area("Paste GAMET/SIGMET/AIRMET here (raw text):", value=st.session_state.get("gamet_raw", ""), height=100)
 
 ready = (
@@ -331,7 +323,8 @@ if ready:
                 if entry.get("metar","").strip() or entry.get("taf","").strip()
             ]
             gamet = st.session_state.get("gamet_raw", "")
-            pdf.metar_taf_gamet_section(metar_taf_pairs, gamet)
+            pdf.metar_taf_section(metar_taf_pairs)
+            pdf.gamet_page(gamet)
             # Charts section (all with image + detailed analysis)
             charts_all = []
             for chart in st.session_state.get("sigwx_charts", []):
@@ -368,7 +361,8 @@ if ready:
                 if entry.get("metar","").strip() or entry.get("taf","").strip()
             ]
             gamet = st.session_state.get("gamet_raw", "")
-            pdf.metar_taf_gamet_section(metar_taf_pairs, gamet)
+            pdf.metar_taf_section(metar_taf_pairs)
+            pdf.gamet_page(gamet)
             charts_all = []
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
@@ -391,6 +385,7 @@ if ready:
                 )
 else:
     st.info("Preenche todas as secções e faz upload de pelo menos um chart de cada tipo para gerar os PDFs.")
+
 
 
 
