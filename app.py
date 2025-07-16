@@ -314,7 +314,6 @@ def metar_taf_block():
     if "metar_taf_pairs" not in st.session_state:
         st.session_state.metar_taf_pairs = [{"icao":"", "metar":"", "taf":""}]
     st.subheader("METAR/TAF by Aerodrome")
-    remove_pair = st.button("Remove last Aerodrome") if len(st.session_state.metar_taf_pairs) > 1 else None
     for i, entry in enumerate(st.session_state.metar_taf_pairs):
         with st.expander(f"METAR/TAF for Aerodrome {i+1}", expanded=True):
             entry["icao"] = st.text_input("ICAO", value=entry["icao"], key=f"icao_{i}")
@@ -322,6 +321,7 @@ def metar_taf_block():
             entry["taf"] = st.text_area(f"TAF (raw code)", value=entry["taf"], key=f"taf_{i}")
     if st.button("Add another Aerodrome"):
         st.session_state.metar_taf_pairs.append({"icao":"", "metar":"", "taf":""})
+    remove_pair = st.button("Remove last Aerodrome") if len(st.session_state.metar_taf_pairs) > 1 else None
     if remove_pair:
         st.session_state.metar_taf_pairs.pop()
 
