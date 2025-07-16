@@ -313,7 +313,7 @@ with st.expander("1. Pilot/Aircraft Info", expanded=True):
 def metar_taf_block():
     if "metar_taf_pairs" not in st.session_state:
         st.session_state.metar_taf_pairs = [{"icao":"", "metar":"", "taf":""}]
-    st.subheader("Metereological Analysis")
+    st.subheader("METAR/TAF by Aerodrome")
     remove_pair = st.button("Remove last Aerodrome") if len(st.session_state.metar_taf_pairs) > 1 else None
     for i, entry in enumerate(st.session_state.metar_taf_pairs):
         with st.expander(f"METAR/TAF for Aerodrome {i+1}", expanded=True):
