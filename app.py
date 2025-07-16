@@ -11,7 +11,6 @@ import re
 import airportsdata
 from metar.Metar import Metar
 
-# -------- SETUP & CONSTANTS --------
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 AIRPORTS = airportsdata.load('ICAO')
 
@@ -28,7 +27,7 @@ def downscale_image(img, width=1100):
     img_bytes = io.BytesIO()
     img.save(img_bytes, format="PNG", optimize=True)
     img_bytes.seek(0)
-    return img, img_bytes
+    return img_bytes
 
 def get_aerodrome_info(icao):
     info = AIRPORTS.get(icao.upper())
@@ -39,7 +38,6 @@ def get_aerodrome_info(icao):
     name = info['name'].title()
     return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
-# ------------- AI PROMPTS (ULTRA-DETAILED) -------------
 def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc):
     area = user_area_desc.strip() or "the selected area"
     if "sigwx" in chart_type.lower():
@@ -78,7 +76,7 @@ def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc):
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
             ]}
         ],
-        max_tokens=3200,  # maximum possible
+        max_tokens=3200,
         temperature=0.12
     )
     return response.choices[0].message.content.strip()
@@ -186,8 +184,6 @@ def decode_taf_as_narrative(taf_code):
     parts.append(wx_str)
     return " ".join([l for l in parts if l.strip()])
 
-# --------------- PDF ---------------
-
 class BriefingPDF(FPDF):
     def header(self): pass
     def footer(self):
@@ -288,16 +284,17 @@ class RawLandscapePDF(FPDF):
             f.write(img_bytes.getvalue())
         self.image(chart_img_path, x=10, y=30, w=270)
 
-# -------------- STREAMLIT --------------
+# --- STREAMLIT UI ---
+
 st.title("Preflight Weather Briefing")
 
 with st.expander("1. Pilot/Aircraft Info", expanded=True):
     pilot = st.text_input("Pilot", "")
-    aircraft = st.text_input("Aircraft (e.g., Tecnam P2008 (CS-ECD))", "")
+    aircraft = st.text_input("Aircraft", "")
     callsign = st.text_input("Callsign", "")
     mission = st.text_input("Mission", "")
     date = st.date_input("Date", datetime.date.today())
-    time_utc = st.text_input("Expected Flight Time (UTC, e.g. 14:30-16:30)", "")
+    time_utc = st.text_input("Expected Flight Time (UTC)", "")
 
 def metar_taf_block():
     if "metar_taf_pairs" not in st.session_state:
@@ -314,7 +311,7 @@ def metar_taf_block():
     if remove_pair:
         st.session_state.metar_taf_pairs.pop()
 
-def chart_block_multi(chart_key, label, title_base, desc_label="Area/focus for analysis", has_levels=False, has_source=False):
+def chart_block_multi(chart_key, label, has_levels=False, has_source=False):
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
     st.subheader(label)
@@ -325,52 +322,51 @@ def chart_block_multi(chart_key, label, title_base, desc_label="Area/focus for a
             if has_source:
                 chart["source"] = st.text_input("Source/Organization", value=chart.get("source",""), key=f"{chart_key}_source_{i}")
             if has_levels:
-                chart["levels"] = st.text_input("Applicable Flight Levels (e.g., FL050-FL120)", value=chart.get("levels",""), key=f"{chart_key}_levels_{i}")
-            chart["desc"] = st.text_input(desc_label, value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
+                chart["levels"] = st.text_input("Applicable Flight Levels", value=chart.get("levels",""), key=f"{chart_key}_levels_{i}")
+            chart["desc"] = st.text_input("Area/focus", value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
             chart_file = st.file_uploader(
                 f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):",
                 type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{chart_key}_file_{i}"
             )
             if chart_file:
-                if chart_file.type == "application/pdf":
-                    pdf_bytes = chart_file.read()
-                    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                    page = pdf_doc.load_page(0)
-                    img = Image.open(io.BytesIO(page.get_pixmap().tobytes("png"))).convert("RGB").copy()
-                else:
-                    img = Image.open(chart_file).convert("RGB").copy()
-                _, img_bytes = downscale_image(img)
-                chart["img_bytes"] = img_bytes
+                chart["file_data"] = chart_file
             else:
-                chart["img_bytes"] = None
+                chart["file_data"] = None
     addcol, rmcol = st.columns([0.24,0.24])
     if addcol.button(f"Add {label}"):
-        new_chart = {"desc": "Portugal", "img_bytes": None}
+        new_chart = {"desc": "Portugal"}
         if has_source: new_chart["source"] = ""
         if has_levels: new_chart["levels"] = ""
         st.session_state[chart_key].append(new_chart)
     if len(chart_list) > 1 and rmcol.button(f"Remove last {label}"):
-        chart_list.pop()
+        st.session_state[chart_key].pop()
 
-# ---- PAGE BLOCKS ----
 metar_taf_block()
 chart_block_multi(
-    chart_key="sigwx_charts", label="Significant Weather Chart (SIGWX)",
-    title_base="Significant Weather Chart (SIGWX)", has_source=True
+    chart_key="sigwx_charts", label="Significant Weather Chart (SIGWX)", has_source=True
 )
 chart_block_multi(
-    chart_key="windtemp_charts", label="Wind and Temperature Chart",
-    title_base="Wind and Temperature Chart", has_levels=True
+    chart_key="windtemp_charts", label="Wind and Temperature Chart", has_levels=True
 )
 chart_block_multi(
-    chart_key="spc_charts", label="Surface Pressure Chart (SPC)",
-    title_base="Surface Pressure Chart (SPC)"
+    chart_key="spc_charts", label="Surface Pressure Chart (SPC)"
 )
 
+def get_image_bytes_from_file(chart_file):
+    chart_file.seek(0)
+    if chart_file.type == "application/pdf":
+        pdf_bytes = chart_file.read()
+        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = pdf_doc.load_page(0)
+        img = Image.open(io.BytesIO(page.get_pixmap().tobytes("png"))).convert("RGB")
+    else:
+        img = Image.open(chart_file).convert("RGB")
+    return downscale_image(img)
+
 ready = (
-    len([c for c in st.session_state.get("sigwx_charts", []) if c.get("img_bytes")]) > 0
-    and len([c for c in st.session_state.get("windtemp_charts", []) if c.get("img_bytes")]) > 0
-    and len([c for c in st.session_state.get("spc_charts", []) if c.get("img_bytes")]) > 0
+    len([c for c in st.session_state.get("sigwx_charts", []) if c.get("file_data")]) > 0
+    and len([c for c in st.session_state.get("windtemp_charts", []) if c.get("file_data")]) > 0
+    and len([c for c in st.session_state.get("spc_charts", []) if c.get("file_data")]) > 0
 )
 
 col1, col2 = st.columns(2)
@@ -388,8 +384,9 @@ if ready:
                 pdf.metar_taf_section(metar_taf_pairs, mode="detailed")
             # SIGWX
             for chart in st.session_state.get("sigwx_charts", []):
-                if chart.get("img_bytes"):
-                    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
+                if chart.get("file_data"):
+                    img_bytes = get_image_bytes_from_file(chart["file_data"])
+                    img_b64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
                     ai_text = ai_chart_analysis_instructor(
                         img_b64,
                         chart_type="Significant Weather Chart (SIGWX)",
@@ -400,8 +397,9 @@ if ready:
                     pdf.multi_cell(0, 8, ai_text)
             # Wind/Temp
             for chart in st.session_state.get("windtemp_charts", []):
-                if chart.get("img_bytes"):
-                    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
+                if chart.get("file_data"):
+                    img_bytes = get_image_bytes_from_file(chart["file_data"])
+                    img_b64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
                     ai_text = ai_chart_analysis_instructor(
                         img_b64,
                         chart_type="Wind and Temperature Chart",
@@ -412,8 +410,9 @@ if ready:
                     pdf.multi_cell(0, 8, ai_text)
             # SPC
             for chart in st.session_state.get("spc_charts", []):
-                if chart.get("img_bytes"):
-                    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
+                if chart.get("file_data"):
+                    img_bytes = get_image_bytes_from_file(chart["file_data"])
+                    img_b64 = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
                     ai_text = ai_chart_analysis_instructor(
                         img_b64,
                         chart_type="Surface Pressure Chart (SPC)",
@@ -438,19 +437,22 @@ if ready:
             pdf.cover_page(pilot, aircraft, str(date), time_utc, callsign, mission)
             # SIGWX
             for chart in st.session_state.get("sigwx_charts", []):
-                if chart.get("img_bytes"):
+                if chart.get("file_data"):
+                    img_bytes = get_image_bytes_from_file(chart["file_data"])
                     title = f"Significant Weather Chart (SIGWX) [{chart.get('source','')}]"
-                    pdf.chart_fullpage(title, chart["img_bytes"], user_desc=chart.get("desc",""))
+                    pdf.chart_fullpage(title, img_bytes, user_desc=chart.get("desc",""))
             # Wind/Temp
             for chart in st.session_state.get("windtemp_charts", []):
-                if chart.get("img_bytes"):
+                if chart.get("file_data"):
+                    img_bytes = get_image_bytes_from_file(chart["file_data"])
                     title = f"Wind and Temperature Chart [{chart.get('levels','')}]"
-                    pdf.chart_fullpage(title, chart["img_bytes"], user_desc=chart.get("desc",""))
+                    pdf.chart_fullpage(title, img_bytes, user_desc=chart.get("desc",""))
             # SPC
             for chart in st.session_state.get("spc_charts", []):
-                if chart.get("img_bytes"):
+                if chart.get("file_data"):
+                    img_bytes = get_image_bytes_from_file(chart["file_data"])
                     title = "Surface Pressure Chart (SPC)"
-                    pdf.chart_fullpage(title, chart["img_bytes"], user_desc=chart.get("desc",""))
+                    pdf.chart_fullpage(title, img_bytes, user_desc=chart.get("desc",""))
             out_pdf = f"weather_briefing_raw_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
@@ -463,6 +465,8 @@ if ready:
                 )
 else:
     st.info("Fill all sections and upload at least one chart of each type before generating your PDFs.")
+
+
 
 
 
