@@ -198,7 +198,7 @@ class RawLandscapePDF(FPDF):
         self.add_page(orientation='L')
         self.set_xy(0,65)
         self.set_font("Arial", 'B', 30)
-        self.cell(0, 22, ascii_safe("RAW Preflight Briefing"), ln=True, align='C')
+        self.cell(0, 22, ascii_safe("Weather Briefing"), ln=True, align='C')
         self.ln(10)
         self.set_font("Arial", '', 17)
         self.cell(0, 10, ascii_safe(f"Pilot: {pilot}    Aircraft: {aircraft}    Callsign: {callsign}"), ln=True, align='C')
@@ -215,10 +215,9 @@ class RawLandscapePDF(FPDF):
             self.cell(0, 9, f"{icao}", ln=True)
             self.set_font("Arial", '', 12)
             if entry.get("metar","").strip():
-                self.cell(0, 7, "METAR:", ln=True)
                 self.multi_cell(0, 7, ascii_safe(entry['metar']))
+                self.ln(2)
             if entry.get("taf","").strip():
-                self.cell(0, 7, "TAF:", ln=True)
                 self.multi_cell(0, 7, ascii_safe(entry['taf']))
             self.ln(3)
     def gamet_page(self, gamet):
