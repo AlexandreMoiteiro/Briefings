@@ -33,58 +33,83 @@ def get_aerodrome_info(icao):
     name = info['name'].title()
     return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
-def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao=""):
+def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao="", lang="pt"):
     prompt = (
-        f"Explica em linguagem corrente, como se fosse para um aluno piloto, cada elemento deste {msg_type}. "
-        "Não omitas nada: explica cada linha, cada código, cada número, cada observação, de forma detalhada, clara e didática. "
-        "Usa bullets, não resumes, não deixes nada por decifrar, não saltes nenhuma parte, nem abreviações, nem remarks. "
+        "Explica este " + msg_type +
+        " linha a linha, cada código, cada secção, como se fosse para um piloto a estudar para exame. "
+        "Não omitas nada, explica tudo em bullet points, incluindo tempo, vento, remarks, QNH, visibilidade, trovoadas, BECMG, TEMPO, tudo. "
+        "Se houver várias linhas/periodos, explica todas. Usa linguagem muito clara."
     )
+    if lang == "en":
+        prompt = (
+            "Explain this " + msg_type +
+            " line by line, every code and section, as if teaching a pilot for an exam. Do not omit anything, "
+            "explain all elements, in bullet points, including wind, visibility, remarks, QNH, BECMG, TEMPO, etc."
+        )
     if icao:
-        prompt += f" ICAO: {icao}."
+        prompt += f" ICAO: {icao}. Foco especial: Portugal (se relevante)."
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": raw_text}
         ],
-        max_tokens=1300,
-        temperature=0
+        max_tokens=1300 if lang=="pt" else 1000,
+        temperature=0.06
     )
     return response.choices[0].message.content.strip()
 
-def ai_gamet_analysis(gamet_text):
+def ai_gamet_analysis(gamet_text, lang="pt"):
     prompt = (
-        "Explica em linguagem corrente, como se fosse para um aluno piloto, cada elemento deste GAMET/SIGMET/AIRMET. "
-        "Não omitas nada, explica cada código, abreviação, área, risco meteorológico, fenómeno, linha e remark, de forma detalhada e didática."
+        "Explica este GAMET/SIGMET/AIRMET, linha a linha e em bullet points. Explica todos os riscos meteorológicos, áreas, fenómenos, abreviaturas, tudo em linguagem corrente para um piloto, sem omitir nada."
     )
+    if lang == "en":
+        prompt = (
+            "Explain this GAMET/SIGMET/AIRMET warning, line by line, in bullet points. Explain every risk, area, phenomenon and abbreviation, for a pilot."
+        )
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": gamet_text}
         ],
-        max_tokens=1300,
-        temperature=0
+        max_tokens=900 if lang=="pt" else 800,
+        temperature=0.05
     )
     return response.choices[0].message.content.strip()
 
-def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc):
-    prompt = (
-        f"Explica em linguagem corrente e didática cada símbolo, código, linha e abreviação que esteja visível neste chart ({chart_type}). "
-        "Para cada elemento, diz o que é, o que significa e o impacto para a operação do piloto. "
-        "Não deixes nada sem explicar, não resumes, explica tudo como se fosse para um exame."
-    )
+def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc, lang="pt"):
+    if lang == "en":
+        intro = "You are a meteorology instructor in Europe. This briefing is for a flight in Portugal, but explain every feature you see, no omissions, as if teaching a student. Bullet points, full decoding, do not summarize."
+    else:
+        intro = "És instrutor de meteorologia e vais dar um briefing para um voo em Portugal. Explica todos os símbolos, abreviaturas, linhas, comentários, cada fenómeno visível no chart. Bullet points, não omitas nada. Não resumas."
+    if "sigwx" in chart_type.lower():
+        prompt = intro + (
+            " Trata-se de um Significant Weather (SIGWX) chart. Explica todos os símbolos, linhas, nuvens, fenómenos, jetstreams, turbulência, abreviaturas, comentários, tropopausa, e tudo o que encontras, especialmente sobre Portugal, mas não omitas nada noutros locais."
+        )
+    elif "pressure" in chart_type.lower() or "spc" in chart_type.lower():
+        prompt = intro + (
+            " É um surface pressure chart. Explica todos os sistemas de pressão, frentes, isóbaras, símbolos, abreviaturas, números, comentários. Decodifica tudo como para exame."
+        )
+    elif "wind" in chart_type.lower():
+        prompt = intro + (
+            " É um wind/temperature chart. Explica todos os wind barbs, temperaturas, símbolos, legendas, níveis de voo, e fenómenos meteorológicos relevantes, com detalhe, para um piloto."
+        )
+    else:
+        prompt = intro + (
+            " Explica todos os símbolos, linhas, indicadores meteorológicos e texto visíveis neste chart."
+        )
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": [
-                {"type": "text", "text": f"Analisa todo o chart, explica tudo sem resumir, com foco em Portugal mas cobrindo todos os elementos visíveis."},
+                {"type": "text", "text": "Analisa todo o chart, explicando tudo."},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
             ]}
         ],
-        max_tokens=1300,
-        temperature=0
+        max_tokens=1800 if lang=="pt" else 1200,
+        temperature=0.08
     )
     return response.choices[0].message.content.strip()
 
@@ -103,8 +128,8 @@ class BriefingPDF(FPDF):
         self.cell(0, 22, ascii_safe("Preflight Weather Briefing"), ln=True, align='C')
         self.ln(10)
         self.set_font("Arial", '', 17)
-        self.cell(0, 10, ascii_safe(f"Pilot: {pilot}    Aircraft: {aircraft}    Callsign: {callsign}"), ln=True, align='C')
-        self.cell(0, 10, ascii_safe(f"Mission: {mission}    Date: {date}    UTC: {time_utc}"), ln=True, align='C')
+        self.cell(0, 10, ascii_safe(f"Piloto: {pilot}    Aeronave: {aircraft}    Callsign: {callsign}"), ln=True, align='C')
+        self.cell(0, 10, ascii_safe(f"Missão: {mission}    Data: {date}    UTC: {time_utc}"), ln=True, align='C')
         self.ln(30)
     def metar_taf_section(self, pairs):
         self.add_page(orientation='P')
@@ -119,13 +144,13 @@ class BriefingPDF(FPDF):
             if entry.get("metar","").strip():
                 self.cell(0, 7, "METAR (Raw):", ln=True)
                 self.multi_cell(0, 7, ascii_safe(entry['metar']))
-                ai_text = ai_metar_taf_analysis(entry["metar"], msg_type="METAR", icao=icao)
+                ai_text = ai_metar_taf_analysis(entry["metar"], msg_type="METAR", icao=icao, lang="pt")
                 self.set_font("Arial", 'I', 11)
                 self.multi_cell(0, 7, ascii_safe(ai_text))
             if entry.get("taf","").strip():
                 self.cell(0, 7, "TAF (Raw):", ln=True)
                 self.multi_cell(0, 7, ascii_safe(entry['taf']))
-                ai_text = ai_metar_taf_analysis(entry["taf"], msg_type="TAF", icao=icao)
+                ai_text = ai_metar_taf_analysis(entry["taf"], msg_type="TAF", icao=icao, lang="pt")
                 self.set_font("Arial", 'I', 11)
                 self.multi_cell(0, 7, ascii_safe(ai_text))
             self.ln(5)
@@ -137,7 +162,7 @@ class BriefingPDF(FPDF):
             self.ln(2)
             self.set_font("Arial", '', 12)
             self.multi_cell(0, 7, ascii_safe(gamet))
-            ai_text = ai_gamet_analysis(gamet)
+            ai_text = ai_gamet_analysis(gamet, lang="pt")
             self.set_font("Arial", 'I', 11)
             self.multi_cell(0, 7, ascii_safe(ai_text))
     def chart_section(self, charts):
@@ -229,6 +254,7 @@ class RawLandscapePDF(FPDF):
                 self.image(chart_img_path, x=x, y=y, w=final_w, h=final_h)
 
 # ----------------- STREAMLIT APP ----------------
+
 st.title("Preflight Weather Briefing")
 
 with st.expander("Pilot/Aircraft Info", expanded=True):
@@ -243,28 +269,35 @@ def metar_taf_block():
     if "metar_taf_pairs" not in st.session_state:
         st.session_state.metar_taf_pairs = []
     st.subheader("METAR/TAF por Aeródromo")
-    if st.button("Adicionar Aeródromo (METAR/TAF)"):
+    cols_add, cols_rem = st.columns([0.4,0.6])
+    if cols_add.button("Adicionar Aeródromo (METAR/TAF)"):
         st.session_state.metar_taf_pairs.append({"icao":"", "metar":"", "taf":""})
+    remove_indexes = []
     for i, entry in enumerate(st.session_state.metar_taf_pairs):
-        cols = st.columns([0.18,0.41,0.41,0.1])
+        cols = st.columns([0.18,0.41,0.35,0.06])
         entry["icao"] = cols[0].text_input("ICAO", value=entry.get("icao",""), key=f"icao_{i}")
         entry["metar"] = cols[1].text_area("METAR", value=entry.get("metar",""), key=f"metar_{i}", height=70)
         entry["taf"] = cols[2].text_area("TAF", value=entry.get("taf",""), key=f"taf_{i}", height=70)
-        # Botão de remover
-        if cols[3].button("Remover", key=f"remove_metar_taf_{i}"):
-            st.session_state.metar_taf_pairs.pop(i)
-            st.experimental_rerun()
+        if cols[3].button("❌", key=f"remove_metar_taf_{i}"):
+            remove_indexes.append(i)
+    for idx in sorted(remove_indexes, reverse=True):
+        st.session_state.metar_taf_pairs.pop(idx)
 
 def chart_block_multi(chart_key, label, title_base, subtitle_label):
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
     st.subheader(label)
-    if st.button(f"Adicionar {label}"):
+    cols_add, cols_rem = st.columns([0.6,0.4])
+    if cols_add.button(f"Adicionar {label}"):
         st.session_state[chart_key].append({"desc": "Portugal", "img_bytes": None, "title": title_base, "subtitle": ""})
+    remove_indexes = []
     for i, chart in enumerate(st.session_state[chart_key]):
         with st.expander(f"{label} {i+1}", expanded=True):
-            chart["desc"] = st.text_input("Área/foco para análise", value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
-            chart["subtitle"] = st.text_input(subtitle_label, value=chart.get("subtitle",""), key=f"{chart_key}_subtitle_{i}")
+            cols = st.columns([0.6,0.34,0.06])
+            chart["desc"] = cols[0].text_input("Área/foco para análise", value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
+            chart["subtitle"] = cols[1].text_input(subtitle_label, value=chart.get("subtitle",""), key=f"{chart_key}_subtitle_{i}")
+            if cols[2].button("❌", key=f"remove_{chart_key}_{i}"):
+                remove_indexes.append(i)
             chart_file = st.file_uploader(f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{chart_key}_file_{i}")
             if chart_file:
                 if chart_file.type == "application/pdf":
@@ -276,10 +309,8 @@ def chart_block_multi(chart_key, label, title_base, subtitle_label):
                     img = Image.open(chart_file).convert("RGB").copy()
                 _, img_bytes = downscale_image(img)
                 chart["img_bytes"] = img_bytes
-            # Botão de remover
-            if st.button(f"Remover {label} {i+1}", key=f"remove_{chart_key}_{i}"):
-                st.session_state[chart_key].pop(i)
-                st.experimental_rerun()
+    for idx in sorted(remove_indexes, reverse=True):
+        st.session_state[chart_key].pop(idx)
 
 # Main form blocks
 metar_taf_block()
@@ -290,18 +321,18 @@ chart_block_multi("spc_charts", "Surface Pressure Chart (SPC)", "Surface Pressur
 st.subheader("GAMET/SIGMET/AIRMET (Raw)")
 st.session_state["gamet_raw"] = st.text_area("Paste GAMET/SIGMET/AIRMET here (raw text):", value=st.session_state.get("gamet_raw", ""), height=100)
 
-# Agora, basta UM campo preenchido para gerar
+# Pronto para PDF se houver qualquer chart dos 3 tipos (não obriga todos), ou qualquer metar/taf
 ready = (
-    len([e for e in st.session_state.get("metar_taf_pairs", []) if e.get("metar","").strip() or e.get("taf","").strip()]) > 0
-    or len([c for c in st.session_state.get("sigwx_charts", []) if c.get("img_bytes")]) > 0
-    or len([c for c in st.session_state.get("windtemp_charts", []) if c.get("img_bytes")]) > 0
-    or len([c for c in st.session_state.get("spc_charts", []) if c.get("img_bytes")]) > 0
-    or st.session_state.get("gamet_raw","").strip()
+    any([c.get("img_bytes") for c in st.session_state.get("sigwx_charts", [])]) or
+    any([c.get("img_bytes") for c in st.session_state.get("windtemp_charts", [])]) or
+    any([c.get("img_bytes") for c in st.session_state.get("spc_charts", [])]) or
+    len([e for e in st.session_state.get("metar_taf_pairs", []) if e.get("metar","").strip() or e.get("taf","").strip()]) > 0 or
+    st.session_state.get("gamet_raw","").strip()
 )
 
 col1, col2 = st.columns(2)
 if ready:
-    if col1.button("Gerar PDF COMPLETO (detalhado)"):
+    if col1.button("Gerar PDF COMPLETO (detalhado, português)"):
         with st.spinner("Preparando PDF detalhado..."):
             pdf = BriefingPDF()
             pdf.set_auto_page_break(auto=True, margin=15)
@@ -313,22 +344,22 @@ if ready:
             gamet = st.session_state.get("gamet_raw", "")
             pdf.metar_taf_section(metar_taf_pairs)
             pdf.gamet_page(gamet)
-            # Charts section (todos de todas as listas, sem duplicar!)
+            # Charts section (all with image + detailed analysis)
             charts_all = []
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
                     img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
+                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"), lang="pt")
                     charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
             for chart in st.session_state.get("windtemp_charts", []):
                 if chart.get("img_bytes"):
                     img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
+                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"), lang="pt")
                     charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
             for chart in st.session_state.get("spc_charts", []):
                 if chart.get("img_bytes"):
                     img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
+                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"), lang="pt")
                     charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
             pdf.chart_section(charts_all)
             out_pdf = f"weather_briefing_detailed_{ascii_safe(mission)}.pdf"
@@ -340,7 +371,7 @@ if ready:
                     file_name=out_pdf,
                     mime="application/pdf"
                 )
-    if col2.button("Gerar PDF RAW (para entregar)"):
+    if col2.button("Gerar PDF RAW (entregar, inglês)"):
         with st.spinner("Preparando PDF raw..."):
             pdf = RawLandscapePDF()
             pdf.cover_page(pilot, aircraft, str(date), time_utc, callsign, mission)
@@ -372,7 +403,8 @@ if ready:
                     mime="application/pdf"
                 )
 else:
-    st.info("Preenche pelo menos um dos campos (METAR/TAF, chart, GAMET) para gerar os PDFs.")
+    st.info("Preenche pelo menos uma secção (METAR/TAF, GAMET ou um chart) para gerar os PDFs.")
+
 
 
 
