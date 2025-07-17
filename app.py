@@ -287,11 +287,11 @@ def chart_block_multi(chart_key, label, title_base, subtitle_label):
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
     st.subheader(label)
-    cols_add, _ = st.columns([0.6, 0.4])
-    if cols_add.button(f"Adicionar {label}"):
+    if st.button(f"Adicionar {label}"):
         st.session_state[chart_key].append({
             "desc": "Portugal",
             "img_bytes": None,
+            "upload_bytes": None,   # <- bytes originais do upload
             "title": title_base,
             "subtitle": ""
         })
@@ -305,28 +305,44 @@ def chart_block_multi(chart_key, label, title_base, subtitle_label):
                 subtitle_label, value=chart.get("subtitle", ""), key=f"{chart_key}_subtitle_{i}")
             if cols[2].button("❌", key=f"remove_{chart_key}_{i}"):
                 remove_indexes.append(i)
-
+            # Uploader
             chart_file = st.file_uploader(
                 f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):",
                 type=["pdf", "png", "jpg", "jpeg", "gif"],
                 key=f"{chart_key}_file_{i}"
             )
-            if chart_file:
-                # Lê os bytes sempre dentro deste bloco, para garantir independência
+            # Se houver upload novo, guarda os bytes e processa imagem
+            if chart_file is not None:
+                upload_bytes = chart_file.read()
+                chart["upload_bytes"] = upload_bytes  # <- GUARDA os bytes do upload para persistência!
+                # Processamento da imagem
                 if chart_file.type == "application/pdf":
-                    pdf_bytes = chart_file.read()
-                    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                    pdf_doc = fitz.open(stream=upload_bytes, filetype="pdf")
                     page = pdf_doc.load_page(0)
                     img = Image.open(io.BytesIO(page.get_pixmap().tobytes("png"))).convert("RGB").copy()
                 else:
-                    file_bytes = chart_file.read()
-                    img = Image.open(io.BytesIO(file_bytes)).convert("RGB").copy()
+                    img = Image.open(io.BytesIO(upload_bytes)).convert("RGB").copy()
                 _, img_bytes = downscale_image(img)
-                # Garante que cada chart tem o seu BytesIO próprio
                 chart["img_bytes"] = io.BytesIO(img_bytes.getvalue())
+            # Se não houver upload, mas já tem upload_bytes guardados, reconstrói a imagem (após reload/remover/adicionar chart)
+            elif chart.get("upload_bytes") is not None and chart.get("img_bytes") is None:
+                upload_bytes = chart["upload_bytes"]
+                try:
+                    if chart.get("upload_bytes_type", "").startswith("application/pdf"):
+                        pdf_doc = fitz.open(stream=upload_bytes, filetype="pdf")
+                        page = pdf_doc.load_page(0)
+                        img = Image.open(io.BytesIO(page.get_pixmap().tobytes("png"))).convert("RGB").copy()
+                    else:
+                        img = Image.open(io.BytesIO(upload_bytes)).convert("RGB").copy()
+                    _, img_bytes = downscale_image(img)
+                    chart["img_bytes"] = io.BytesIO(img_bytes.getvalue())
+                except Exception:
+                    pass  # Se der erro, ignora (ficheiro corrompido, etc)
+            # Também guarda o tipo de ficheiro para PDF
+            if chart_file is not None:
+                chart["upload_bytes_type"] = chart_file.type
     for idx in sorted(remove_indexes, reverse=True):
         st.session_state[chart_key].pop(idx)
-
 
 
 # Main form blocks
