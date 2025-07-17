@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 from PIL import Image
 import openai
@@ -11,9 +12,11 @@ import airportsdata
 import tempfile
 import os
 
+# ——— Configuration ———
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 AIRPORTS = airportsdata.load('ICAO')
 
+# Utility functions
 def ascii_safe(text):
     return unicodedata.normalize('NFKD', str(text)).encode('ascii', 'ignore').decode('ascii')
 
@@ -26,15 +29,7 @@ def downscale_image(img, width=1300):
     img_bytes.seek(0)
     return img, img_bytes
 
-def get_aerodrome_info(icao):
-    info = AIRPORTS.get(icao.upper())
-    if not info:
-        return "", icao.upper()
-    lat = f"{abs(info['lat']):.4f}{'N' if info['lat'] >= 0 else 'S'}"
-    lon = f"{abs(info['lon']):.4f}{'E' if info['lon'] >= 0 else 'W'}"
-    name = info['name'].title()
-    return f"{name}, {info['country']} {lat} {lon}", name.upper()
-
+# AI analysis functions
 def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao="", lang="pt"):
     if lang == "en":
         prompt = (
@@ -52,7 +47,7 @@ def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao="", lang="pt"):
         )
     if icao:
         prompt += f" ICAO: {icao}. Foco especial: Portugal (se relevante)."
-    response = openai.chat.completions.create(
+    response = openai.ChatCompletion.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": prompt},
@@ -76,7 +71,7 @@ def ai_gamet_analysis(gamet_text, lang="pt"):
             "Explica cada código, abreviatura, área, risco e fenómeno meteorológico para um piloto. "
             "Para cada item, explica literalmente o que significa e o impacto operacional. Não omitas nem resumas nada."
         )
-    response = openai.chat.completions.create(
+    response = openai.ChatCompletion.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": prompt},
@@ -87,81 +82,32 @@ def ai_gamet_analysis(gamet_text, lang="pt"):
     )
     return response.choices[0].message.content.strip()
 
-def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc, lang="pt"):
-    if lang == "en":
-        prompt = (
-            "You are an aviation meteorology instructor, preparing a student pilot for a theoretical and practical chart-reading exam (ICAO/WMO standards). "
-            "Your job is to decode, in excruciating detail, every visible symbol, line, color, code, abbreviation, or annotation on the attached aviation weather chart image (SIGWX, surface pressure, wind/temperature, etc). "
-            "EXPLICIT RULES:\n"
-            "- For each element (including all lines, shapes, symbols, numbers, letters, legend items, and map annotations), do ALL of the following:\n"
-            "  1. **First, describe exactly what you see** (literal shape, color, label, code, etc — no interpretation yet).\n"
-            "  2. **Only then, interpret the symbol/code IF AND ONLY IF you are 100% certain according to official WMO/ICAO standards (e.g. WMO 306, ICAO Doc 9855).** If you are not absolutely sure, say \"Uncertain: possible meaning is ...\" or \"Cannot determine with certainty.\""
-            "  3. **NEVER say a scalloped/wavy/curly line is a front. Only identify a front if the symbol matches the standard (cold: blue triangles, warm: red semicircles, occlusion: mixed, trough: dashed brown).**\n"
-            "  4. **If a legend is visible, begin by listing and decoding every legend item, before analyzing the map.**\n"
-            "  5. **DO NOT SUMMARIZE OR OMIT ANYTHING.** For every feature (even repeated), make a bullet point.\n"
-            "  6. If possible, cite the relevant WMO/ICAO standard for each interpretation.\n"
-            "  7. For every code, include both a literal translation and an operational explanation for pilots.\n"
-            "- If in doubt about any feature, state explicitly: \"Not sure what this is. It may be...\" and explain your reasoning.\n"
-            f"\nContext: This chart is for flight operations over {user_area_desc}."
-        )
-    else:
-        prompt = (
-            "És instrutor de meteorologia aeronáutica, a preparar um piloto para exame teórico e prático (normas OACI/OMM/WMO). "
-            "O teu trabalho é decifrar, em detalhe exaustivo, todos os símbolos, linhas, cores, códigos, abreviaturas ou anotações visíveis no gráfico meteorológico de aviação anexado (SIGWX, SPC, wind/temp, etc). "
-            "REGRAS EXPLÍCITAS:\n"
-            "- Para cada elemento (incluindo todas as linhas, formas, símbolos, números, letras, itens da legenda, anotações do mapa), faz TODAS as seguintes etapas:\n"
-            "  1. **Primeiro, descreve exatamente o que vês** (forma literal, cor, rótulo, código, etc — sem interpretar ainda).\n"
-            "  2. **Só depois interpreta o símbolo/código SE E SÓ SE tiveres 100% de certeza segundo os standards oficiais OMM/OACI (ex: WMO 306, OACI Doc 9855).** Se não tiveres absoluta certeza, diz \"Incerto: poderá ser...\" ou \"Não consigo determinar com certeza.\""
-            "  3. **NUNCA digas que uma linha ondulada/scalloped é uma frente. Só identifica frente se o símbolo for o oficial (fria: triângulos azuis, quente: semicircunferências vermelhas, oclusão: misto, trough: castanho tracejado).**\n"
-            "  4. **Se a legenda estiver visível, começa por listar e decifrar cada item da legenda, antes do resto do mapa.**\n"
-            "  5. **NÃO RESUMAS NEM OMITAS NADA.** Para cada elemento (mesmo repetido), faz bullet point.\n"
-            "  6. Sempre que possível, indica o standard OMM/OACI relevante para cada interpretação.\n"
-            "  7. Para cada código, dá a tradução literal e explicação operacional para pilotos.\n"
-            "- Se tiveres dúvidas sobre qualquer elemento, diz explicitamente: \"Não tenho a certeza. Poderá ser...\" e explica o raciocínio.\n"
-            f"\nContexto: Este chart é para operações sobre {user_area_desc}."
-        )
+def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc, lang='pt'):
+    prompt = (
+        "You are an expert aviation meteorologist. "
+        "Analyze every visible feature on the attached chart in detail. "
+        "For each symbol, line, color, label or annotation, do two things:\n"
+        "1) Describe exactly what you see (shape, text, color, etc.).\n"
+        "2) Interpret its meaning and operational impact for flight planning.\n"
+        "Do not reference any external documents—just your own knowledge. "
+        f"Context: flight operations over {user_area_desc}. Chart type: {chart_type}."
+    )
+    messages = [
+        {'role': 'system',  'content': prompt},
+        {'role': 'user',    'content': [
+            {'type': 'text',       'text': 'Here’s the chart image:'},
+            {'type': 'image_url',  'image_url': {'url': f'data:image/png;base64,{img_base64}'}}
+        ]}
+    ]
+    resp = openai.ChatCompletion.create(
+        model='gpt-4o',
+        messages=messages,
+        temperature=0.3,
+        max_tokens=2000
+    )
+    return resp.choices[0].message.content.strip()
 
-    if "sigwx" in chart_type.lower():
-        tipo = "Significant Weather (SIGWX)"
-    elif "pressure" in chart_type.lower() or "spc" in chart_type.lower():
-        tipo = "surface pressure"
-    elif "wind" in chart_type.lower():
-        tipo = "wind/temperature"
-    else:
-        tipo = "aviation meteorology"
-
-    prompt += f"\n\nTipo de chart: {tipo}.\nIMAGEM SEGUE JÁ DEPOIS."
-
-    modelo_ai = "gpt-4-vision-preview"
-    try:
-        response = openai.chat.completions.create(
-            model=modelo_ai,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Segue o gráfico. Aplica as regras acima ponto por ponto."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-                ]}
-            ],
-            max_tokens=1800,
-            temperature=0.01
-        )
-    except Exception:
-        response = openai.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Segue o gráfico. Aplica as regras acima ponto por ponto."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-                ]}
-            ],
-            max_tokens=1200,
-            temperature=0.01
-        )
-    return response.choices[0].message.content.strip()
-
-# --------- PDF TEMPLATES ----------
+# ——— PDF Classes ———
 class BriefingPDF(FPDF):
     def header(self): pass
     def footer(self):
@@ -169,6 +115,7 @@ class BriefingPDF(FPDF):
         self.set_font('Arial', 'I', 8)
         self.set_text_color(120, 120, 120)
         self.cell(0, 7, ascii_safe(f"Page {self.page_no()}"), align='C')
+
     def cover_page(self, pilot, aircraft, date, time_utc, callsign, mission):
         self.add_page(orientation='L')
         self.set_xy(0,65)
@@ -179,6 +126,7 @@ class BriefingPDF(FPDF):
         self.cell(0, 10, ascii_safe(f"Piloto: {pilot}    Aeronave: {aircraft}    Callsign: {callsign}"), ln=True, align='C')
         self.cell(0, 10, ascii_safe(f"Missão: {mission}    Data: {date}    UTC: {time_utc}"), ln=True, align='C')
         self.ln(30)
+
     def metar_taf_section(self, pairs):
         self.add_page(orientation='P')
         self.set_font("Arial", 'B', 20)
@@ -189,19 +137,20 @@ class BriefingPDF(FPDF):
             self.set_font("Arial", 'B', 14)
             self.cell(0, 9, f"{icao}", ln=True)
             self.set_font("Arial", '', 12)
-            if entry.get("metar","").strip():
+            if entry.get("metar","" ).strip():
                 self.cell(0, 7, "METAR (Raw):", ln=True)
                 self.multi_cell(0, 7, ascii_safe(entry['metar']))
                 ai_text = ai_metar_taf_analysis(entry["metar"], msg_type="METAR", icao=icao, lang="pt")
                 self.set_font("Arial", 'I', 11)
                 self.multi_cell(0, 7, ascii_safe(ai_text))
-            if entry.get("taf","").strip():
+            if entry.get("taf","" ).strip():
                 self.cell(0, 7, "TAF (Raw):", ln=True)
                 self.multi_cell(0, 7, ascii_safe(entry['taf']))
                 ai_text = ai_metar_taf_analysis(entry["taf"], msg_type="TAF", icao=icao, lang="pt")
                 self.set_font("Arial", 'I', 11)
                 self.multi_cell(0, 7, ascii_safe(ai_text))
             self.ln(5)
+
     def gamet_page(self, gamet):
         if gamet and gamet.strip():
             self.add_page(orientation='P')
@@ -213,8 +162,9 @@ class BriefingPDF(FPDF):
             ai_text = ai_gamet_analysis(gamet, lang="pt")
             self.set_font("Arial", 'I', 11)
             self.multi_cell(0, 7, ascii_safe(ai_text))
+
     def chart_section(self, charts):
-        for i, chart in enumerate(charts):
+        for chart in charts:
             self.add_page(orientation='L')
             self.set_font("Arial", 'B', 18)
             self.cell(0, 10, ascii_safe(chart['title']), ln=True, align='C')
@@ -222,31 +172,27 @@ class BriefingPDF(FPDF):
                 self.set_font("Arial", 'I', 14)
                 self.cell(0, 8, ascii_safe(chart['subtitle']), ln=True, align='C')
             if chart.get("img_bytes"):
-                max_w = self.w - 30
-                max_h = self.h - 55
+                max_w, max_h = self.w - 30, self.h - 55
                 img = Image.open(chart["img_bytes"])
                 iw, ih = img.size
                 ratio = min(max_w/iw, max_h/ih)
                 final_w, final_h = int(iw*ratio), int(ih*ratio)
-                x = (self.w-final_w)//2
+                x = (self.w - final_w)//2
                 y = self.get_y() + 8
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
-                    img.save(tmp_img, format="PNG")
-                    tmp_img_path = tmp_img.name
-                self.image(tmp_img_path, x=x, y=y, w=final_w, h=final_h)
-                os.remove(tmp_img_path)
-                self.ln(final_h+5)
-            ai_text = chart.get("ai_text", "")
-            if ai_text:
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    img.save(tmp.name, format="PNG")
+                    self.image(tmp.name, x=x, y=y, w=final_w, h=final_h)
+                os.remove(tmp.name)
+                self.ln(final_h + 5)
+            if chart.get("ai_text"):
                 self.set_font("Arial", '', 12)
-                self.multi_cell(0, 8, ascii_safe(ai_text))
+                self.multi_cell(0, 8, ascii_safe(chart["ai_text"]))
                 self.ln(2)
 
 class RawLandscapePDF(FPDF):
-    def __init__(self):
-        super().__init__()
     def header(self): pass
     def footer(self): pass
+
     def cover_page(self, pilot, aircraft, date, time_utc, callsign, mission):
         self.add_page(orientation='L')
         self.set_xy(0,65)
@@ -257,22 +203,23 @@ class RawLandscapePDF(FPDF):
         self.cell(0, 10, ascii_safe(f"Pilot: {pilot}    Aircraft: {aircraft}    Callsign: {callsign}"), ln=True, align='C')
         self.cell(0, 10, ascii_safe(f"Mission: {mission}    Date: {date}    UTC: {time_utc}"), ln=True, align='C')
         self.ln(30)
+
     def metar_taf_section(self, pairs):
         self.add_page(orientation='P')
         self.set_font("Arial", 'B', 20)
         self.cell(0, 12, "METAR/TAF", ln=True, align='C')
         self.set_font("Arial", '', 13)
         for entry in pairs:
-            icao = entry['icao'].upper()
             self.set_font("Arial", 'B', 14)
-            self.cell(0, 9, f"{icao}", ln=True)
+            self.cell(0, 9, entry['icao'].upper(), ln=True)
             self.set_font("Arial", '', 12)
-            if entry.get("metar","").strip():
+            if entry.get("metar","" ).strip():
                 self.multi_cell(0, 7, ascii_safe(entry['metar']))
                 self.ln(2)
-            if entry.get("taf","").strip():
+            if entry.get("taf","" ).strip():
                 self.multi_cell(0, 7, ascii_safe(entry['taf']))
             self.ln(3)
+
     def gamet_page(self, gamet):
         if gamet and gamet.strip():
             self.add_page(orientation='P')
@@ -281,28 +228,15 @@ class RawLandscapePDF(FPDF):
             self.ln(2)
             self.set_font("Arial", '', 12)
             self.multi_cell(0, 7, ascii_safe(gamet))
+
     def chart_fullpage(self, charts):
-        for i, chart in enumerate(charts):
+        for chart in charts:
             self.add_page(orientation='L')
             self.set_font("Arial", 'B', 18)
             self.cell(0, 10, ascii_safe(chart['title']), ln=True, align='C')
             if chart.get('subtitle'):
                 self.set_font("Arial", 'I', 14)
-                self.cell(0, 8, ascii_safe(chart['subtitle']), ln=True, align='C')
-            if chart.get("img_bytes"):
-                max_w = self.w - 30
-                max_h = self.h - 55
-                img = Image.open(chart["img_bytes"])
-                iw, ih = img.size
-                ratio = min(max_w/iw, max_h/ih)
-                final_w, final_h = int(iw*ratio), int(ih*ratio)
-                x = (self.w-final_w)//2
-                y = self.get_y() + 8
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
-                    img.save(tmp_img, format="PNG")
-                    tmp_img_path = tmp_img.name
-                self.image(tmp_img_path, x=x, y=y, w=final_w, h=final_h)
-                os.remove(tmp_img_path)
+
 
 # ----------------- STREAMLIT APP ----------------
 
