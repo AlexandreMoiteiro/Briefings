@@ -35,27 +35,26 @@ def get_aerodrome_info(icao):
 
 def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao=""):
     prompt = (
-        f"You are a meteorology instructor. Analyse the following {msg_type} as if explaining every code and section to a pilot preparing for an exam. "
-        "For every element (including wind shifts, BECMG, TEMPO, remarks, QNH, etc), provide a line-by-line detailed explanation in bullet points. "
-        "Do not summarize or omit anything. If the message refers to more than one time period or line, explain each one."
+        f"Você é um instrutor de meteorologia para pilotos. Decodifique o seguinte {msg_type} para linguagem totalmente corrente, explicando cada código, abreviação e cada detalhe do boletim para um estudante. "
+        "Não omita NENHUM detalhe. Faça uma explicação ponto a ponto em linguagem natural, como se estivesse lendo para um aluno em voz alta, comentando cada detalhe, incluindo horários, QNH, visibilidade, variações, remarks, etc."
     )
     if icao:
-        prompt += f" The ICAO is {icao}."
+        prompt += f" O código ICAO é {icao}."
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": raw_text}
         ],
-        max_tokens=2200,
-        temperature=0.1
+        max_tokens=1200,
+        temperature=0.05
     )
     return response.choices[0].message.content.strip()
 
 def ai_gamet_analysis(gamet_text):
     prompt = (
-        "You are a meteorology instructor. Analyse the following GAMET/SIGMET/AIRMET warning in bullet points, explaining every code, line, and abbreviation to a student pilot. "
-        "Do not summarize or omit anything. Explain every meteorological risk, area, phenomenon, and abbreviation."
+        "Você é um instrutor de meteorologia para pilotos. Decodifique o seguinte GAMET/SIGMET/AIRMET para linguagem totalmente corrente, explicando cada código, linha, sigla, abreviação e fenômeno meteorológico ao estudante piloto. "
+        "Não omita nenhum detalhe, explique cada risco, área, fenômeno, abreviação, inclusive validade e localização, como se estivesse lendo o boletim para o aluno em voz alta."
     )
     response = openai.chat.completions.create(
         model="gpt-4o",
@@ -63,49 +62,40 @@ def ai_gamet_analysis(gamet_text):
             {"role": "system", "content": prompt},
             {"role": "user", "content": gamet_text}
         ],
-        max_tokens=2200,
-        temperature=0.1
+        max_tokens=1200,
+        temperature=0.05
     )
     return response.choices[0].message.content.strip()
 
 def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc):
     if "sigwx" in chart_type.lower():
         prompt = (
-            "You are a meteorology instructor. For this Significant Weather (SIGWX) chart, "
-            "list and explain in exhaustive bullet points EVERY symbol, abbreviation, comment, line, and meteorological feature visible in the chart. "
-            "For each symbol or line, describe what it means in detail, its significance for pilots, and possible operational implications. "
-            "Do not summarize. Include explanations of all jet streams, turbulence zones, cloud types, fronts, pressure patterns, tropopause levels, and any written comments, even abbreviations. "
-            "Start by decoding the legend if any symbols are present. Cover everything visible, especially over Portugal and adjacent Atlantic, but do not skip any feature elsewhere."
+            "Você é um instrutor de meteorologia para pilotos. Analise este gráfico SIGWX (Significant Weather) e explique, em linguagem totalmente corrente e em tópicos detalhados, absolutamente TODOS os símbolos, abreviações, comentários, linhas e fenômenos meteorológicos visíveis no gráfico. "
+            "Explique o significado de cada símbolo, linha ou comentário, com seu impacto operacional para pilotos. Não resuma, não omita nenhum detalhe."
         )
     elif "pressure" in chart_type.lower() or "spc" in chart_type.lower():
         prompt = (
-            "You are a meteorology instructor. For this surface pressure chart, in exhaustive bullet points, "
-            "explain every pressure system, front, isobar, symbol, abbreviation, and comment visible. "
-            "For each feature, explain its meteorological meaning, what it tells pilots, and possible operational impact. "
-            "Explicitly decode all numbers, symbols, and lines on the chart, as if teaching a student for an exam. "
-            "Do not summarize or omit any detail. Focus especially on Portugal, but cover all visible details."
+            "Você é um instrutor de meteorologia para pilotos. Para este gráfico de pressão à superfície, explique em linguagem corrente e tópicos cada sistema de pressão, frente, isóbara, símbolo, número e comentário visível, detalhando o que significa para o piloto. Não omita nada."
         )
     elif "wind" in chart_type.lower():
         prompt = (
-            "You are a meteorology instructor. For this wind and temperature chart, explain in exhaustive bullet points every wind barb, symbol, temperature value, and any other meteorological indicator on the chart, and what it means for a pilot. "
-            "Explicitly decode all symbols and abbreviations. Cover all visible details, focusing on Portugal but not skipping other regions."
+            "Você é um instrutor de meteorologia para pilotos. Para este gráfico de vento e temperatura, explique em linguagem corrente e detalhada cada flecha/barb, símbolo, número de temperatura e qualquer outro indicador meteorológico. Não resuma, explique tudo, como se estivesse mostrando a um aluno em voz alta."
         )
     else:
         prompt = (
-            "You are a meteorology instructor. For this chart, explain in exhaustive bullet points every visible symbol, line, meteorological indicator, and text, and decode them in detail for a pilot. "
-            "Cover all features on the chart, focusing on Portugal but explaining every element visible."
+            "Você é um instrutor de meteorologia para pilotos. Para este gráfico, explique em linguagem corrente e detalhada todos os símbolos, linhas, indicadores meteorológicos e textos visíveis, como se estivesse mostrando e explicando para um aluno."
         )
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": [
-                {"type": "text", "text": f"Analyze the entire chart. Pay special attention to Portugal, but explain every symbol or code anywhere in the chart. Do not summarize, be explicit and didactic."},
+                {"type": "text", "text": f"Analise o gráfico completo. Não resuma, explique tudo, especialmente sobre Portugal mas sem omitir nenhum símbolo ou código."},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
             ]}
         ],
-        max_tokens=3200,
-        temperature=0.10
+        max_tokens=2000,
+        temperature=0.05
     )
     return response.choices[0].message.content.strip()
 
@@ -266,11 +256,18 @@ def metar_taf_block():
     st.subheader("METAR/TAF por Aeródromo")
     if st.button("Adicionar Aeródromo (METAR/TAF)"):
         st.session_state.metar_taf_pairs.append({"icao":"", "metar":"", "taf":""})
+        st.experimental_rerun()
+    remove_idx = None
     for i, entry in enumerate(st.session_state.metar_taf_pairs):
-        cols = st.columns([0.18,0.41,0.41])
+        cols = st.columns([0.18,0.41,0.41,0.08])
         entry["icao"] = cols[0].text_input("ICAO", value=entry.get("icao",""), key=f"icao_{i}")
         entry["metar"] = cols[1].text_area("METAR", value=entry.get("metar",""), key=f"metar_{i}", height=70)
         entry["taf"] = cols[2].text_area("TAF", value=entry.get("taf",""), key=f"taf_{i}", height=70)
+        if cols[3].button("Remover", key=f"remove_metar_taf_{i}"):
+            remove_idx = i
+    if remove_idx is not None:
+        st.session_state.metar_taf_pairs.pop(remove_idx)
+        st.experimental_rerun()
 
 def chart_block_multi(chart_key, label, title_base, subtitle_label):
     if chart_key not in st.session_state:
@@ -278,6 +275,8 @@ def chart_block_multi(chart_key, label, title_base, subtitle_label):
     st.subheader(label)
     if st.button(f"Adicionar {label}"):
         st.session_state[chart_key].append({"desc": "Portugal", "img_bytes": None, "title": title_base, "subtitle": ""})
+        st.experimental_rerun()
+    remove_idx = None
     for i, chart in enumerate(st.session_state[chart_key]):
         with st.expander(f"{label} {i+1}", expanded=True):
             chart["desc"] = st.text_input("Área/foco para análise", value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
@@ -293,6 +292,11 @@ def chart_block_multi(chart_key, label, title_base, subtitle_label):
                     img = Image.open(chart_file).convert("RGB").copy()
                 _, img_bytes = downscale_image(img)
                 chart["img_bytes"] = img_bytes
+            if st.button("Remover", key=f"{chart_key}_remove_{i}"):
+                remove_idx = i
+    if remove_idx is not None:
+        st.session_state[chart_key].pop(remove_idx)
+        st.experimental_rerun()
 
 # Main form blocks
 metar_taf_block()
@@ -326,21 +330,17 @@ if ready:
             pdf.gamet_page(gamet)
             # Charts section (all with image + detailed analysis)
             charts_all = []
-            for chart in st.session_state.get("sigwx_charts", []):
-                if chart.get("img_bytes"):
-                    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
-            for chart in st.session_state.get("windtemp_charts", []):
-                if chart.get("img_bytes"):
-                    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
-            for chart in st.session_state.get("spc_charts", []):
-                if chart.get("img_bytes"):
-                    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
-                    ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
+            for chart_list in ["sigwx_charts", "windtemp_charts", "spc_charts"]:
+                for chart in st.session_state.get(chart_list, []):
+                    if chart.get("img_bytes"):
+                        img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
+                        ai_text = ai_chart_analysis_instructor(img_b64, chart.get("title"), chart.get("desc", "Portugal"))
+                        charts_all.append({
+                            "title": chart.get("title"),
+                            "img_bytes": chart["img_bytes"],
+                            "ai_text": ai_text,
+                            "subtitle": chart.get("subtitle","")
+                        })
             pdf.chart_section(charts_all)
             out_pdf = f"weather_briefing_detailed_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
@@ -363,15 +363,14 @@ if ready:
             pdf.metar_taf_section(metar_taf_pairs)
             pdf.gamet_page(gamet)
             charts_all = []
-            for chart in st.session_state.get("sigwx_charts", []):
-                if chart.get("img_bytes"):
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle","")})
-            for chart in st.session_state.get("windtemp_charts", []):
-                if chart.get("img_bytes"):
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle","")})
-            for chart in st.session_state.get("spc_charts", []):
-                if chart.get("img_bytes"):
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle","")})
+            for chart_list in ["sigwx_charts", "windtemp_charts", "spc_charts"]:
+                for chart in st.session_state.get(chart_list, []):
+                    if chart.get("img_bytes"):
+                        charts_all.append({
+                            "title": chart.get("title"),
+                            "img_bytes": chart["img_bytes"],
+                            "subtitle": chart.get("subtitle","")
+                        })
             pdf.chart_fullpage(charts_all)
             out_pdf = f"weather_briefing_raw_{ascii_safe(mission)}.pdf"
             pdf.output(out_pdf)
@@ -383,7 +382,8 @@ if ready:
                     mime="application/pdf"
                 )
 else:
-    st.info("Preenche todas as secções e faz upload de pelo menos um chart de cada tipo para gerar os PDFs.")
+    st.info("Preencha todas as secções e faça upload de pelo menos um chart de cada tipo para gerar os PDFs.")
+
 
 
 
