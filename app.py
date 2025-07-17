@@ -166,7 +166,7 @@ class BriefingPDF(FPDF):
             self.set_font("Arial", 'I', 11)
             self.multi_cell(0, 7, ascii_safe(ai_text))
     def chart_section(self, charts):
-        for chart in charts:
+        for i, chart in enumerate(charts):
             self.add_page(orientation='L')
             self.set_font("Arial", 'B', 18)
             self.cell(0, 10, ascii_safe(chart['title']), ln=True, align='C')
@@ -176,16 +176,14 @@ class BriefingPDF(FPDF):
             if chart.get("img_bytes"):
                 max_w = self.w - 30
                 max_h = self.h - 55
-                img_bytes = chart["img_bytes"]
-                img = Image.open(img_bytes)
+                img = Image.open(chart["img_bytes"])
                 iw, ih = img.size
                 ratio = min(max_w/iw, max_h/ih)
                 final_w, final_h = int(iw*ratio), int(ih*ratio)
-                chart_img_path = f"tmp_chart_{ascii_safe(chart['title']).replace(' ','_')}.png"
-                img.save(chart_img_path)
                 x = (self.w-final_w)//2
                 y = self.get_y() + 8
-                self.image(chart_img_path, x=x, y=y, w=final_w, h=final_h)
+                chart["img_bytes"].seek(0)
+                self.image(chart["img_bytes"], x=x, y=y, w=final_w, h=final_h, type='PNG')
                 self.ln(final_h+5)
             ai_text = chart.get("ai_text", "")
             if ai_text:
@@ -233,7 +231,7 @@ class RawLandscapePDF(FPDF):
             self.set_font("Arial", '', 12)
             self.multi_cell(0, 7, ascii_safe(gamet))
     def chart_fullpage(self, charts):
-        for chart in charts:
+        for i, chart in enumerate(charts):
             self.add_page(orientation='L')
             self.set_font("Arial", 'B', 18)
             self.cell(0, 10, ascii_safe(chart['title']), ln=True, align='C')
@@ -247,11 +245,10 @@ class RawLandscapePDF(FPDF):
                 iw, ih = img.size
                 ratio = min(max_w/iw, max_h/ih)
                 final_w, final_h = int(iw*ratio), int(ih*ratio)
-                chart_img_path = f"tmp_chart_{ascii_safe(chart['title']).replace(' ','_')}.png"
-                img.save(chart_img_path)
                 x = (self.w-final_w)//2
                 y = self.get_y() + 8
-                self.image(chart_img_path, x=x, y=y, w=final_w, h=final_h)
+                chart["img_bytes"].seek(0)
+                self.image(chart["img_bytes"], x=x, y=y, w=final_w, h=final_h, type='PNG')
 
 # ----------------- STREAMLIT APP ----------------
 
@@ -287,63 +284,30 @@ def chart_block_multi(chart_key, label, title_base, subtitle_label):
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
     st.subheader(label)
-    if st.button(f"Adicionar {label}"):
-        st.session_state[chart_key].append({
-            "desc": "Portugal",
-            "img_bytes": None,
-            "upload_bytes": None,   # <- bytes originais do upload
-            "title": title_base,
-            "subtitle": ""
-        })
+    cols_add, cols_rem = st.columns([0.6,0.4])
+    if cols_add.button(f"Adicionar {label}"):
+        st.session_state[chart_key].append({"desc": "Portugal", "img_bytes": None, "title": title_base, "subtitle": ""})
     remove_indexes = []
     for i, chart in enumerate(st.session_state[chart_key]):
         with st.expander(f"{label} {i+1}", expanded=True):
-            cols = st.columns([0.6, 0.34, 0.06])
-            chart["desc"] = cols[0].text_input(
-                "Área/foco para análise", value=chart.get("desc", "Portugal"), key=f"{chart_key}_desc_{i}")
-            chart["subtitle"] = cols[1].text_input(
-                subtitle_label, value=chart.get("subtitle", ""), key=f"{chart_key}_subtitle_{i}")
+            cols = st.columns([0.6,0.34,0.06])
+            chart["desc"] = cols[0].text_input("Área/foco para análise", value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
+            chart["subtitle"] = cols[1].text_input(subtitle_label, value=chart.get("subtitle",""), key=f"{chart_key}_subtitle_{i}")
             if cols[2].button("❌", key=f"remove_{chart_key}_{i}"):
                 remove_indexes.append(i)
-            # Uploader
-            chart_file = st.file_uploader(
-                f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):",
-                type=["pdf", "png", "jpg", "jpeg", "gif"],
-                key=f"{chart_key}_file_{i}"
-            )
-            # Se houver upload novo, guarda os bytes e processa imagem
-            if chart_file is not None:
-                upload_bytes = chart_file.read()
-                chart["upload_bytes"] = upload_bytes  # <- GUARDA os bytes do upload para persistência!
-                # Processamento da imagem
+            chart_file = st.file_uploader(f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{chart_key}_file_{i}")
+            if chart_file:
                 if chart_file.type == "application/pdf":
-                    pdf_doc = fitz.open(stream=upload_bytes, filetype="pdf")
+                    pdf_bytes = chart_file.read()
+                    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
                     page = pdf_doc.load_page(0)
                     img = Image.open(io.BytesIO(page.get_pixmap().tobytes("png"))).convert("RGB").copy()
                 else:
-                    img = Image.open(io.BytesIO(upload_bytes)).convert("RGB").copy()
+                    img = Image.open(chart_file).convert("RGB").copy()
                 _, img_bytes = downscale_image(img)
-                chart["img_bytes"] = io.BytesIO(img_bytes.getvalue())
-            # Se não houver upload, mas já tem upload_bytes guardados, reconstrói a imagem (após reload/remover/adicionar chart)
-            elif chart.get("upload_bytes") is not None and chart.get("img_bytes") is None:
-                upload_bytes = chart["upload_bytes"]
-                try:
-                    if chart.get("upload_bytes_type", "").startswith("application/pdf"):
-                        pdf_doc = fitz.open(stream=upload_bytes, filetype="pdf")
-                        page = pdf_doc.load_page(0)
-                        img = Image.open(io.BytesIO(page.get_pixmap().tobytes("png"))).convert("RGB").copy()
-                    else:
-                        img = Image.open(io.BytesIO(upload_bytes)).convert("RGB").copy()
-                    _, img_bytes = downscale_image(img)
-                    chart["img_bytes"] = io.BytesIO(img_bytes.getvalue())
-                except Exception:
-                    pass  # Se der erro, ignora (ficheiro corrompido, etc)
-            # Também guarda o tipo de ficheiro para PDF
-            if chart_file is not None:
-                chart["upload_bytes_type"] = chart_file.type
+                chart["img_bytes"] = img_bytes
     for idx in sorted(remove_indexes, reverse=True):
         st.session_state[chart_key].pop(idx)
-
 
 # Main form blocks
 metar_taf_block()
@@ -437,11 +401,4 @@ if ready:
                 )
 else:
     st.info("Preenche pelo menos uma secção (METAR/TAF, GAMET ou um chart) para gerar os PDFs.")
-
-
-
-
-
-
-
 
