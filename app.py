@@ -298,19 +298,28 @@ def chart_block_multi(chart_key, label, title_base, subtitle_label):
             chart["subtitle"] = cols[1].text_input(subtitle_label, value=chart.get("subtitle",""), key=f"{chart_key}_subtitle_{i}")
             if cols[2].button("❌", key=f"remove_{chart_key}_{i}"):
                 remove_indexes.append(i)
-            chart_file = st.file_uploader(f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{chart_key}_file_{i}")
+            # FAZEMOS UPLOAD E GUARDAMOS UMA NOVA IMAGEM PARA CADA UPLOAD
+            chart_file = st.file_uploader(
+                f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):",
+                type=["pdf", "png", "jpg", "jpeg", "gif"],
+                key=f"{chart_key}_file_{i}"
+            )
             if chart_file:
+                # Sempre ler novo ficheiro
                 if chart_file.type == "application/pdf":
                     pdf_bytes = chart_file.read()
                     pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
                     page = pdf_doc.load_page(0)
                     img = Image.open(io.BytesIO(page.get_pixmap().tobytes("png"))).convert("RGB").copy()
                 else:
-                    img = Image.open(chart_file).convert("RGB").copy()
+                    file_bytes = chart_file.read()
+                    img = Image.open(io.BytesIO(file_bytes)).convert("RGB").copy()
+                # Sempre criar nova cópia de BytesIO!
                 _, img_bytes = downscale_image(img)
-                chart["img_bytes"] = img_bytes
+                chart["img_bytes"] = io.BytesIO(img_bytes.getvalue())  # <<<<< Isto é importante!
     for idx in sorted(remove_indexes, reverse=True):
         st.session_state[chart_key].pop(idx)
+
 
 # Main form blocks
 metar_taf_block()
