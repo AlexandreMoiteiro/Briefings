@@ -287,25 +287,32 @@ def chart_block_multi(chart_key, label, title_base, subtitle_label):
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
     st.subheader(label)
-    cols_add, cols_rem = st.columns([0.6,0.4])
+    cols_add, _ = st.columns([0.6, 0.4])
     if cols_add.button(f"Adicionar {label}"):
-        st.session_state[chart_key].append({"desc": "Portugal", "img_bytes": None, "title": title_base, "subtitle": ""})
+        st.session_state[chart_key].append({
+            "desc": "Portugal",
+            "img_bytes": None,
+            "title": title_base,
+            "subtitle": ""
+        })
     remove_indexes = []
     for i, chart in enumerate(st.session_state[chart_key]):
         with st.expander(f"{label} {i+1}", expanded=True):
-            cols = st.columns([0.6,0.34,0.06])
-            chart["desc"] = cols[0].text_input("Área/foco para análise", value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
-            chart["subtitle"] = cols[1].text_input(subtitle_label, value=chart.get("subtitle",""), key=f"{chart_key}_subtitle_{i}")
+            cols = st.columns([0.6, 0.34, 0.06])
+            chart["desc"] = cols[0].text_input(
+                "Área/foco para análise", value=chart.get("desc", "Portugal"), key=f"{chart_key}_desc_{i}")
+            chart["subtitle"] = cols[1].text_input(
+                subtitle_label, value=chart.get("subtitle", ""), key=f"{chart_key}_subtitle_{i}")
             if cols[2].button("❌", key=f"remove_{chart_key}_{i}"):
                 remove_indexes.append(i)
-            # FAZEMOS UPLOAD E GUARDAMOS UMA NOVA IMAGEM PARA CADA UPLOAD
+
             chart_file = st.file_uploader(
                 f"Upload {label} (PDF, PNG, JPG, JPEG, GIF):",
                 type=["pdf", "png", "jpg", "jpeg", "gif"],
                 key=f"{chart_key}_file_{i}"
             )
             if chart_file:
-                # Sempre ler novo ficheiro
+                # Lê os bytes sempre dentro deste bloco, para garantir independência
                 if chart_file.type == "application/pdf":
                     pdf_bytes = chart_file.read()
                     pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -314,11 +321,12 @@ def chart_block_multi(chart_key, label, title_base, subtitle_label):
                 else:
                     file_bytes = chart_file.read()
                     img = Image.open(io.BytesIO(file_bytes)).convert("RGB").copy()
-                # Sempre criar nova cópia de BytesIO!
                 _, img_bytes = downscale_image(img)
-                chart["img_bytes"] = io.BytesIO(img_bytes.getvalue())  # <<<<< Isto é importante!
+                # Garante que cada chart tem o seu BytesIO próprio
+                chart["img_bytes"] = io.BytesIO(img_bytes.getvalue())
     for idx in sorted(remove_indexes, reverse=True):
         st.session_state[chart_key].pop(idx)
+
 
 
 # Main form blocks
