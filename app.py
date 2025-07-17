@@ -8,6 +8,8 @@ import fitz
 import datetime
 import unicodedata
 import airportsdata
+import tempfile
+import os
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 AIRPORTS = airportsdata.load('ICAO')
@@ -182,8 +184,12 @@ class BriefingPDF(FPDF):
                 final_w, final_h = int(iw*ratio), int(ih*ratio)
                 x = (self.w-final_w)//2
                 y = self.get_y() + 8
-                chart["img_bytes"].seek(0)
-                self.image(chart["img_bytes"], x=x, y=y, w=final_w, h=final_h, type='PNG')
+                # Usar ficheiro temporário único
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
+                    img.save(tmp_img, format="PNG")
+                    tmp_img_path = tmp_img.name
+                self.image(tmp_img_path, x=x, y=y, w=final_w, h=final_h)
+                os.remove(tmp_img_path)
                 self.ln(final_h+5)
             ai_text = chart.get("ai_text", "")
             if ai_text:
@@ -247,8 +253,12 @@ class RawLandscapePDF(FPDF):
                 final_w, final_h = int(iw*ratio), int(ih*ratio)
                 x = (self.w-final_w)//2
                 y = self.get_y() + 8
-                chart["img_bytes"].seek(0)
-                self.image(chart["img_bytes"], x=x, y=y, w=final_w, h=final_h, type='PNG')
+                # Usar ficheiro temporário único
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
+                    img.save(tmp_img, format="PNG")
+                    tmp_img_path = tmp_img.name
+                self.image(tmp_img_path, x=x, y=y, w=final_w, h=final_h)
+                os.remove(tmp_img_path)
 
 # ----------------- STREAMLIT APP ----------------
 
@@ -318,7 +328,6 @@ chart_block_multi("spc_charts", "Surface Pressure Chart (SPC)", "Surface Pressur
 st.subheader("GAMET/SIGMET/AIRMET (Raw)")
 st.session_state["gamet_raw"] = st.text_area("Paste GAMET/SIGMET/AIRMET here (raw text):", value=st.session_state.get("gamet_raw", ""), height=100)
 
-# Pronto para PDF se houver qualquer chart dos 3 tipos (não obriga todos), ou qualquer metar/taf
 ready = (
     any([c.get("img_bytes") for c in st.session_state.get("sigwx_charts", [])]) or
     any([c.get("img_bytes") for c in st.session_state.get("windtemp_charts", [])]) or
@@ -341,7 +350,6 @@ if ready:
             gamet = st.session_state.get("gamet_raw", "")
             pdf.metar_taf_section(metar_taf_pairs)
             pdf.gamet_page(gamet)
-            # Charts section (all with image + detailed analysis)
             charts_all = []
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
@@ -401,4 +409,6 @@ if ready:
                 )
 else:
     st.info("Preenche pelo menos uma secção (METAR/TAF, GAMET ou um chart) para gerar os PDFs.")
+
+
 
