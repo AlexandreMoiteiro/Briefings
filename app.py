@@ -88,45 +88,37 @@ def ai_gamet_analysis(gamet_text, lang="pt"):
     return response.choices[0].message.content.strip()
 
 def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc, lang="pt"):
-    LEGEND_SIGWX_EN = """
-Standard SIGWX chart legend (WMO/ICAO):
-- Blue triangles = cold front; red semicircles = warm front; purple alternating triangles/semicircles = occlusion; brown dashed = trough; scalloped/curly = area of significant weather (not a front); bold solid = jet stream; zigzag = turbulence; dashed lines = tropopause or FL contours.
-- CB = cumulonimbus, ISOL = isolated, OCNL = occasional, EMBD = embedded, FRQ = frequent, OBSC = obscured.
-- Scalloped lines (wavy/curly, not sharp triangles/semicircles): delimit areas of significant cloud/weather, NOT a front.
-- All symbols must be interpreted per ICAO Annex 3 / WMO No. 49.
-"""
-    LEGEND_SIGWX_PT = """
-Legenda SIGWX padrão (OMM/OACI):
-- Triângulos azuis = frente fria; semicircunferências vermelhas = frente quente; símbolos roxos mistos = oclusão; castanho tracejado = trough; linha ondulada/scalloped = área de tempo significativo (NÃO é frente); traço forte = jetstream; zigzag = turbulência; tracejado = tropopausa ou níveis de voo.
-- CB = cumulonimbus, ISOL = isolado, OCNL = ocasional, EMBD = embebido, FRQ = frequente, OBSC = obscurecido.
-- Linhas onduladas/scalloped (onduladas/curly, não triângulos ou semicircunferências): delimitam áreas de nuvens ou tempo significativo, NÃO são frentes.
-- Todos os símbolos seguem OACI Anexo 3 / OMM Nº 49.
-"""
     if lang == "en":
-        intro = (
-            "You are an aviation meteorology instructor. Given an official SIGWX, wind or pressure chart image as published by ICAO/WMO, help a student pilot to decode every element."
-            "\n\nInstructions:"
-            "\n- For EVERY symbol, line, color, code, or annotation visible on the chart (even in the legend):"
-            "\n  1. Describe **literally** what you see (shape, color, label, code)."
-            "\n  2. ONLY interpret or identify if you are 100% sure per WMO/ICAO conventions. If unsure, say so."
-            "\n  3. NEVER claim a scalloped/wavy/curly line is a front (cold/warm/occlusion/trough)! Only call a front if the symbol matches standard WMO/ICAO symbology."
-            "\n  4. If a legend is present, start by decoding all its items before the rest."
-            "\n  5. Do NOT summarize or omit anything. Bullet point every element, even if repeated."
-            "\n  6. If relevant, mention impact for Portugal, but do not omit other areas."
-            f"\n\nUse this as reference:\n{LEGEND_SIGWX_EN}"
+        prompt = (
+            "You are an aviation meteorology instructor, preparing a student pilot for a theoretical and practical chart-reading exam (ICAO/WMO standards). "
+            "Your job is to decode, in excruciating detail, every visible symbol, line, color, code, abbreviation, or annotation on the attached aviation weather chart image (SIGWX, surface pressure, wind/temperature, etc). "
+            "EXPLICIT RULES:\n"
+            "- For each element (including all lines, shapes, symbols, numbers, letters, legend items, and map annotations), do ALL of the following:\n"
+            "  1. **First, describe exactly what you see** (literal shape, color, label, code, etc — no interpretation yet).\n"
+            "  2. **Only then, interpret the symbol/code IF AND ONLY IF you are 100% certain according to official WMO/ICAO standards (e.g. WMO 306, ICAO Doc 9855).** If you are not absolutely sure, say \"Uncertain: possible meaning is ...\" or \"Cannot determine with certainty.\""
+            "  3. **NEVER say a scalloped/wavy/curly line is a front. Only identify a front if the symbol matches the standard (cold: blue triangles, warm: red semicircles, occlusion: mixed, trough: dashed brown).**\n"
+            "  4. **If a legend is visible, begin by listing and decoding every legend item, before analyzing the map.**\n"
+            "  5. **DO NOT SUMMARIZE OR OMIT ANYTHING.** For every feature (even repeated), make a bullet point.\n"
+            "  6. If possible, cite the relevant WMO/ICAO standard for each interpretation.\n"
+            "  7. For every code, include both a literal translation and an operational explanation for pilots.\n"
+            "- If in doubt about any feature, state explicitly: \"Not sure what this is. It may be...\" and explain your reasoning.\n"
+            f"\nContext: This chart is for flight operations over {user_area_desc}."
         )
     else:
-        intro = (
-            "És instrutor de meteorologia aeronáutica. Vais receber um chart SIGWX, vento ou pressão oficial (OACI/OMM). Ajuda um aluno-piloto a decifrar todos os elementos."
-            "\n\nInstruções:"
-            "\n- Para CADA símbolo, linha, cor, código ou anotação visível (mesmo na legenda):"
-            "\n  1. Descreve literalmente o que vês (forma, cor, rótulo, código)."
-            "\n  2. Só identifica/interpreta se tiveres 100% de certeza pelas convenções OMM/OACI. Se não souberes, diz."
-            "\n  3. NUNCA digas que uma linha ondulada/scalloped é uma frente (fria, quente, oclusão, trough)! Só identifica frente se for símbolo exato segundo OACI/OMM."
-            "\n  4. Se houver legenda, começa por explicar todos os itens da legenda antes do resto."
-            "\n  5. NÃO resumas nem omitas nada. Faz bullet points para todos os elementos, mesmo que repetidos."
-            "\n  6. Se relevante, refere impacto para Portugal, mas não omitas outras áreas."
-            f"\n\nUsa isto como referência:\n{LEGEND_SIGWX_PT}"
+        prompt = (
+            "És instrutor de meteorologia aeronáutica, a preparar um piloto para exame teórico e prático (normas OACI/OMM/WMO). "
+            "O teu trabalho é decifrar, em detalhe exaustivo, todos os símbolos, linhas, cores, códigos, abreviaturas ou anotações visíveis no gráfico meteorológico de aviação anexado (SIGWX, SPC, wind/temp, etc). "
+            "REGRAS EXPLÍCITAS:\n"
+            "- Para cada elemento (incluindo todas as linhas, formas, símbolos, números, letras, itens da legenda, anotações do mapa), faz TODAS as seguintes etapas:\n"
+            "  1. **Primeiro, descreve exatamente o que vês** (forma literal, cor, rótulo, código, etc — sem interpretar ainda).\n"
+            "  2. **Só depois interpreta o símbolo/código SE E SÓ SE tiveres 100% de certeza segundo os standards oficiais OMM/OACI (ex: WMO 306, OACI Doc 9855).** Se não tiveres absoluta certeza, diz \"Incerto: poderá ser...\" ou \"Não consigo determinar com certeza.\""
+            "  3. **NUNCA digas que uma linha ondulada/scalloped é uma frente. Só identifica frente se o símbolo for o oficial (fria: triângulos azuis, quente: semicircunferências vermelhas, oclusão: misto, trough: castanho tracejado).**\n"
+            "  4. **Se a legenda estiver visível, começa por listar e decifrar cada item da legenda, antes do resto do mapa.**\n"
+            "  5. **NÃO RESUMAS NEM OMITAS NADA.** Para cada elemento (mesmo repetido), faz bullet point.\n"
+            "  6. Sempre que possível, indica o standard OMM/OACI relevante para cada interpretação.\n"
+            "  7. Para cada código, dá a tradução literal e explicação operacional para pilotos.\n"
+            "- Se tiveres dúvidas sobre qualquer elemento, diz explicitamente: \"Não tenho a certeza. Poderá ser...\" e explica o raciocínio.\n"
+            f"\nContexto: Este chart é para operações sobre {user_area_desc}."
         )
 
     if "sigwx" in chart_type.lower():
@@ -138,7 +130,7 @@ Legenda SIGWX padrão (OMM/OACI):
     else:
         tipo = "aviation meteorology"
 
-    prompt = intro + f"\n\nThis is a {tipo} chart. Image follows."
+    prompt += f"\n\nTipo de chart: {tipo}.\nIMAGEM SEGUE JÁ DEPOIS."
 
     modelo_ai = "gpt-4-vision-preview"
     try:
@@ -147,12 +139,12 @@ Legenda SIGWX padrão (OMM/OACI):
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": [
-                    {"type": "text", "text": "Decode every visible symbol, code, or annotation. Be exhaustive. If unsure, say so. Start with legend if visible."},
+                    {"type": "text", "text": "Segue o gráfico. Aplica as regras acima ponto por ponto."},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
                 ]}
             ],
             max_tokens=1800,
-            temperature=0.05
+            temperature=0.01
         )
     except Exception:
         response = openai.chat.completions.create(
@@ -160,12 +152,12 @@ Legenda SIGWX padrão (OMM/OACI):
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": [
-                    {"type": "text", "text": "Decode every visible symbol, code, or annotation. Be exhaustive. If unsure, say so. Start with legend if visible."},
+                    {"type": "text", "text": "Segue o gráfico. Aplica as regras acima ponto por ponto."},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
                 ]}
             ],
             max_tokens=1200,
-            temperature=0.06
+            temperature=0.01
         )
     return response.choices[0].message.content.strip()
 
@@ -461,5 +453,6 @@ if ready:
                 )
 else:
     st.info("Preenche pelo menos uma secção (METAR/TAF, GAMET ou um chart) para gerar os PDFs.")
+
 
 
