@@ -36,17 +36,19 @@ def get_aerodrome_info(icao):
     return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
 def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao="", lang="pt"):
-    prompt = (
-        "Explica este " + msg_type +
-        " linha a linha, cada código, cada secção, como se fosse para um piloto a estudar para exame. "
-        "Não omitas nada, explica tudo em bullet points, incluindo tempo, vento, remarks, QNH, visibilidade, trovoadas, BECMG, TEMPO, tudo. "
-        "Se houver várias linhas/periodos, explica todas. Usa linguagem muito clara."
-    )
     if lang == "en":
         prompt = (
-            "Explain this " + msg_type +
-            " line by line, every code and section, as if teaching a pilot for an exam. Do not omit anything, "
-            "explain all elements, in bullet points, including wind, visibility, remarks, QNH, BECMG, TEMPO, etc."
+            f"Explain this {msg_type} line by line, every code and section, as if teaching a pilot for an exam. "
+            "Do not omit anything. Decode every element in bullet points, including wind, visibility, remarks, QNH, BECMG, TEMPO, etc. "
+            "For each code, explain the literal meaning and operational significance for pilots. "
+            "If there are multiple lines/periods, explain all. Use very clear language."
+        )
+    else:
+        prompt = (
+            f"Explica este {msg_type} linha a linha, cada código, cada secção, como se fosse para um piloto a estudar para exame. "
+            "Não omitas nada, explica tudo em bullet points, incluindo vento, visibilidade, remarks, QNH, BECMG, TEMPO, etc. "
+            "Para cada código, explica o significado literal e a relevância operacional para pilotos. "
+            "Se houver várias linhas/períodos, explica todas. Usa linguagem muito clara."
         )
     if icao:
         prompt += f" ICAO: {icao}. Foco especial: Portugal (se relevante)."
@@ -56,18 +58,23 @@ def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao="", lang="pt"):
             {"role": "system", "content": prompt},
             {"role": "user", "content": raw_text}
         ],
-        max_tokens=1300 if lang=="pt" else 1000,
-        temperature=0.06
+        max_tokens=1400,
+        temperature=0.05
     )
     return response.choices[0].message.content.strip()
 
 def ai_gamet_analysis(gamet_text, lang="pt"):
-    prompt = (
-        "Explica este GAMET/SIGMET/AIRMET, linha a linha e em bullet points. Explica todos os riscos meteorológicos, áreas, fenómenos, abreviaturas, tudo em linguagem corrente para um piloto, sem omitir nada."
-    )
     if lang == "en":
         prompt = (
-            "Explain this GAMET/SIGMET/AIRMET warning, line by line, in bullet points. Explain every risk, area, phenomenon and abbreviation, for a pilot."
+            "Explain this GAMET/SIGMET/AIRMET warning, line by line, in bullet points. "
+            "Decode every code, abbreviation, area, risk, and meteorological phenomenon for a pilot. "
+            "For each item, explain literally what it means and its operational impact. Do not omit or summarize anything."
+        )
+    else:
+        prompt = (
+            "Explica este GAMET/SIGMET/AIRMET, linha a linha e em bullet points. "
+            "Explica cada código, abreviatura, área, risco e fenómeno meteorológico para um piloto. "
+            "Para cada item, explica literalmente o que significa e o impacto operacional. Não omitas nem resumas nada."
         )
     response = openai.chat.completions.create(
         model="gpt-4o",
@@ -75,44 +82,91 @@ def ai_gamet_analysis(gamet_text, lang="pt"):
             {"role": "system", "content": prompt},
             {"role": "user", "content": gamet_text}
         ],
-        max_tokens=900 if lang=="pt" else 800,
+        max_tokens=1000,
         temperature=0.05
     )
     return response.choices[0].message.content.strip()
 
 def ai_chart_analysis_instructor(img_base64, chart_type, user_area_desc, lang="pt"):
+    LEGEND_SIGWX_EN = """
+Standard SIGWX chart legend (WMO/ICAO):
+- Blue triangles = cold front; red semicircles = warm front; purple alternating triangles/semicircles = occlusion; brown dashed = trough; scalloped/curly = area of significant weather (not a front); bold solid = jet stream; zigzag = turbulence; dashed lines = tropopause or FL contours.
+- CB = cumulonimbus, ISOL = isolated, OCNL = occasional, EMBD = embedded, FRQ = frequent, OBSC = obscured.
+- Scalloped lines (wavy/curly, not sharp triangles/semicircles): delimit areas of significant cloud/weather, NOT a front.
+- All symbols must be interpreted per ICAO Annex 3 / WMO No. 49.
+"""
+    LEGEND_SIGWX_PT = """
+Legenda SIGWX padrão (OMM/OACI):
+- Triângulos azuis = frente fria; semicircunferências vermelhas = frente quente; símbolos roxos mistos = oclusão; castanho tracejado = trough; linha ondulada/scalloped = área de tempo significativo (NÃO é frente); traço forte = jetstream; zigzag = turbulência; tracejado = tropopausa ou níveis de voo.
+- CB = cumulonimbus, ISOL = isolado, OCNL = ocasional, EMBD = embebido, FRQ = frequente, OBSC = obscurecido.
+- Linhas onduladas/scalloped (onduladas/curly, não triângulos ou semicircunferências): delimitam áreas de nuvens ou tempo significativo, NÃO são frentes.
+- Todos os símbolos seguem OACI Anexo 3 / OMM Nº 49.
+"""
     if lang == "en":
-        intro = "You are a meteorology instructor in Europe. This briefing is for a flight in Portugal, but explain every feature you see, no omissions, as if teaching a student. Bullet points, full decoding, do not summarize."
+        intro = (
+            "You are an aviation meteorology instructor. Given an official SIGWX, wind or pressure chart image as published by ICAO/WMO, help a student pilot to decode every element."
+            "\n\nInstructions:"
+            "\n- For EVERY symbol, line, color, code, or annotation visible on the chart (even in the legend):"
+            "\n  1. Describe **literally** what you see (shape, color, label, code)."
+            "\n  2. ONLY interpret or identify if you are 100% sure per WMO/ICAO conventions. If unsure, say so."
+            "\n  3. NEVER claim a scalloped/wavy/curly line is a front (cold/warm/occlusion/trough)! Only call a front if the symbol matches standard WMO/ICAO symbology."
+            "\n  4. If a legend is present, start by decoding all its items before the rest."
+            "\n  5. Do NOT summarize or omit anything. Bullet point every element, even if repeated."
+            "\n  6. If relevant, mention impact for Portugal, but do not omit other areas."
+            f"\n\nUse this as reference:\n{LEGEND_SIGWX_EN}"
+        )
     else:
-        intro = "És instrutor de meteorologia e vais dar um briefing para um voo em Portugal. Explica todos os símbolos, abreviaturas, linhas, comentários, cada fenómeno visível no chart. Bullet points, não omitas nada. Não resumas."
+        intro = (
+            "És instrutor de meteorologia aeronáutica. Vais receber um chart SIGWX, vento ou pressão oficial (OACI/OMM). Ajuda um aluno-piloto a decifrar todos os elementos."
+            "\n\nInstruções:"
+            "\n- Para CADA símbolo, linha, cor, código ou anotação visível (mesmo na legenda):"
+            "\n  1. Descreve literalmente o que vês (forma, cor, rótulo, código)."
+            "\n  2. Só identifica/interpreta se tiveres 100% de certeza pelas convenções OMM/OACI. Se não souberes, diz."
+            "\n  3. NUNCA digas que uma linha ondulada/scalloped é uma frente (fria, quente, oclusão, trough)! Só identifica frente se for símbolo exato segundo OACI/OMM."
+            "\n  4. Se houver legenda, começa por explicar todos os itens da legenda antes do resto."
+            "\n  5. NÃO resumas nem omitas nada. Faz bullet points para todos os elementos, mesmo que repetidos."
+            "\n  6. Se relevante, refere impacto para Portugal, mas não omitas outras áreas."
+            f"\n\nUsa isto como referência:\n{LEGEND_SIGWX_PT}"
+        )
+
     if "sigwx" in chart_type.lower():
-        prompt = intro + (
-            " Trata-se de um Significant Weather (SIGWX) chart. Explica todos os símbolos, linhas, nuvens, fenómenos, jetstreams, turbulência, abreviaturas, comentários, tropopausa, e tudo o que encontras, especialmente sobre Portugal, mas não omitas nada noutros locais."
-        )
+        tipo = "Significant Weather (SIGWX)"
     elif "pressure" in chart_type.lower() or "spc" in chart_type.lower():
-        prompt = intro + (
-            " É um surface pressure chart. Explica todos os sistemas de pressão, frentes, isóbaras, símbolos, abreviaturas, números, comentários. Decodifica tudo como para exame."
-        )
+        tipo = "surface pressure"
     elif "wind" in chart_type.lower():
-        prompt = intro + (
-            " É um wind/temperature chart. Explica todos os wind barbs, temperaturas, símbolos, legendas, níveis de voo, e fenómenos meteorológicos relevantes, com detalhe, para um piloto."
-        )
+        tipo = "wind/temperature"
     else:
-        prompt = intro + (
-            " Explica todos os símbolos, linhas, indicadores meteorológicos e texto visíveis neste chart."
+        tipo = "aviation meteorology"
+
+    prompt = intro + f"\n\nThis is a {tipo} chart. Image follows."
+
+    modelo_ai = "gpt-4-vision-preview"
+    try:
+        response = openai.chat.completions.create(
+            model=modelo_ai,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Decode every visible symbol, code, or annotation. Be exhaustive. If unsure, say so. Start with legend if visible."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                ]}
+            ],
+            max_tokens=1800,
+            temperature=0.05
         )
-    response = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": "Analisa todo o chart, explicando tudo."},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
-            ]}
-        ],
-        max_tokens=1800 if lang=="pt" else 1200,
-        temperature=0.08
-    )
+    except Exception:
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Decode every visible symbol, code, or annotation. Be exhaustive. If unsure, say so. Start with legend if visible."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}}
+                ]}
+            ],
+            max_tokens=1200,
+            temperature=0.06
+        )
     return response.choices[0].message.content.strip()
 
 # --------- PDF TEMPLATES ----------
@@ -184,7 +238,6 @@ class BriefingPDF(FPDF):
                 final_w, final_h = int(iw*ratio), int(ih*ratio)
                 x = (self.w-final_w)//2
                 y = self.get_y() + 8
-                # Usar ficheiro temporário único
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
                     img.save(tmp_img, format="PNG")
                     tmp_img_path = tmp_img.name
@@ -253,7 +306,6 @@ class RawLandscapePDF(FPDF):
                 final_w, final_h = int(iw*ratio), int(ih*ratio)
                 x = (self.w-final_w)//2
                 y = self.get_y() + 8
-                # Usar ficheiro temporário único
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
                     img.save(tmp_img, format="PNG")
                     tmp_img_path = tmp_img.name
@@ -409,6 +461,5 @@ if ready:
                 )
 else:
     st.info("Preenche pelo menos uma secção (METAR/TAF, GAMET ou um chart) para gerar os PDFs.")
-
 
 
