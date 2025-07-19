@@ -237,7 +237,7 @@ def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao="", lang="pt"):
     if lang == "en":
         prompt = (
             f"Explain this {msg_type} for a pilot preparing for an exam. Decode each section and code, describing what it means, why it's important, and how to interpret it. "
-            "Do not omit any part or code. Use a clear, didactic style as if teaching a student."
+            "Do not omit any part or code. Use a clear, didactic style as if teaching a student.Don't use bullet points, just write as one would read."
         )
     else:
         prompt = (
