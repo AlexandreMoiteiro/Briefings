@@ -242,7 +242,7 @@ def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao="", lang="pt"):
     else:
         prompt = (
             f"Explica este {msg_type} para um piloto a preparar-se para exame. Decifra cada secção e código, descrevendo o que significa, porque é importante e como se interpreta. "
-            "Não omitas nenhum elemento. Usa um estilo claro e didático como se estivesses a ensinar um aluno."
+            "Não omitas nenhum elemento. Usa um estilo claro e didático como se estivesses a ensinar um aluno.Usa texto corrido, como se estivesses a ler tudo seguido."
         )
     if icao:
         prompt += f" ICAO: {icao}. Dá especial atenção ao contexto de Portugal se aplicável."
@@ -268,7 +268,7 @@ def ai_gamet_analysis(gamet_text, lang="pt"):
         prompt = (
             "Explica de forma clara e didática este GAMET/SIGMET/AIRMET para um aluno-piloto. "
             "Descreve cada código, abreviatura, área, fenómeno meteorológico e o que significa para o voo. "
-            "Organiza a explicação para ser fácil de aprender."
+            "Organiza a explicação para ser fácil de aprender. Não omitas nada."
         )
     response = openai.chat.completions.create(
         model="gpt-4o",
