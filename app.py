@@ -35,65 +35,23 @@ def get_aerodrome_info(icao):
     name = info['name'].title()
     return f"{name}, {info['country']} {lat} {lon}", name.upper()
 
-# --------- AI FUNCTIONS (for each chart type) ---------
+# --------- AI FUNCTIONS (corridas e explicativas) ---------
 def ai_sigwx_chart_analysis(img_base64, chart_type, user_area_desc, lang="pt"):
     if lang == "en":
         prompt = (
-            "You are an expert in aviation meteorology with a focus on interpreting SIGWX (Significant Weather) charts, especially those issued by AEMET or ICAO.\n\n"
-            "Given an input SIGWX chart image, perform a comprehensive analysis of all relevant meteorological elements, including:\n"
-            "- Fronts (cold, warm, occluded)\n"
-            "- Cloud coverage (type, altitude range, coverage extent)\n"
-            "- Areas of turbulence (including intensity and altitudinal or temporal extent)\n"
-            "- Icing conditions and convective activity (e.g., CB, TCU)\n"
-            "- Temperature 0°C isotherm levels\n"
-            "- Visibility symbols (e.g., V1, V5)\n"
-            "- Surface features (e.g., SFC indicators)\n"
-            "- Pressure data, flight levels (FL), and UTC time intervals\n"
-            "- Color-coded or symbol-marked zones (e.g., “1”, “2” annotations)\n"
-            "- Any textual notes or legends provided\n\n"
-            "Be particularly attentive to:\n"
-            "- Differentiating time intervals (e.g., “12/15” as 12:00–15:00 UTC) versus vertical levels (e.g., FL120–FL150).\n"
-            "- Matching the numbered annotations to the legend or remarks section.\n"
-            "- Interpreting ISO-levels for freezing, and pressure altitude markers.\n\n"
-            "Explain the chart in a structured and pedagogical way, appropriate for pilots, dispatchers, or flight planners. Use standard aviation meteorology terminology (ICAO/WMO compliant), but provide clear and actionable interpretations.\n\n"
-            "Output your response as:\n"
-            "1. General Overview (date, validity, issuing agency)\n"
-            "2. Explanation of Fronts and Synoptic Situation\n"
-            "3. Description of Weather Phenomena by Region\n"
-            "4. Analysis of Hazards (Turbulence, Icing, CB)\n"
-            "5. Notes on Freezing Levels, Visibility, and Special Symbols\n"
-            "6. Summary for Flight Planning Use\n\n"
-            "If any ambiguity arises (e.g., FL vs UTC), clarify your assumption based on chart context and standard interpretation.\n"
-            f"\nFocus especially on the region of interest: {user_area_desc}."
+            "You are an experienced aviation meteorologist. Looking at the SIGWX chart image provided, explain everything you see as if you were guiding a student pilot or dispatcher, using continuous, natural language. "
+            "Cover all relevant meteorological elements, like fronts, cloud types and levels, areas of turbulence, icing, convective activity, freezing levels, visibility, surface features, pressure data, flight levels, UTC times, symbols or numbers, and any textual notes or legend. "
+            "Instead of listing items or separating by sections, write in fluent, explanatory paragraphs, linking ideas naturally and providing clear, actionable interpretations. "
+            "Clarify any ambiguities, for example if something could mean a time interval or a flight level, explaining what you assume and why, based on context and standard aviation conventions. "
+            f"Focus especially on the region of interest: {user_area_desc}, always making sure your explanation flows logically and is easy to follow, just as if you were briefing someone new to SIGWX charts."
         )
     else:
         prompt = (
-            "És especialista em meteorologia aeronáutica, com foco na interpretação de charts SIGWX (Significant Weather), especialmente dos emitidos pela AEMET ou ICAO.\n\n"
-            "Recebendo um chart SIGWX em imagem, faz uma análise exaustiva de todos os elementos meteorológicos relevantes, incluindo:\n"
-            "- Frentes (frias, quentes, ocluídas)\n"
-            "- Cobertura de nuvens (tipo, faixa de altitude, extensão)\n"
-            "- Áreas de turbulência (incluindo intensidade e extensão altitudinal ou temporal)\n"
-            "- Condições de gelo e convecção (CB, TCU)\n"
-            "- Níveis da isoterma 0°C\n"
-            "- Símbolos de visibilidade (ex: V1, V5)\n"
-            "- Elementos à superfície (ex: indicação SFC)\n"
-            "- Dados de pressão, níveis de voo (FL) e intervalos horários UTC\n"
-            "- Zonas assinaladas por cor ou símbolo (ex: números “1”, “2”)\n"
-            "- Todas as notas textuais ou legendas presentes\n\n"
-            "Tem particular atenção a:\n"
-            "- Diferenciar intervalos horários (ex: “12/15” como 12:00–15:00 UTC) de níveis verticais (ex: FL120–FL150)\n"
-            "- Relacionar anotações numeradas com a legenda ou secção de remarks\n"
-            "- Interpretar níveis ISO de congelação e marcadores de altitude/pressão\n\n"
-            "Explica o chart de forma estruturada e pedagógica, adequada para pilotos, despachantes ou planners. Usa terminologia normalizada (ICAO/WMO), mas fornece interpretações claras e acionáveis.\n\n"
-            "Estrutura a resposta assim:\n"
-            "1. Visão Geral (data, validade, agência emissora)\n"
-            "2. Explicação das Frentes e Situação Sinótica\n"
-            "3. Descrição dos Fenómenos por Região\n"
-            "4. Análise dos Riscos (Turbulência, Gelo, CB)\n"
-            "5. Notas sobre Níveis de Congelamento, Visibilidade e Símbolos Especiais\n"
-            "6. Resumo para Planeamento de Voo\n\n"
-            "Se surgir ambiguidade (ex: FL vs UTC), esclarece qual a tua suposição com base no contexto do chart e nas convenções.\n"
-            f"\nFoco especialmente na área de interesse: {user_area_desc}."
+            "És um meteorologista aeronáutico experiente. Ao olhar para o chart SIGWX enviado, explica tudo o que observas como se estivesses a orientar um aluno-piloto ou despachante, escrevendo sempre em texto corrido, natural e didático. "
+            "Inclui todos os aspetos relevantes, como frentes, tipos e níveis de nuvens, áreas de turbulência, gelo, convecção, níveis de congelamento, visibilidade, elementos à superfície, dados de pressão, níveis de voo, horários UTC, símbolos ou anotações numéricas, e qualquer nota ou legenda textual. "
+            "Em vez de lista ou tópicos, escreve tudo em parágrafos explicativos, ligando naturalmente os conceitos e apresentando interpretações claras e práticas. "
+            "Se surgir alguma ambiguidade, como por exemplo se um valor representa um intervalo horário ou um nível de voo, explica o que assumes e porquê, com base no contexto do chart e nas convenções de meteorologia aeronáutica. "
+            f"Foca-te especialmente na área de interesse: {user_area_desc}, garantindo sempre que a explicação segue uma linha lógica, fácil de acompanhar e acessível a quem está a aprender a interpretar charts SIGWX."
         )
 
     response = openai.chat.completions.create(
@@ -113,49 +71,17 @@ def ai_sigwx_chart_analysis(img_base64, chart_type, user_area_desc, lang="pt"):
 def ai_spc_chart_analysis(img_base64, chart_type, user_area_desc, lang="pt"):
     if lang == "en":
         prompt = (
-            "You are an expert in aviation meteorology with a focus on interpreting Surface Pressure Charts (SPC), especially those issued by ICAO or major meteorological agencies.\n\n"
-            "Given an SPC chart image, perform a comprehensive analysis of all meteorologically relevant elements, including:\n"
-            "- Isobars and pressure values (hPa)\n"
-            "- High (H) and Low (L) pressure centers\n"
-            "- Fronts (cold, warm, occluded, stationary, troughs)\n"
-            "- Wind direction and speed indicators\n"
-            "- Pressure gradients and their operational significance\n"
-            "- Any weather symbols (precipitation, fog, etc)\n"
-            "- Marked zones or annotations (numbers, colored regions)\n"
-            "- Date/time/validity and issuing agency\n"
-            "- Any textual notes or legends provided\n\n"
-            "Explain the chart in a structured and pedagogical way, appropriate for pilots, dispatchers, or flight planners. Use standard aviation meteorology terminology (ICAO/WMO compliant), but provide clear and actionable interpretations.\n\n"
-            "Output your response as:\n"
-            "1. General Overview (date, validity, issuing agency)\n"
-            "2. Explanation of Pressure Systems and Fronts\n"
-            "3. Description of Wind Patterns and Zones\n"
-            "4. Analysis of Pressure Gradients and Their Flight Impact\n"
-            "5. Notes on Weather Symbols, Marked Zones, and Special Features\n"
-            "6. Summary for Flight Planning Use\n\n"
-            f"Focus especially on the region of interest: {user_area_desc}."
+            "You are an experienced aviation meteorologist. Interpret the Surface Pressure Chart (SPC) provided, explaining your analysis in a single, continuous, explanatory paragraph, as if you were teaching a student pilot. "
+            "Discuss isobars, pressure values, high and low centers, fronts (explaining their meaning and expected clouds or hazards), wind patterns, pressure gradients and their operational impact, weather symbols, any marked or colored zones, date/time/validity and the agency. "
+            "Avoid lists or section titles. Instead, weave all information together in natural language, giving context and relevance for flight planning. "
+            f"Give special attention to the region of interest: {user_area_desc}, ensuring your explanation is both informative and easy to follow, just as if you were briefing someone preparing a real flight."
         )
     else:
         prompt = (
-            "És especialista em meteorologia aeronáutica, com foco na interpretação de Surface Pressure Charts (SPC), especialmente os emitidos pela ICAO ou agências meteorológicas oficiais.\n\n"
-            "Recebendo uma imagem SPC, faz uma análise exaustiva de todos os elementos meteorológicos relevantes, incluindo:\n"
-            "- Isóbaras e valores de pressão (hPa)\n"
-            "- Centros de Alta (H) e Baixa (L) explicando o que são e que nuvens/condições atmosféricas/perigos que podem trazer\n"
-            "- Frentes (frias, quentes, ocluídas, estacionárias, troughs), explicando o que são e que nuvens/condições atmosféricas/perigos que podem trazer\n"
-            "- Indicadores de direção e intensidade do vento\n"
-            "- Gradientes de pressão e seu significado operacional\n"
-            "- Símbolos meteorológicos (precipitação, nevoeiro, etc)\n"
-            "- Zonas ou anotações marcadas (números, regiões coloridas)\n"
-            "- Data/hora/validade e agência emissora\n"
-            "- Qualquer nota textual ou legenda\n\n"
-            "Explica o chart de forma estruturada e pedagógica, adequada para pilotos, despachantes ou planners. Usa terminologia normalizada (ICAO/WMO), mas fornece interpretações claras e acionáveis.\n\n"
-            "Estrutura a resposta assim:\n"
-            "1. Visão Geral (data, validade, agência emissora)\n"
-            "2. Explicação dos Sistemas de Pressão e Frentes\n"
-            "3. Descrição dos Padrões de Vento e Zonas\n"
-            "4. Análise dos Gradientes de Pressão e Impacto no Voo\n"
-            "5. Notas sobre Símbolos Meteorológicos, Zonas Marcadas e Particularidades\n"
-            "6. Resumo para Planeamento de Voo\n\n"
-            f"Foca especialmente na área de interesse: {user_area_desc}."
+            "És meteorologista aeronáutico experiente. Interpreta o Surface Pressure Chart (SPC) enviado, explicando toda a análise em texto corrido e contínuo, como se estivesses a ensinar um aluno-piloto. "
+            "Fala sobre isóbaras, valores de pressão, centros de alta e baixa (explicando o significado, nuvens ou perigos que podem trazer), frentes, padrões e intensidade do vento, gradientes de pressão e seu impacto no voo, símbolos meteorológicos, zonas assinaladas ou coloridas, data/hora/validade e agência emissora. "
+            "Não uses listas nem títulos de secção – integra toda a informação de forma fluida e lógica, apresentando o contexto e a relevância para o planeamento de voo. "
+            f"Dedica especial atenção à região de interesse: {user_area_desc}, garantindo que a explicação é didática, informativa e fácil de seguir, como num briefing real para quem vai voar."
         )
 
     response = openai.chat.completions.create(
@@ -175,47 +101,15 @@ def ai_spc_chart_analysis(img_base64, chart_type, user_area_desc, lang="pt"):
 def ai_windtemp_chart_analysis(img_base64, chart_type, user_area_desc, lang="pt"):
     if lang == "en":
         prompt = (
-            "You are an expert in aviation meteorology, specialized in interpreting Wind and Temperature Charts, as used in flight planning and upper-air navigation.\n\n"
-            "Given a wind/temperature chart image, analyze in detail all relevant meteorological elements, including:\n"
-            "- Wind barbs/arrows (direction and speed at different FLs)\n"
-            "- Temperature values (°C, including anomalies)\n"
-            "- Flight level coverage (FLxxx)\n"
-            "- Jet stream symbols or annotations (including speed and altitude)\n"
-            "- Turbulence or significant weather symbols\n"
-            "- Geographical reference points and coverage\n"
-            "- Time/validity and issuing agency\n"
-            "- Any notes, color codes, or legends\n\n"
-            "Explain the chart in a structured and pedagogical way, suitable for pilots and flight planners. Use standard ICAO/WMO terminology but provide clear, actionable interpretations.\n\n"
-            "Output your response as:\n"
-            "1. General Overview (date, validity, issuing agency)\n"
-            "2. Wind Patterns and Jet Streams\n"
-            "3. Temperature Distribution and Anomalies\n"
-            "4. Flight Level and Significant Zones\n"
-            "5. Notes on Special Weather or Warnings\n"
-            "6. Summary for Operational Flight Use\n\n"
-            f"Focus especially on the region of interest: {user_area_desc}."
+            "You are an experienced aviation meteorologist. Looking at the wind and temperature chart provided, explain in a single, natural, flowing paragraph everything relevant for a pilot or flight planner: wind direction and speed at different flight levels, temperature values, jet streams and their characteristics, any turbulence or significant weather symbols, the relevant flight levels, time/validity, issuing agency, and any special notes or codes. "
+            "Avoid lists or sections – instead, write as if you are guiding a student pilot through the chart, tying together all the details in an accessible, logical way. "
+            f"Focus especially on the region of interest: {user_area_desc}, making sure your explanation is instructive, clear and operationally meaningful."
         )
     else:
         prompt = (
-            "És especialista em meteorologia aeronáutica, com experiência em interpretação de Wind and Temperature Charts usados em navegação e planeamento de voo.\n\n"
-            "Recebendo uma imagem de chart vento/temperatura, analisa em detalhe todos os elementos relevantes, incluindo:\n"
-            "- Bárbaras/setas de vento (direção e intensidade em diferentes FLs)\n"
-            "- Valores de temperatura (°C, incluindo anomalias)\n"
-            "- Níveis de voo (FLxxx)\n"
-            "- Símbolos ou anotações de jet stream (incluindo velocidade e altitude)\n"
-            "- Símbolos de turbulência ou tempo significativo\n"
-            "- Pontos e áreas geográficas de referência\n"
-            "- Data/hora/validade e agência emissora\n"
-            "- Notas, códigos de cor ou legendas\n\n"
-            "Explica o chart de forma estruturada e pedagógica, para pilotos e planners. Usa terminologia oficial (ICAO/WMO) e interpretações claras e acionáveis.\n\n"
-            "Estrutura a resposta assim:\n"
-            "1. Visão Geral (data, validade, agência emissora)\n"
-            "2. Padrões de Vento e Jet Streams\n"
-            "3. Distribuição de Temperatura e Anomalias\n"
-            "4. Níveis de Voo e Zonas Significativas\n"
-            "5. Notas sobre Tempo Significativo ou Alertas\n"
-            "6. Resumo para Operação de Voo\n\n"
-            f"Foca especialmente na área de interesse: {user_area_desc}."
+            "És meteorologista aeronáutico experiente. Ao analisar o chart de vento e temperatura fornecido, explica tudo o que for relevante para piloto ou planeador de voo num parágrafo corrido e natural: direção e intensidade do vento em cada nível de voo, valores de temperatura, características de jet streams, eventuais símbolos de turbulência ou tempo significativo, níveis de voo representados, horários de validade, agência emissora e eventuais notas ou códigos especiais. "
+            "Evita listas ou secções – em vez disso, escreve como se estivesses a orientar um aluno-piloto através do chart, ligando todos os detalhes de forma acessível, lógica e clara. "
+            f"Foca-te especialmente na região de interesse: {user_area_desc}, garantindo que a explicação é didática, operacional e fácil de compreender."
         )
 
     response = openai.chat.completions.create(
@@ -232,20 +126,24 @@ def ai_windtemp_chart_analysis(img_base64, chart_type, user_area_desc, lang="pt"
     )
     return response.choices[0].message.content.strip()
 
-# --------- RESTO DAS FUNÇÕES (METAR/TAF, GAMET) ---------
 def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao="", lang="pt"):
     if lang == "en":
         prompt = (
-            f"Explain this {msg_type} for a pilot preparing for an exam. Decode each section and code, describing what it means, why it's important, and how to interpret it. "
-            "Do not omit any part or code. Use a clear, didactic style as if teaching a student.Don't use bullet points, just write as one would read."
+            f"You're an experienced aviation meteorologist. Your task is to interpret this {msg_type} for a student pilot. "
+            "Explain each code and section fluently, as if you're reading it aloud and teaching as you go. "
+            "Write in continuous, natural language without bullet points or numbered sections. "
+            "Highlight operational implications and help the student understand not just what it says, but what it means for a real flight. "
         )
     else:
         prompt = (
-            f"Explica este {msg_type} para um piloto a preparar-se para exame. Decifra cada secção e código, descrevendo o que significa, porque é importante e como se interpreta. "
-            "Não omitas nenhum elemento. Usa um estilo claro e didático como se estivesses a ensinar um aluno.Usa texto corrido, como se estivesses a ler tudo seguido, sem bullet points."
+            f"És um meteorologista aeronáutico experiente. A tua tarefa é interpretar este {msg_type} para um aluno-piloto. "
+            "Explica cada parte do código de forma contínua e didática, como se estivesses a ler em voz alta e a ensinar ao mesmo tempo. "
+            "Escreve com linguagem fluida, sem usar bullets nem títulos nem secções enumeradas. "
+            "Realça o impacto operacional da informação e ajuda o aluno a perceber não só o que está escrito, mas o que significa para o voo real. "
         )
     if icao:
-        prompt += f" ICAO: {icao}. Dá especial atenção ao contexto de Portugal se aplicável."
+        prompt += f" Este METAR/TAF é do aeródromo {icao}. Se for aplicável ao espaço aéreo português, menciona esse contexto."
+
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
@@ -260,16 +158,18 @@ def ai_metar_taf_analysis(raw_text, msg_type="METAR/TAF", icao="", lang="pt"):
 def ai_gamet_analysis(gamet_text, lang="pt"):
     if lang == "en":
         prompt = (
-            "Explain in clear, didactic detail this GAMET/SIGMET/AIRMET message for a student pilot. "
-            "Describe every code, abbreviation, area, meteorological phenomenon, and what it means for flight. "
-            "Organize your explanation so it's easy to learn."
+            "You're a meteorologist explaining a GAMET/SIGMET/AIRMET message to a student pilot. "
+            "Describe what each abbreviation and section means, but do it in a natural, flowing paragraph. "
+            "Avoid bullets or lists. Focus on helping the student understand what the weather means for flight, in a continuous, clear explanation."
         )
     else:
         prompt = (
-            "Explica de forma clara e didática este GAMET/SIGMET/AIRMET para um aluno-piloto. "
-            "Descreve cada código, abreviatura, área, fenómeno meteorológico e o que significa para o voo. "
-            "Organiza a explicação para ser fácil de aprender. Não omitas nada."
+            "És meteorologista e estás a explicar um GAMET, SIGMET ou AIRMET a um aluno-piloto. "
+            "Explica cada parte do texto de forma natural, contínua, e sem listas ou enumerações. "
+            "Ajuda o aluno a perceber o que cada abreviatura e fenómeno meteorológico implica para o voo. "
+            "Mantém um estilo claro, didático e corrido, como se estivesses a orientar diretamente alguém a preparar o voo."
         )
+
     response = openai.chat.completions.create(
         model="gpt-4o",
         messages=[
