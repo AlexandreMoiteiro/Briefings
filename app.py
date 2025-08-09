@@ -206,28 +206,26 @@ def fetch_metar_taf(icao: str) -> Tuple[str, str, Optional[str]]:
         return "", "", None
 
 @st.cache_data(ttl=300)
-def fetch_sigmet(fir_code: str) -> Tuple[str, Optional[str]]:
-    """ Devolve texto SIGMET concatenado para um FIR (se API disponível). """
-    fir = (fir_code or '').strip().upper()
-    if not fir:
-        return "", None
-
-    avwx_key = st.secrets.get("AVWX_API_KEY")
-    checkwx_key = st.secrets.get("CHECKWX_API_KEY")
-
+def get_sigmet_checkwx(fir):
+    url = f"https://api.checkwx.com/sigmet/{fir}/decoded"
+    headers = {"X-API-Key": CHECKWX_API_KEY}
     try:
-        if avwx_key:
-            headers = {"Authorization": avwx_key}
-            r = requests.get("https://avwx.rest/api/advisory", headers=headers,
-                             params={"format": "json", "type": "sigmet", "fir": fir}, timeout=12)
-            r.raise_for_status()
-            data = r.json()
-            items = data if isinstance(data, list) else data.get("data", [])
-            texts = []
-            for it in items or []:
-                raw = it.get("raw") or it.get("text")
-                if raw: texts.append(raw)
-            return "
+        resp = requests.get(url, headers=headers, timeout=8)
+        if resp.status_code != 200:
+            return ""
+        data = resp.json()
+        if not data.get("data"):
+            return ""
+        sigmets = []
+        for sig in data["data"]:
+            # opcional: filtrar fenómenos menos relevantes
+            phenomenon = sig.get("phenomenon", "").upper()
+            if phenomenon in ["VA", "RDOACT CLD"]:  # Vulcão e radiação — ignorar se quiseres só VFR
+                continue
+            sigmets.append(sig.get("raw", ""))
+        return "\n\n".join(sigmets) if sigmets else ""
+    except Exception as e:
+        return ""
 
 ".join(texts), "avwx"
         elif checkwx_key:
