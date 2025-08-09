@@ -223,7 +223,7 @@ def fetch_sigmet(fir_code: str) -> Tuple[str, Optional[str]]:
                 raw = it.get("raw") or it.get("text")
                 if raw:
                     texts.append(str(raw))
-            return "
+            return ""
 
 ".join(texts), "avwx"
         elif checkwx_key:
