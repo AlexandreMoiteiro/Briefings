@@ -1,9 +1,9 @@
-# app.py (revisão total, sem SyntaxError)
-# - GPT‑5 (Responses API)
-# - Auto METAR/TAF por ICAO (CheckWX/AVWX)
-# - Auto‑detecção de FIR a partir dos ICAO (Portugal LPPC/LPPO + prefixos comuns UE)
-# - SIGMET por FIR (CheckWX/AVWX)
-# - Modo estrito anti‑alucinação, seletor de idioma e modelo
+# app.py
+# GPT‑5 (Responses API) + CheckWX + Auto FIR
+# - Auto METAR/TAF por ICAO (CheckWX)
+# - SIGMET por FIR (CheckWX)
+# - Auto-detecção de FIR (Portugal LPPC/LPPO + prefixos UE comuns)
+# - Seletor PT/EN, escolha de modelo, modo estrito anti-alucinação
 # - PDFs detalhado e raw
 
 import streamlit as st
@@ -30,7 +30,7 @@ import fitz  # PyMuPDF
 # ==========================
 AIRPORTS = airportsdata.load('ICAO')
 
-# Açores (LPPO) — lista base de ICAO nos Açores
+# Açores (LPPO)
 PORTUGAL_AZORES_ICAO: Set[str] = {"LPAZ","LPLA","LPPD","LPPI","LPFL","LPHR","LPGR","LPSJ"}
 
 # Prefixo -> FIR (simplificado; pode ampliar conforme necessidade)
@@ -155,97 +155,73 @@ def icao_to_fir(icao: str) -> Optional[str]:
     return FIR_BY_PREFIX.get(icao[:2])
 
 # ==========================
-# FETCHERS: METAR/TAF & SIGMET (AVWX/CheckWX)
+# FETCHERS: METAR/TAF & SIGMET (CheckWX)
 # ==========================
 
 @st.cache_data(ttl=300)
 def fetch_metar_taf(icao: str) -> Tuple[str, str, Optional[str]]:
+    """Obtém METAR e TAF raw a partir do CheckWX.
+    Requer CHECKWX_API_KEY em secrets.
+    """
     icao = (icao or '').strip().upper()
     if not icao:
         return "", "", None
 
-    avwx_key = st.secrets.get("AVWX_API_KEY")
     checkwx_key = st.secrets.get("CHECKWX_API_KEY")
+    if not checkwx_key:
+        return "", "", None
 
     try:
-        if avwx_key:
-            headers = {"Authorization": avwx_key}
-            m = requests.get(f"https://avwx.rest/api/metar/{icao}", headers=headers, params={"format": "json"}, timeout=10)
-            t = requests.get(f"https://avwx.rest/api/taf/{icao}", headers=headers, params={"format": "json"}, timeout=10)
-            m.raise_for_status(); t.raise_for_status()
-            metar = (m.json().get("raw") or "").strip()
-            taf = (t.json().get("raw") or "").strip()
-            return metar, taf, "avwx"
-        elif checkwx_key:
-            headers = {"X-API-Key": checkwx_key}
-            m = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=headers, timeout=10)
-            t = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=headers, timeout=10)
-            m.raise_for_status(); t.raise_for_status()
-            mj = m.json(); tj = t.json()
-            metar = mj.get("data", [""])
-            metar = metar[0] if metar else ""
-            taf = tj.get("data", [""])
-            taf = taf[0] if taf else ""
-            if isinstance(metar, dict):
-                metar = metar.get("raw_text") or metar.get("raw") or ""
-            if isinstance(taf, dict):
-                taf = taf.get("raw_text") or taf.get("raw") or ""
-            return (metar or "").strip(), (taf or "").strip(), "checkwx"
-        else:
-            return "", "", None
+        headers = {"X-API-Key": checkwx_key}
+        m = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=headers, timeout=10)
+        t = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=headers, timeout=10)
+        m.raise_for_status(); t.raise_for_status()
+        mj = m.json(); tj = t.json()
+        metar = mj.get("data", [""])
+        metar = metar[0] if metar else ""
+        taf = tj.get("data", [""])
+        taf = taf[0] if taf else ""
+        # Em alguns planos, pode vir objeto decoded; tentamos fields comuns
+        if isinstance(metar, dict):
+            metar = metar.get("raw_text") or metar.get("raw") or ""
+        if isinstance(taf, dict):
+            taf = taf.get("raw_text") or taf.get("raw") or ""
+        return (metar or "").strip(), (taf or "").strip(), "checkwx"
     except Exception:
         return "", "", None
 
 
 @st.cache_data(ttl=300)
 def fetch_sigmet(fir_code: str) -> Tuple[str, Optional[str]]:
+    """Obtém SIGMETs recentes para um FIR via CheckWX (decoded).
+    Concatena o campo raw/relato quando disponível.
+    """
     fir = (fir_code or '').strip().upper()
     if not fir:
         return "", None
 
-    avwx_key = st.secrets.get("AVWX_API_KEY")
     checkwx_key = st.secrets.get("CHECKWX_API_KEY")
+    if not checkwx_key:
+        return "", None
 
     try:
-        if avwx_key:
-            headers = {"Authorization": avwx_key}
-            r = requests.get(
-                "https://avwx.rest/api/advisory",
-                headers=headers,
-                params={"format": "json", "type": "sigmet", "fir": fir},
-                timeout=12,
-            )
-            r.raise_for_status()
-            data = r.json()
-            items = data if isinstance(data, list) else data.get("data", [])
-            texts: List[str] = []
-            for it in items or []:
-                raw = it.get("raw") or it.get("text")
-                if raw:
-                    texts.append(str(raw))
-            return ""
-
-".join(texts), "avwx""
-        elif checkwx_key:
-            headers = {"X-API-Key": checkwx_key}
-            r = requests.get(f"https://api.checkwx.com/sigmet/{fir}/decoded", headers=headers, timeout=12)
-            r.raise_for_status()
-            data = r.json().get("data", [])
-            texts: List[str] = []
-            for it in data:
-                raw = ""
-                if isinstance(it, dict):
-                    raw = it.get("raw") or it.get("raw_text") or it.get("report") or ""
-                else:
-                    raw = str(it)
-                raw = (raw or "").strip()
-                if raw:
-                    texts.append(raw)
-            return "
+        headers = {"X-API-Key": checkwx_key}
+        r = requests.get(f"https://api.checkwx.com/sigmet/{fir}/decoded", headers=headers, timeout=12)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        texts: List[str] = []
+        for it in data:
+            raw = ""
+            if isinstance(it, dict):
+                raw = it.get("raw") or it.get("raw_text") or it.get("report") or ""
+            else:
+                raw = str(it)
+            raw = (raw or "").strip()
+            if raw:
+                texts.append(raw)
+        return "
 
 ".join(texts), "checkwx"
-        else:
-            return "", None
     except Exception:
         return "", None
 
@@ -618,7 +594,7 @@ for i, entry in enumerate(st.session_state.metar_taf_pairs):
     entry["icao"] = cols[0].text_input(TXT[lang]["icao"], value=entry.get("icao",""), key=f"icao_{i}").upper()
 
     if entry["icao"]:
-        icao_set.add(entry["icao"])  # para autotomar FIR
+        icao_set.add(entry["icao"])  # para auto FIR
 
     # Fetch automático METAR/TAF por ICAO
     if auto_fetch and entry["icao"] and (refresh_now or not entry.get("_fetched")):
@@ -643,7 +619,7 @@ for i, entry in enumerate(st.session_state.metar_taf_pairs):
 for idx in sorted(rm_idx, reverse=True):
     st.session_state.metar_taf_pairs.pop(idx)
 
-# Auto‑detecção de FIR a partir dos ICAO
+# Auto-detecção de FIR a partir dos ICAO
 if auto_fir and icao_set:
     inferred = {icao: icao_to_fir(icao) for icao in sorted(icao_set)}
     fir_candidates = {fir for fir in inferred.values() if fir}
@@ -772,9 +748,14 @@ else:
     st.info(TXT[lang]["fill_any"])
 
 
-
-
-
-
-
+# ==========================
+# requirements.txt (conteúdo do ficheiro separado)
+# ==========================
+# streamlit>=1.36
+# pillow
+# requests
+# openai>=1.44.0
+# fpdf2
+# pymupdf
+# airportsdata
 
