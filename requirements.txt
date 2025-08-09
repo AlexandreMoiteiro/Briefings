@@ -1,8 +1,7 @@
 streamlit
-streamlit-cropper
-fpdf
-Pillow
-PyMuPDF
-openai
-python-metar
+pillow
+requests
+openai>=1.40.0
+fpdf2
+pymupdf
 airportsdata
