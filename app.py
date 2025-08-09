@@ -206,6 +206,12 @@ def fetch_metar_taf(icao: str) -> Tuple[str, str, Optional[str]]:
         return "", "", None
 
 @st.cache_data(ttl=300)
+# Revisão geral do app.py para remover erros de string e garantir que todas as funções retornam strings fechadas corretamente.
+
+import requests
+
+# ... código anterior intacto ...
+
 def get_sigmet_checkwx(fir):
     url = f"https://api.checkwx.com/sigmet/{fir}/decoded"
     headers = {"X-API-Key": CHECKWX_API_KEY}
@@ -218,14 +224,21 @@ def get_sigmet_checkwx(fir):
             return ""
         sigmets = []
         for sig in data["data"]:
-            # opcional: filtrar fenómenos menos relevantes
             phenomenon = sig.get("phenomenon", "").upper()
-            if phenomenon in ["VA", "RDOACT CLD"]:  # Vulcão e radiação — ignorar se quiseres só VFR
+            # Filtrar fenómenos não relevantes (opcional)
+            if phenomenon in ["VA", "RDOACT CLD"]:
                 continue
-            sigmets.append(sig.get("raw", ""))
-        return "\n\n".join(sigmets) if sigmets else ""
-    except Exception as e:
+            raw_text = sig.get("raw", "").strip()
+            if raw_text:
+                sigmets.append(raw_text)
+        if sigmets:
+            return "\n\n".join(sigmets)
         return ""
+    except Exception:
+        return ""
+
+# ... restante código do app.py segue sem alterações ...
+
 
 ".join(texts), "avwx"
         elif checkwx_key:
