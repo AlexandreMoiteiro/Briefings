@@ -225,7 +225,7 @@ def fetch_sigmet(fir_code: str) -> Tuple[str, Optional[str]]:
                     texts.append(str(raw))
             return ""
 
-".join(texts), "avwx"
+".join(texts), "avwx""
         elif checkwx_key:
             headers = {"X-API-Key": checkwx_key}
             r = requests.get(f"https://api.checkwx.com/sigmet/{fir}/decoded", headers=headers, timeout=12)
