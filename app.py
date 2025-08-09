@@ -1,4 +1,11 @@
-# app.py
+# app.py (revisão total, sem SyntaxError)
+# - GPT‑5 (Responses API)
+# - Auto METAR/TAF por ICAO (CheckWX/AVWX)
+# - Auto‑detecção de FIR a partir dos ICAO (Portugal LPPC/LPPO + prefixos comuns UE)
+# - SIGMET por FIR (CheckWX/AVWX)
+# - Modo estrito anti‑alucinação, seletor de idioma e modelo
+# - PDFs detalhado e raw
+
 import streamlit as st
 from PIL import Image
 import io
@@ -12,43 +19,31 @@ import time
 import requests
 from typing import Optional, Tuple, Dict, Any, List, Set
 
-# ==========================
-# OpenAI (Responses API)
-# ==========================
 from openai import OpenAI
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])  # expects key in .streamlit/secrets.toml
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])  # exige OPENAI_API_KEY em secrets
+
+from fpdf import FPDF
+import fitz  # PyMuPDF
 
 # ==========================
 # CONSTANTES / DADOS
 # ==========================
-AIRPORTS = airportsdata.load('ICAO')  # { 'LPPT': {'name': '...', 'lat':..., 'lon':..., 'country': 'Portugal', ...} }
+AIRPORTS = airportsdata.load('ICAO')
 
-# Mapeamento básico ICAO -> FIR (Europa focado; facilmente estensível)
-# Nota: Portugal tem 2 FIRs: LPPC (Lisboa, continental) e LPPO (Santa Maria, Açores/Oceanic)
-PORTUGAL_AZORES_ICAO: Set[str] = {
-    "LPAZ","LPLA","LPPD","LPPI","LPFL","LPHR","LPGR","LPSJ","LPCR","LPFR"  # LPFR é Faro (continente) -> LPPC; mantido só a título de exemplo
-}
-# Corrige a lista para incluir só Açores e remover LPFR/Faro (continente):
-PORTUGAL_AZORES_ICAO = {"LPAZ","LPLA","LPPD","LPPI","LPFL","LPHR","LPGR","LPSJ"}
+# Açores (LPPO) — lista base de ICAO nos Açores
+PORTUGAL_AZORES_ICAO: Set[str] = {"LPAZ","LPLA","LPPD","LPPI","LPFL","LPHR","LPGR","LPSJ"}
 
+# Prefixo -> FIR (simplificado; pode ampliar conforme necessidade)
 FIR_BY_PREFIX = {
-    # Portugal
-    "LP": "LPPC",   # fallback se não constar na lista de Açores
-    # Espanha (simplificado; Madrid FIR é LECM e Barcelona FIR é LECB)
-    "LE": "LECM",
-    # França (Paris FIR principal, simplificação)
-    "LF": "LFFF",
-    # UK
-    "EG": "EGTT",
-    # Irlanda
-    "EI": "EISN",
-    # Alemanha (simplificado, múltiplas FIRs na prática)
-    "ED": "EDGG",
-    # Itália (simplificado)
-    "LI": "LIRR",
+    "LP": "LPPC",   # fallback Portugal continental
+    "LE": "LECM",   # Espanha (Madrid) simplificado
+    "LF": "LFFF",   # França (Paris) simplificado
+    "EG": "EGTT",   # UK (Londres) simplificado
+    "EI": "EISN",   # Irlanda
+    "ED": "EDGG",   # Alemanha (Langen) simplificado
+    "LI": "LIRR",   # Itália (Roma) simplificado
 }
 
-# Idiomas suportados
 LANGS = {"Português": "pt", "English": "en"}
 
 TXT = {
@@ -83,11 +78,11 @@ TXT = {
         "model": "Modelo",
         "strict": "Modo estrito (anti-alucinação)",
         "auto_fetch": "Ir buscar METAR/TAF automaticamente",
+        "auto_fir": "Detetar FIR automaticamente a partir dos ICAO",
         "fir_code": "FIR para SIGMET (ex.: LPPC)",
         "fetch_now": "Atualizar agora",
         "warn_icao": "ICAO desconhecido",
-        "sigmet_title": "SIGMETs recentes (texto cru)",
-        "auto_fir": "Detetar FIR automaticamente a partir dos ICAO"
+        "sigmet_title": "SIGMETs recentes (texto cru)"
     },
     "en": {
         "title": "Preflight Weather Briefing",
@@ -120,19 +115,21 @@ TXT = {
         "model": "Model",
         "strict": "Strict mode (anti-hallucination)",
         "auto_fetch": "Auto-fetch METAR/TAF",
+        "auto_fir": "Auto-detect FIR from ICAOs",
         "fir_code": "FIR for SIGMET (e.g., LPPC)",
         "fetch_now": "Refresh now",
         "warn_icao": "Unknown ICAO",
-        "sigmet_title": "Recent SIGMETs (raw)",
-        "auto_fir": "Auto-detect FIR from ICAOs"
+        "sigmet_title": "Recent SIGMETs (raw)"
     }
 }
 
 # ==========================
 # UTILS
 # ==========================
-def ascii_safe(text):
+
+def ascii_safe(text: Any) -> str:
     return unicodedata.normalize('NFKD', str(text)).encode('ascii', 'ignore').decode('ascii')
+
 
 def downscale_image(img: Image.Image, width: int = 1300):
     if img.width > width:
@@ -148,10 +145,6 @@ def downscale_image(img: Image.Image, width: int = 1300):
 # ==========================
 
 def icao_to_fir(icao: str) -> Optional[str]:
-    """Heurística simples para atribuir FIR por ICAO.
-    - Açores -> LPPO; resto de Portugal -> LPPC
-    - Outros países por prefixo (simplificação)
-    """
     if not icao or len(icao) != 4:
         return None
     icao = icao.upper()
@@ -159,15 +152,11 @@ def icao_to_fir(icao: str) -> Optional[str]:
         if icao in PORTUGAL_AZORES_ICAO:
             return "LPPO"
         return "LPPC"
-    pref = icao[:2]
-    return FIR_BY_PREFIX.get(pref)
+    return FIR_BY_PREFIX.get(icao[:2])
 
 # ==========================
-# FETCHERS: METAR/TAF & SIGMET (AVWX ou CheckWX)
+# FETCHERS: METAR/TAF & SIGMET (AVWX/CheckWX)
 # ==========================
-# Define em secrets:
-# OPENAI_API_KEY = "..."
-# (Opcional) AVWX_API_KEY = "..."  ou  CHECKWX_API_KEY = "..."
 
 @st.cache_data(ttl=300)
 def fetch_metar_taf(icao: str) -> Tuple[str, str, Optional[str]]:
@@ -184,17 +173,19 @@ def fetch_metar_taf(icao: str) -> Tuple[str, str, Optional[str]]:
             m = requests.get(f"https://avwx.rest/api/metar/{icao}", headers=headers, params={"format": "json"}, timeout=10)
             t = requests.get(f"https://avwx.rest/api/taf/{icao}", headers=headers, params={"format": "json"}, timeout=10)
             m.raise_for_status(); t.raise_for_status()
-            metar = m.json().get("raw", "").strip()
-            taf = t.json().get("raw", "").strip()
+            metar = (m.json().get("raw") or "").strip()
+            taf = (t.json().get("raw") or "").strip()
             return metar, taf, "avwx"
         elif checkwx_key:
             headers = {"X-API-Key": checkwx_key}
-            m = requests.get(f"https://api.checkwx.com/metar/{icao}/decoded", headers=headers, timeout=10)
-            t = requests.get(f"https://api.checkwx.com/taf/{icao}/decoded", headers=headers, timeout=10)
+            m = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=headers, timeout=10)
+            t = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=headers, timeout=10)
             m.raise_for_status(); t.raise_for_status()
             mj = m.json(); tj = t.json()
-            metar = mj.get("data", [""])[0] if mj.get("data") else ""
-            taf = tj.get("data", [""])[0] if tj.get("data") else ""
+            metar = mj.get("data", [""])
+            metar = metar[0] if metar else ""
+            taf = tj.get("data", [""])
+            taf = taf[0] if taf else ""
             if isinstance(metar, dict):
                 metar = metar.get("raw_text") or metar.get("raw") or ""
             if isinstance(taf, dict):
@@ -205,54 +196,51 @@ def fetch_metar_taf(icao: str) -> Tuple[str, str, Optional[str]]:
     except Exception:
         return "", "", None
 
+
 @st.cache_data(ttl=300)
-# Revisão geral do app.py para remover erros de string e garantir que todas as funções retornam strings fechadas corretamente.
+def fetch_sigmet(fir_code: str) -> Tuple[str, Optional[str]]:
+    fir = (fir_code or '').strip().upper()
+    if not fir:
+        return "", None
 
-import requests
+    avwx_key = st.secrets.get("AVWX_API_KEY")
+    checkwx_key = st.secrets.get("CHECKWX_API_KEY")
 
-# ... código anterior intacto ...
-
-def get_sigmet_checkwx(fir):
-    url = f"https://api.checkwx.com/sigmet/{fir}/decoded"
-    headers = {"X-API-Key": CHECKWX_API_KEY}
     try:
-        resp = requests.get(url, headers=headers, timeout=8)
-        if resp.status_code != 200:
-            return ""
-        data = resp.json()
-        if not data.get("data"):
-            return ""
-        sigmets = []
-        for sig in data["data"]:
-            phenomenon = sig.get("phenomenon", "").upper()
-            # Filtrar fenómenos não relevantes (opcional)
-            if phenomenon in ["VA", "RDOACT CLD"]:
-                continue
-            raw_text = sig.get("raw", "").strip()
-            if raw_text:
-                sigmets.append(raw_text)
-        if sigmets:
-            return "\n\n".join(sigmets)
-        return ""
-    except Exception:
-        return ""
-
-# ... restante código do app.py segue sem alterações ...
-
+        if avwx_key:
+            headers = {"Authorization": avwx_key}
+            r = requests.get(
+                "https://avwx.rest/api/advisory",
+                headers=headers,
+                params={"format": "json", "type": "sigmet", "fir": fir},
+                timeout=12,
+            )
+            r.raise_for_status()
+            data = r.json()
+            items = data if isinstance(data, list) else data.get("data", [])
+            texts: List[str] = []
+            for it in items or []:
+                raw = it.get("raw") or it.get("text")
+                if raw:
+                    texts.append(str(raw))
+            return "
 
 ".join(texts), "avwx"
         elif checkwx_key:
             headers = {"X-API-Key": checkwx_key}
-            r = requests.get(f"https://api.checkwx.com/sigmet/{fir}", headers=headers, timeout=12)
+            r = requests.get(f"https://api.checkwx.com/sigmet/{fir}/decoded", headers=headers, timeout=12)
             r.raise_for_status()
             data = r.json().get("data", [])
-            texts = []
+            texts: List[str] = []
             for it in data:
+                raw = ""
                 if isinstance(it, dict):
-                    raw = it.get("raw_text") or it.get("raw") or it.get("report")
+                    raw = it.get("raw") or it.get("raw_text") or it.get("report") or ""
                 else:
                     raw = str(it)
-                if raw: texts.append(raw)
+                raw = (raw or "").strip()
+                if raw:
+                    texts.append(raw)
             return "
 
 ".join(texts), "checkwx"
@@ -262,7 +250,7 @@ def get_sigmet_checkwx(fir):
         return "", None
 
 # ==========================
-# PROMPTS / GPT-5 HELPERS
+# GPT‑5 HELPERS
 # ==========================
 
 def gpt5_vision_explain(prompt_sys: str, user_text: str, img_base64: Optional[str] = None,
@@ -301,33 +289,21 @@ Regra estrita: se algum detalhe nao estiver visivel/legivel no chart, diz explic
 def ai_sigwx_chart_analysis(img_base64: str, chart_type: str, user_area_desc: str, lang: str, model: str, strict: bool) -> str:
     if lang == "en":
         sys = (
-            "You are a senior aviation meteorologist. Explain the SIGWX chart in continuous, 
-"
-            "operational prose using only what is visible. If a detail is unclear or unreadable, say so explicitly 
-"
-            "and do not infer. Resolve ambiguities by stating the assumption and why (standard conventions). Be precise."
+            "You are a senior aviation meteorologist. Explain the SIGWX chart in continuous, operational prose using only what is visible. "
+            "If a detail is unclear or unreadable, say so explicitly and do not infer. Resolve ambiguities by stating the assumption and why (standard conventions). Be precise."
         )
         user = (
-            f"Analyze this SIGWX focusing on {user_area_desc}. Cover fronts, cloud types/levels, turbulence, icing, convection, 
-"
-            f"freezing levels, visibility constraints, surface features, pressure data, flight levels, UTC times, symbols, notes/legend. 
-"
-            f"Keep 1–2 coherent paragraphs."
+            f"Analyze this SIGWX focusing on {user_area_desc}. Cover fronts, cloud types/levels, turbulence, icing, convection, "
+            f"freezing levels, visibility constraints, surface features, pressure data, flight levels, UTC times, symbols, notes/legend. Keep 1–2 coherent paragraphs."
         )
     else:
         sys = (
-            "Es meteorologista aeronáutico sénior. Explica o SIGWX em texto corrido e operacional, 
-"
-            "usando apenas o que esta visivel. Se algo estiver ilegivél/ambiguo, diz explicitamente e nao infiras. 
-"
-            "Resolve ambiguidades indicando a suposicao e o motivo (convenções aeronáuticas). Se preciso, usa termos portugueses padrao."
+            "Es meteorologista aeronáutico sénior. Explica o SIGWX em texto corrido e operacional, usando apenas o que esta visivel. "
+            "Se algo estiver ilegivel/ambiguo, diz explicitamente e nao infiras. Resolve ambiguidades indicando a suposicao e o motivo (convenções)."
         )
         user = (
-            f"Analisa este SIGWX com foco em {user_area_desc}. Fala de frentes, tipos/níveis de nuvens, turbulência, gelo, convecção, 
-"
-            f"níveis de congelamento, restrições de visibilidade, elementos de superficie, dados de pressão, níveis de voo, horas UTC, 
-"
-            f"símbolos e notas/legenda. Mantem 1–2 parágrafos."
+            f"Analisa este SIGWX com foco em {user_area_desc}. Fala de frentes, tipos/níveis de nuvens, turbulência, gelo, convecção, "
+            f"níveis de congelamento, restrições de visibilidade, elementos de superficie, dados de pressão, níveis de voo, horas UTC, símbolos e notas/legenda. Mantem 1–2 parágrafos."
         )
     return gpt5_vision_explain(sys, user, img_base64=img_base64, model=model, max_tokens=1800, temperature=0.14, strict=strict)
 
@@ -335,24 +311,18 @@ def ai_sigwx_chart_analysis(img_base64: str, chart_type: str, user_area_desc: st
 def ai_spc_chart_analysis(img_base64: str, chart_type: str, user_area_desc: str, lang: str, model: str, strict: bool) -> str:
     if lang == "en":
         sys = (
-            "You are a senior aviation meteorologist. Explain the Surface Pressure Chart in flowing prose, no lists. 
-"
-            "Use only what is visible. Flag uncertainties explicitly."
+            "You are a senior aviation meteorologist. Explain the Surface Pressure Chart in flowing prose, no lists. Use only what is visible. Flag uncertainties explicitly."
         )
         user = (
-            f"Interpret the SPC with special attention to {user_area_desc}. Discuss isobars/spacing, H/L centers, fronts (likely clouds/hazards), 
-"
+            f"Interpret the SPC with special attention to {user_area_desc}. Discuss isobars/spacing, H/L centers, fronts (likely clouds/hazards), "
             f"wind patterns, pressure gradients and operational impact, weather symbols/zones, validity (UTC) and issuer. One coherent paragraph."
         )
     else:
         sys = (
-            "Es meteorologista aeronáutico sénior. Explica o SPC em texto corrido (sem listas), 
-"
-            "usando apenas o que esta visivel. Assinala incertezas." 
+            "Es meteorologista aeronáutico sénior. Explica o SPC em texto corrido (sem listas), usando apenas o que esta visivel. Assinala incertezas."
         )
         user = (
-            f"Interpreta o SPC com foco em {user_area_desc}. Fala de isóbaras/gradiente, centros A/B, frentes (nuvens/perigos), 
-"
+            f"Interpreta o SPC com foco em {user_area_desc}. Fala de isóbaras/gradiente, centros A/B, frentes (nuvens/perigos), "
             f"padrões de vento, impacto operacional, símbolos/zonas, validade (UTC) e emissor. Um parágrafo."
         )
     return gpt5_vision_explain(sys, user, img_base64=img_base64, model=model, max_tokens=1600, temperature=0.14, strict=strict)
@@ -364,8 +334,7 @@ def ai_windtemp_chart_analysis(img_base64: str, chart_type: str, user_area_desc:
             "You are a senior aviation meteorologist. Explain winds/temperatures in continuous prose. Only use visible data; avoid assumptions."
         )
         user = (
-            f"Analyze the wind/temperature chart emphasizing {user_area_desc}. Summarize wind direction/speed by flight level, temperatures, 
-"
+            f"Analyze the wind/temperature chart emphasizing {user_area_desc}. Summarize wind direction/speed by flight level, temperatures, "
             f"jet streams (axes/width/core speeds), turbulence/icing markers, levels shown, validity and issuer. Concise but operational."
         )
     else:
@@ -373,8 +342,7 @@ def ai_windtemp_chart_analysis(img_base64: str, chart_type: str, user_area_desc:
             "Es meteorologista aeronáutico sénior. Explica vento/temperatura em texto corrido, usando apenas o que ves, sem extrapolar."
         )
         user = (
-            f"Analisa o chart de vento/temperatura com foco em {user_area_desc}. Resume direcao/intensidade por nivel, temperaturas, 
-"
+            f"Analisa o chart de vento/temperatura com foco em {user_area_desc}. Resume direcao/intensidade por nivel, temperaturas, "
             f"eixos/forca de jet streams, eventuais simbolos de turbulencia/gelo, niveis representados, validade e emissor."
         )
     return gpt5_vision_explain(sys, user, img_base64=img_base64, model=model, max_tokens=1600, temperature=0.14, strict=strict)
@@ -383,17 +351,13 @@ def ai_windtemp_chart_analysis(img_base64: str, chart_type: str, user_area_desc:
 def ai_metar_taf_analysis(raw_text: str, msg_type: str = "METAR/TAF", icao: str = "", lang: str = "pt", model: str = "gpt-5", strict: bool = False) -> str:
     if lang == "en":
         sys = (
-            "You are a senior aviation meteorologist. Read and interpret the message in fluent prose. 
-"
-            "Explain codes as you go, state operational implications, avoid bullet points."
+            "You are a senior aviation meteorologist. Read and interpret the message in fluent prose. Explain codes as you go, state operational implications, avoid bullet points."
         )
         user = f"Interpret this {msg_type} for {icao or 'the aerodrome'} in one coherent explanation:
 {raw_text}"
     else:
         sys = (
-            "Es meteorologista aeronáutico sénior. Lê e interpreta a mensagem em texto corrido, explicando os códigos à medida que avanças 
-"
-            "e destacando implicações operacionais. Sem listas."
+            "Es meteorologista aeronáutico sénior. Lê e interpreta a mensagem em texto corrido, explicando os códigos à medida que avanças e destacando implicações operacionais. Sem listas."
         )
         user = f"Interpreta este {msg_type} para {icao or 'o aeródromo'} numa explicação coerente:
 {raw_text}"
@@ -419,13 +383,15 @@ Regra: nao adivinhar informacao ausente; assinalar incerteza explicitamente."
 
 def ai_gamet_analysis(gamet_text: str, lang: str = "pt", model: str = "gpt-5", strict: bool = False) -> str:
     if lang == "en":
-        sys = ("You are a senior aviation meteorologist. Explain a GAMET/SIGMET/AIRMET in one flowing paragraph, "
-               "clarifying abbreviations inline, focusing on flight impact.")
+        sys = (
+            "You are a senior aviation meteorologist. Explain a GAMET/SIGMET/AIRMET in one flowing paragraph, clarifying abbreviations inline, focusing on flight impact."
+        )
         user = f"Explain this message in continuous prose:
 {gamet_text}"
     else:
-        sys = ("Es meteorologista aeronáutico sénior. Explica um GAMET/SIGMET/AIRMET num parágrafo corrido, "
-               "esclarecendo abreviaturas no contexto e focando impacto no voo.")
+        sys = (
+            "Es meteorologista aeronáutico sénior. Explica um GAMET/SIGMET/AIRMET num parágrafo corrido, esclarecendo abreviaturas no contexto e focando impacto no voo."
+        )
         user = f"Explica este texto em prosa contínua:
 {gamet_text}"
 
@@ -450,9 +416,6 @@ Regra: nao inventar; assinalar incertezas."
 # ==========================
 # PDF CLASSES
 # ==========================
-from fpdf import FPDF
-import fitz
-
 class BriefingPDF(FPDF):
     def header(self):
         pass
@@ -537,8 +500,10 @@ class BriefingPDF(FPDF):
 class RawLandscapePDF(FPDF):
     def __init__(self):
         super().__init__()
-    def header(self): pass
-    def footer(self): pass
+    def header(self):
+        pass
+    def footer(self):
+        pass
     def cover_page(self, pilot, aircraft, date, time_utc, callsign, mission):
         self.add_page(orientation='L')
         self.set_xy(0,65)
@@ -580,7 +545,7 @@ class RawLandscapePDF(FPDF):
             self.cell(0, 10, ascii_safe(chart['title']), ln=True, align='C')
             if chart.get('subtitle'):
                 self.set_font("Arial", 'I', 14)
-                self.cell(0, 8, ascii_safe(chart['subtitle']), ln=True, align='C')
+                self.cell(0, 8, ascii_safe(chart.get('subtitle', '')), ln=True, align='C')
             if chart.get("img_bytes"):
                 max_w = self.w - 30
                 max_h = self.h - 55
@@ -601,23 +566,23 @@ class RawLandscapePDF(FPDF):
 # ==========================
 
 def obter_ai_texto_chart(chart: Dict[str, Any], lang: str, model: str, strict: bool):
-    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")  # sem prefixo
-    title = chart.get("title", "").lower()
+    img_b64 = base64.b64encode(chart["img_bytes"].getvalue()).decode("utf-8")
+    title = (chart.get("title") or "").lower()
     area = chart.get("desc", "Portugal")
     if "sigwx" in title:
-        return ai_sigwx_chart_analysis(img_b64, chart.get("title"), area, lang=lang, model=model, strict=strict)
-    elif "pressure" in title or "spc" in title:
-        return ai_spc_chart_analysis(img_b64, chart.get("title"), area, lang=lang, model=model, strict=strict)
-    elif "wind" in title:
-        return ai_windtemp_chart_analysis(img_b64, chart.get("title"), area, lang=lang, model=model, strict=strict)
-    else:
-        return ai_sigwx_chart_analysis(img_b64, chart.get("title"), area, lang=lang, model=model, strict=strict)
+        return ai_sigwx_chart_analysis(img_b64, chart.get("title", "SIGWX"), area, lang=lang, model=model, strict=strict)
+    if "pressure" in title or "spc" in title:
+        return ai_spc_chart_analysis(img_b64, chart.get("title", "SPC"), area, lang=lang, model=model, strict=strict)
+    if "wind" in title:
+        return ai_windtemp_chart_analysis(img_b64, chart.get("title", "Wind/Temp"), area, lang=lang, model=model, strict=strict)
+    return ai_sigwx_chart_analysis(img_b64, chart.get("title", "SIGWX"), area, lang=lang, model=model, strict=strict)
 
 # ==========================
 # UI
 # ==========================
+
 st.set_page_config(page_title="Preflight Weather Briefing", layout="wide")
-st.title(TXT["pt"]["title"])  # título é igual nas duas línguas
+st.title(TXT["pt"]["title"])  # título idêntico
 
 ui_lang = st.sidebar.selectbox("Language / Idioma", list(LANGS.keys()), index=0)
 lang = LANGS[ui_lang]
@@ -626,8 +591,7 @@ model = st.sidebar.selectbox(TXT[lang]["model"], ["gpt-5", "gpt-5-mini"], index=
 strict_mode = st.sidebar.toggle(TXT[lang]["strict"], value=True)
 auto_fetch = st.sidebar.toggle(TXT[lang]["auto_fetch"], value=True)
 auto_fir = st.sidebar.toggle(TXT[lang]["auto_fir"], value=True)
-fir_default = "LPPC"  # Lisboa FIR por omissão
-fir_code = st.sidebar.text_input(TXT[lang]["fir_code"], value=fir_default)
+fir_code = st.sidebar.text_input(TXT[lang]["fir_code"], value="LPPC")
 refresh_now = st.sidebar.button(TXT[lang]["fetch_now"])  # força refetch
 
 with st.expander(TXT[lang]["pilot_info"], expanded=True):
@@ -643,22 +607,22 @@ if "metar_taf_pairs" not in st.session_state:
     st.session_state.metar_taf_pairs = []
 
 st.subheader(TXT[lang]["metar_taf_title"])
-cols_add, cols_rem = st.columns([0.4,0.6])
+cols_add, _ = st.columns([0.4,0.6])
 if cols_add.button(TXT[lang]["add_aerodrome"]):
     st.session_state.metar_taf_pairs.append({"icao":"", "metar":"", "taf":""})
 
-remove_indexes: List[int] = []
+rm_idx: List[int] = []
 icao_set: Set[str] = set()
 for i, entry in enumerate(st.session_state.metar_taf_pairs):
     cols = st.columns([0.18,0.35,0.35,0.06,0.06])
     entry["icao"] = cols[0].text_input(TXT[lang]["icao"], value=entry.get("icao",""), key=f"icao_{i}").upper()
 
     if entry["icao"]:
-        icao_set.add(entry["icao"])  # para deteção automática de FIR
+        icao_set.add(entry["icao"])  # para autotomar FIR
 
     # Fetch automático METAR/TAF por ICAO
     if auto_fetch and entry["icao"] and (refresh_now or not entry.get("_fetched")):
-        metar, taf, src = fetch_metar_taf(entry["icao"])  # cacheado 5 min
+        metar, taf, _src = fetch_metar_taf(entry["icao"])  # cache 5min
         if metar or taf:
             entry["metar"] = metar
             entry["taf"] = taf
@@ -674,14 +638,13 @@ for i, entry in enumerate(st.session_state.metar_taf_pairs):
         warn_placeholder.warning(TXT[lang]["warn_icao"])  # avisa mas não bloqueia
 
     if cols[4].button("❌", key=f"remove_metar_taf_{i}"):
-        remove_indexes.append(i)
+        rm_idx.append(i)
 
-for idx in sorted(remove_indexes, reverse=True):
+for idx in sorted(rm_idx, reverse=True):
     st.session_state.metar_taf_pairs.pop(idx)
 
-# Auto-deteção de FIR a partir dos ICAO introduzidos
+# Auto‑detecção de FIR a partir dos ICAO
 if auto_fir and icao_set:
-    # Escolhe o primeiro FIR inferido; se existirem múltiplos, mantém o atual e avisa
     inferred = {icao: icao_to_fir(icao) for icao in sorted(icao_set)}
     fir_candidates = {fir for fir in inferred.values() if fir}
     if len(fir_candidates) == 1:
@@ -697,17 +660,17 @@ def chart_block_multi(chart_key: str, label: str, title_base: str, subtitle_labe
     if chart_key not in st.session_state:
         st.session_state[chart_key] = []
     st.subheader(label)
-    cols_add, cols_rem = st.columns([0.6,0.4])
+    cols_add, _ = st.columns([0.6,0.4])
     if cols_add.button(f"+ {label}"):
         st.session_state[chart_key].append({"desc": "Portugal", "img_bytes": None, "title": title_base, "subtitle": ""})
-    remove_indexes = []
+    rm = []
     for i, chart in enumerate(st.session_state[chart_key]):
         with st.expander(f"{label} {i+1}", expanded=True):
             cols = st.columns([0.6,0.34,0.06])
             chart["desc"] = cols[0].text_input(TXT[lang]["area_focus"], value=chart.get("desc","Portugal"), key=f"{chart_key}_desc_{i}")
             chart["subtitle"] = cols[1].text_input(subtitle_label, value=chart.get("subtitle",""), key=f"{chart_key}_subtitle_{i}")
             if cols[2].button("❌", key=f"remove_{chart_key}_{i}"):
-                remove_indexes.append(i)
+                rm.append(i)
             chart_file = st.file_uploader(f"{TXT[lang]['upload']} {label} (PDF, PNG, JPG, JPEG, GIF):", type=["pdf", "png", "jpg", "jpeg", "gif"], key=f"{chart_key}_file_{i}")
             if chart_file:
                 if chart_file.type == "application/pdf":
@@ -719,7 +682,7 @@ def chart_block_multi(chart_key: str, label: str, title_base: str, subtitle_labe
                     img = Image.open(chart_file).convert("RGB").copy()
                 _, img_bytes = downscale_image(img)
                 chart["img_bytes"] = img_bytes
-    for idx in sorted(remove_indexes, reverse=True):
+    for idx in sorted(rm, reverse=True):
         st.session_state[chart_key].pop(idx)
 
 chart_block_multi("sigwx_charts", TXT[lang]["sigwx"], TXT[lang]["sigwx"], TXT[lang]["subtitle_org"])
@@ -760,31 +723,25 @@ if ready:
             pdf.metar_taf_section(metar_taf_pairs, lang=lang, model=model, strict=strict_mode)
             pdf.gamet_page(gamet, lang=lang, model=model, strict=strict_mode)
 
-            # Charts com AI
             charts_all = []
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
                     ai_text = obter_ai_texto_chart(chart, lang=lang, model=model, strict=strict_mode)
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
+                    charts_all.append({"title": chart.get("title", "SIGWX"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle", "")})
             for chart in st.session_state.get("windtemp_charts", []):
                 if chart.get("img_bytes"):
                     ai_text = obter_ai_texto_chart(chart, lang=lang, model=model, strict=strict_mode)
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
+                    charts_all.append({"title": chart.get("title", "Wind/Temp"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle", "")})
             for chart in st.session_state.get("spc_charts", []):
                 if chart.get("img_bytes"):
                     ai_text = obter_ai_texto_chart(chart, lang=lang, model=model, strict=strict_mode)
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle","")})
+                    charts_all.append({"title": chart.get("title", "SPC"), "img_bytes": chart["img_bytes"], "ai_text": ai_text, "subtitle": chart.get("subtitle", "")})
 
             pdf.chart_section(charts_all, lang=lang, model=model, strict=strict_mode)
             out_pdf = f"weather_briefing_detailed_{ascii_safe(mission)[:40]}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
-                st.download_button(
-                    label=TXT[lang]["down_detailed"],
-                    data=f.read(),
-                    file_name=out_pdf,
-                    mime="application/pdf"
-                )
+                st.download_button(label=TXT[lang]["down_detailed"], data=f.read(), file_name=out_pdf, mime="application/pdf")
 
     if col2.button(TXT[lang]["btn_raw"]):
         with st.spinner("Preparando PDF raw..."):
@@ -798,37 +755,24 @@ if ready:
             charts_all = []
             for chart in st.session_state.get("sigwx_charts", []):
                 if chart.get("img_bytes"):
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle","")})
+                    charts_all.append({"title": chart.get("title", "SIGWX"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle", "")})
             for chart in st.session_state.get("windtemp_charts", []):
                 if chart.get("img_bytes"):
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle","")})
+                    charts_all.append({"title": chart.get("title", "Wind/Temp"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle", "")})
             for chart in st.session_state.get("spc_charts", []):
                 if chart.get("img_bytes"):
-                    charts_all.append({"title": chart.get("title"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle","")})
+                    charts_all.append({"title": chart.get("title", "SPC"), "img_bytes": chart["img_bytes"], "subtitle": chart.get("subtitle", "")})
 
             pdf.chart_fullpage(charts_all)
             out_pdf = f"weather_briefing_raw_{ascii_safe(mission)[:40]}.pdf"
             pdf.output(out_pdf)
             with open(out_pdf, "rb") as f:
-                st.download_button(
-                    label=TXT[lang]["down_raw"],
-                    data=f.read(),
-                    file_name=out_pdf,
-                    mime="application/pdf"
-                )
+                st.download_button(label=TXT[lang]["down_raw"], data=f.read(), file_name=out_pdf, mime="application/pdf")
 else:
     st.info(TXT[lang]["fill_any"])
 
 
-# requirements.txt
-# -----------------
-# streamlit
-# pillow
-# requests
-# openai>=1.40.0
-# fpdf2
-# pymupdf
-# airportsdata
+
 
 
 
