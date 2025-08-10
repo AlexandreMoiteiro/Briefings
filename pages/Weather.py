@@ -3,11 +3,10 @@ import requests
 import datetime
 from typing import List, Dict, Any
 
-# ============= Page setup (no sidebar) =============
+# ================= Page setup (no sidebar) =================
 st.set_page_config(page_title="Live Weather", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
-/* Hide sidebar + hamburger */
 [data-testid="stSidebar"], [data-testid="stSidebarNav"], [data-testid="stHamburger"] { display: none !important; }
 .block-container { padding-top: 1.2rem; }
 .title { font-size: 1.8rem; font-weight: 800; margin-bottom: .25rem;}
@@ -20,14 +19,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ============= Config =============
 DEFAULT_ICAOS = ["LPPT", "LPBJ", "LEBZ"]
 CHECKWX_API_KEY = st.secrets.get("CHECKWX_API_KEY", "")
 
 def _cw_headers() -> Dict[str,str]:
     return {"X-API-Key": CHECKWX_API_KEY} if CHECKWX_API_KEY else {}
 
-# ============= Data fetchers =============
+# ---------------- METAR/TAF (CheckWX) ----------------
 @st.cache_data(ttl=90)
 def fetch_metar(icao: str) -> str:
     if not CHECKWX_API_KEY: return ""
@@ -56,20 +54,16 @@ def fetch_taf(icao: str) -> str:
     except Exception:
         return ""
 
+# ---------------- SIGMET LPPC (AWC) ----------------
 @st.cache_data(ttl=120)
 def fetch_sigmet_lppc() -> List[str]:
-    """
-    International SIGMETs (worldwide) via AWC Data API.
-    We request JSON and filter for LPPC in either FIR field or raw text.
-    """
     url = "https://aviationweather.gov/api/data/isigmet"
-    params = {"format": "json"}  # JSON response (worldwide)
+    params = {"format": "json"}
     out: List[str] = []
     try:
         r = requests.get(url, params=params, timeout=12)
         r.raise_for_status()
         payload = r.json()
-        # API may return a list (JSON) or GeoJSON-like features under "features"
         items = payload if isinstance(payload, list) else payload.get("features", []) or []
         for item in items:
             props: Dict[str, Any] = {}
@@ -79,54 +73,71 @@ def fetch_sigmet_lppc() -> List[str]:
                 props = item
             raw = (props.get("raw") or props.get("raw_text") or props.get("sigmet_text") or props.get("report") or "").strip()
             fir = (props.get("fir") or props.get("firid") or props.get("firId") or "").upper()
-            if not raw:
-                # Sometimes text is under different key names
-                raw = (item.get("raw") if isinstance(item, dict) else "") or ""
-                raw = str(raw).strip()
-            # Filter LPPC either by field or by appearance in text
+            if not raw and isinstance(item, dict):
+                raw = str(item.get("raw","")).strip()
             if raw and (fir == "LPPC" or " LPPC " in f" {raw} " or "FIR LPPC" in raw or " LPPC FIR" in raw):
                 out.append(raw)
     except Exception:
         return []
     return out
 
+# ---------------- GAMET LPPC (IPMA) ----------------
+def _ipma_headers() -> Dict[str,str]:
+    h: Dict[str,str] = {}
+    bearer = st.secrets.get("IPMA_BEARER", "")
+    cookie = st.secrets.get("IPMA_COOKIE", "")
+    if bearer:
+        h["Authorization"] = f"Bearer {bearer}"
+    elif cookie:
+        h["Cookie"] = cookie
+    return h
+
 @st.cache_data(ttl=120)
-def fetch_airmet_for(icao: str) -> List[str]:
+def fetch_gamet_lppc_ipma() -> List[str]:
     """
-    AIRMET via CheckWX (coverage is often limited outside CONUS; may return empty).
-    We aggregate any raw text we find per ICAO.
+    Flexible fetch: you set IPMA_GAMET_URL and either IPMA_BEARER or IPMA_COOKIE in secrets.
+    We try to extract text from common fields; otherwise return raw body.
     """
-    results: List[str] = []
-    if not CHECKWX_API_KEY: return results
+    url = st.secrets.get("IPMA_GAMET_URL", "")
+    if not url: 
+        return []
     try:
-        r = requests.get(f"https://api.checkwx.com/airmet/{icao}", headers=_cw_headers(), timeout=10)
-        if r.status_code != 200: return results
-        data = r.json().get("data", [])
-        for it in data:
-            # CheckWX AIRMET responses can be objects with various fields; try raw/raw_text
-            txt = (it.get("raw") if isinstance(it, dict) else "") or (it.get("raw_text") if isinstance(it, dict) else "") or ""
-            if not txt and isinstance(it, dict) and "hazard" in it:
-                # Build a minimal line from decoded fields
-                hz = it.get("hazard", {})
-                cat = it.get("category","")
-                tfrom = it.get("timestamp",{}).get("from","")
-                tto = it.get("timestamp",{}).get("to","")
-                txt = f"{icao} {cat} {hz} {tfrom}→{tto}".strip()
-            if txt:
-                results.append(txt)
+        r = requests.get(url, headers=_ipma_headers(), timeout=12)
+        r.raise_for_status()
+        # Try JSON first
+        try:
+            js = r.json()
+            items = js if isinstance(js, list) else js.get("features", []) or js.get("data", []) or []
+            out: List[str] = []
+            for it in items if isinstance(items, list) else []:
+                if isinstance(it, dict):
+                    # common field names
+                    txt = it.get("raw") or it.get("raw_text") or it.get("text") or it.get("message") or it.get("gamet") or ""
+                    if not txt and "properties" in it and isinstance(it["properties"], dict):
+                        p = it["properties"]
+                        txt = p.get("raw") or p.get("raw_text") or p.get("text") or p.get("message") or p.get("gamet") or ""
+                    if txt:
+                        out.append(str(txt).strip())
+            # If still empty but json is a dict with a single text
+            if not out and isinstance(js, dict):
+                single = js.get("raw") or js.get("text") or js.get("message") or js.get("gamet")
+                if single:
+                    out.append(str(single).strip())
+            return out
+        except ValueError:
+            # Not JSON — return plain text
+            body = r.text.strip()
+            return [body] if body else []
     except Exception:
-        return results
-    return results
+        return []
 
-# ============= UI =============
+# ================= UI =================
 st.markdown('<div class="title">Live Weather</div>', unsafe_allow_html=True)
-st.markdown('<div class="muted">Latest METAR, TAF and LPPC SIGMET</div>', unsafe_allow_html=True)
+st.markdown('<div class="muted">Latest METAR, TAF • LPPC SIGMET • LPPC GAMET (IPMA)</div>', unsafe_allow_html=True)
 
-# ICAO input
 icao_str = st.text_input("ICAO (comma-separated)", value=",".join(DEFAULT_ICAOS))
 ICAOS = [c.strip().upper() for c in icao_str.split(",") if c.strip()]
 
-# METAR/TAF grid
 st.markdown('<div class="grid">', unsafe_allow_html=True)
 for icao in ICAOS:
     metar = fetch_metar(icao)
@@ -142,7 +153,6 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 st.divider()
 
-# SIGMET (LPPC only)
 st.subheader("SIGMET (LPPC)")
 sigmets = fetch_sigmet_lppc()
 if not sigmets:
@@ -152,29 +162,17 @@ else:
         st.markdown(f'<div class="monos">{s}</div>', unsafe_allow_html=True)
         st.markdown("---")
 
-# AIRMET (best effort via CheckWX, may be empty in EUR)
-st.subheader("AIRMET (per ICAO, via CheckWX)")
-if not CHECKWX_API_KEY:
-    st.caption("Set CHECKWX_API_KEY in secrets to enable AIRMET.")
+st.subheader("GAMET (LPPC via IPMA)")
+gamets = fetch_gamet_lppc_ipma()
+if not gamets:
+    st.info("GAMET not available (configure IPMA_GAMET_URL and IPMA_BEARER / IPMA_COOKIE in secrets).")
 else:
-    any_airmet = False
-    for icao in ICAOS:
-        items = fetch_airmet_for(icao)
-        if items:
-            any_airmet = True
-            st.markdown(f"**{icao}**")
-            for t in items:
-                st.markdown(f'<div class="monos">{t}</div>', unsafe_allow_html=True)
-            st.markdown("---")
-    if not any_airmet:
-        st.info("No AIRMETs returned for these ICAOs at this time.")
+    for g in gamets:
+        st.markdown(f'<div class="monos">{g}</div>', unsafe_allow_html=True)
+        st.markdown("---")
 
-# GAMET: no universal public API → handled in main app via user paste
-st.subheader("GAMET")
-st.caption("GAMET is not available via a universal public API; include it in the main app when generating PDFs (paste raw text).")
-
-# Timestamp
 st.caption(f"Last updated: {datetime.datetime.utcnow():%Y-%m-%d %H:%M:%SZ} UTC")
+
 
 
 
