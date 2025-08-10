@@ -19,35 +19,45 @@ def fetch(endpoint: str):
     except Exception as e:
         return [f"Error: {e}"]
 
-qp = st.experimental_get_query_params()
+# New API: st.query_params (dict-like)
+qp = st.query_params
 if "icao" in qp:
-    raw = qp.get("icao", [""])[0]
+    raw = qp.get("icao", "")
     raw = unquote_plus(raw)
     icaos = [x.strip().upper() for x in raw.split(",") if x.strip()]
 else:
-    icaos = ["LPPT","LPBJ","LEBZ"]
+    icaos = ["LPPT", "LPBJ", "LEBZ"]
 
 st.subheader("Airports shown:")
 st.write(", ".join(icaos))
 
-more = st.text_input("Add ICAO(s) (comma separated)","")
+more = st.text_input("Add ICAO(s) (comma separated)", "")
 if st.button("Update list"):
     if more.strip():
         extra = [x.strip().upper() for x in more.split(",") if x.strip()]
-        icaos = list(dict.fromkeys(icaos + extra))
-        st.experimental_set_query_params(icao=",".join(icaos))
-        st.experimental_rerun()
+        # unique while preserving order
+        seen = set()
+        merged = []
+        for x in (icaos + extra):
+            if x not in seen:
+                seen.add(x)
+                merged.append(x)
+        st.query_params.update({"icao": ",".join(merged)})
+        st.rerun()
 
 for icao in icaos:
     st.markdown(f"---\n### {icao}")
     metar = fetch(f"metar/{icao}")
     taf = fetch(f"taf/{icao}")
+
+    # simple FIR detection
     prefix = icao[:2].upper()
     FIR = "LPPC"
     if prefix == "LP" and icao in {"LPAZ","LPLA","LPPD","LPPI","LPFL","LPHR","LPGR","LPSJ"}:
         FIR = "LPPO"
     elif prefix == "LP":
         FIR = "LPPC"
+
     sigmet = fetch(f"sigmet/{FIR}/decoded")
 
     with st.expander("METAR"):
