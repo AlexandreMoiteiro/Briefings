@@ -1,56 +1,64 @@
 import streamlit as st
-from fpdf import FPDF
-import datetime
+import requests
+import os
+from textwrap import shorten
+from datetime import datetime
 
-# Link fixo para a página Weather
-WEATHER_PAGE_URL = "https://SEU-APP-NO-STREAMLIT.app/Weather"
+st.set_page_config("Flight Briefing Dashboard", layout="wide")
+st.title("✈️ Flight Briefing Dashboard")
 
-st.set_page_config(page_title="Flight Briefing Tool", layout="wide")
-st.title("Flight Briefing Tool")
+CHECKWX_KEY = st.secrets.get("CHECKWX_API_KEY") or os.getenv("CHECKWX_API_KEY")
+BASE = "https://api.checkwx.com/"
 
-icao_input = st.text_input("Introduza ICAO(s) separados por vírgula", "LPPT, LPBJ, LEBZ")
+DEFAULT_ICAOS = ["LPPT", "LPBJ", "LEBZ"]
 
-col1, col2 = st.columns(2)
+def fetch_checkwx(endpoint: str):
+    headers = {"X-API-Key": CHECKWX_KEY} if CHECKWX_KEY else {}
+    try:
+        r = requests.get(BASE + endpoint, headers=headers, timeout=8)
+        r.raise_for_status()
+        j = r.json()
+        return j.get("data", [])
+    except Exception as e:
+        return [f"Error fetching: {e}"]
 
-# Função para gerar Raw PDF
-def generate_raw_pdf(icaos):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=14)
-    pdf.cell(200, 10, txt="Flight Briefing (RAW)", ln=True, align="C")
-    pdf.ln(10)
+st.markdown(
+    """
+    <style>
+    .card { background: #ffffff; border-radius:14px; padding:14px; box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
+    .card h3 { margin:0; }
+    .small { color:#666; font-size:12px; }
+    </style>
+    """, unsafe_allow_html=True
+)
 
-    pdf.set_font("Arial", size=12)
-    pdf.multi_cell(0, 10, f"Current METAR, TAF & SIGMET: {WEATHER_PAGE_URL}?icao={','.join(icaos)}")
+st.subheader("Latest METAR & TAF (defaults)")
 
-    pdf.ln(10)
-    pdf.cell(0, 10, f"Charts and NOTAMs here...", ln=True)
-    return pdf.output(dest="S").encode("latin-1")
+cols = st.columns(len(DEFAULT_ICAOS))
+for col, icao in zip(cols, DEFAULT_ICAOS):
+    with col:
+        st.markdown(f'<div class="card">', unsafe_allow_html=True)
+        st.markdown(f"**{icao}**  ·  <span class='small'>{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</span>", unsafe_allow_html=True)
+        metar = fetch_checkwx(f"metar/{icao}")
+        metar_text = metar[0] if isinstance(metar, list) and metar else ""
+        st.markdown(f"**METAR:**  \n`{shorten(metar_text, width=220)}`")
+        taf = fetch_checkwx(f"taf/{icao}")
+        taf_text = taf[0] if isinstance(taf, list) and taf else ""
+        st.markdown(f"**TAF:**  \n`{shorten(taf_text, width=220)}`")
+        st.markdown(f"</div>", unsafe_allow_html=True)
 
-# Função para gerar Detailed PDF
-def generate_detailed_pdf(icaos):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=14)
-    pdf.cell(200, 10, txt="Flight Briefing (DETAILED - PT)", ln=True, align="C")
-    pdf.ln(10)
+st.write("")
+st.markdown("### Quick actions")
+cols2 = st.columns([1,1,1])
+with cols2[0]:
+    if st.button("Enter Full Briefing"):
+        st.experimental_set_query_params(_page="briefing")
+        st.experimental_rerun()
+with cols2[1]:
+    st.markdown("[Open Weather Live page →](./pages/Weather.py)", unsafe_allow_html=True)
+with cols2[2]:
+    st.write("")
 
-    pdf.set_font("Arial", size=12)
-    pdf.multi_cell(0, 10, "Este documento contém interpretações detalhadas em português para preparar o briefing...")
-    # Aqui entraria a lógica para interpretação automática
-
-    pdf.ln(10)
-    pdf.cell(0, 10, "Charts e informações adicionais...", ln=True)
-    return pdf.output(dest="S").encode("latin-1")
-
-with col1:
-    if st.button("Gerar RAW PDF"):
-        pdf_bytes = generate_raw_pdf([icao.strip().upper() for icao in icao_input.split(",")])
-        st.download_button("Download RAW PDF", data=pdf_bytes, file_name="briefing_raw.pdf", mime="application/pdf")
-
-with col2:
-    if st.button("Gerar Detailed PDF"):
-        pdf_bytes = generate_detailed_pdf([icao.strip().upper() for icao in icao_input.split(",")])
-        st.download_button("Download Detailed PDF", data=pdf_bytes, file_name="briefing_detailed.pdf", mime="application/pdf")
+st.info("Default airports: LPPT, LPBJ, LEBZ. Click 'Enter Full Briefing' to generate PDFs or to analyze charts.")
 
 
