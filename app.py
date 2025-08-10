@@ -52,20 +52,29 @@ for col, icao in zip(cols, DEFAULT_ICAOS):
         st.markdown(f"**TAF:**  \n`{shorten(taf_text, width=220)}`")
         st.markdown("</div>", unsafe_allow_html=True)
 
-# Navigation buttons
+# --- Quick actions ---
 st.write("")
 st.markdown("### Quick actions")
 cols2 = st.columns([1, 1, 1])
 
+PUBLIC_URL = st.secrets.get("PUBLIC_URL", "https://briefings.streamlit.app")
+
 with cols2[0]:
     if st.button("Enter Full Briefing"):
+        # Try by page label first, then by path, then fall back to link
         try:
-            st.switch_page("pages/Briefing.py")
+            st.switch_page("Briefing")  # page label from pages/Briefing.py
         except Exception:
-            st.page_link("pages/Briefing.py", label="Open Full Briefing →", icon="🧭")
+            try:
+                st.switch_page("pages/Briefing.py")
+            except Exception:
+                st.link_button("Open Full Briefing →", url=f"{PUBLIC_URL}/Briefing")
 
 with cols2[1]:
-    st.page_link("pages/Weather.py", label="Open Weather Live page →", icon="🌤️")
+    try:
+        st.page_link("Weather", label="Open Weather Live page →", icon="🌤️")
+    except Exception:
+        st.link_button("Open Weather Live page →", url=f"{PUBLIC_URL}/Weather")
 
 with cols2[2]:
     st.write("")
