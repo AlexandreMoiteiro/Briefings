@@ -3,7 +3,7 @@ import requests
 import datetime
 from typing import List, Dict, Any
 
-# ================= Page setup (no sidebar) =================
+# ============= Page setup (no sidebar) =============
 st.set_page_config(page_title="Live Weather", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
@@ -54,9 +54,48 @@ def fetch_taf(icao: str) -> str:
     except Exception:
         return ""
 
-# ---------------- SIGMET LPPC (AWC) ----------------
-@st.cache_data(ttl=120)
-def fetch_sigmet_lppc() -> List[str]:
+# ---------------- SIGMET LPPC (IPMA -> fallback AWC) ----------------
+def _ipma_auth_headers(bearer_key: str, cookie_key: str) -> Dict[str,str]:
+    h: Dict[str,str] = {}
+    bearer = st.secrets.get(bearer_key, "")
+    cookie = st.secrets.get(cookie_key, "")
+    if bearer:
+        h["Authorization"] = f"Bearer {bearer}"
+    elif cookie:
+        h["Cookie"] = cookie
+    return h
+
+@st.cache_data(ttl=90)
+def fetch_sigmet_lppc_ipma() -> List[str]:
+    url = st.secrets.get("IPMA_SIGMET_URL", "")
+    if not url: return []
+    try:
+        r = requests.get(url, headers=_ipma_auth_headers("IPMA_SIGMET_BEARER","IPMA_SIGMET_COOKIE"), timeout=12)
+        r.raise_for_status()
+        out: List[str] = []
+        # JSON?
+        try:
+            js = r.json()
+            items = js if isinstance(js, list) else js.get("features", []) or js.get("data", []) or []
+            if isinstance(items, list) and items:
+                for it in items:
+                    props: Dict[str, Any] = {}
+                    if isinstance(it, dict) and "properties" in it: props = it["properties"]
+                    elif isinstance(it, dict): props = it
+                    raw = (props.get("raw") or props.get("raw_text") or props.get("report") or props.get("sigmet_text") or "").strip()
+                    if raw: out.append(raw)
+            else:
+                raw = str(js.get("raw") or js.get("text") or js.get("message") or js.get("sigmet") or "").strip()
+                if raw: out.append(raw)
+        except ValueError:
+            body = (r.text or "").strip()
+            if body: out = [body]
+        return out
+    except Exception:
+        return []
+
+@st.cache_data(ttl=90)
+def fetch_sigmet_lppc_awc() -> List[str]:
     url = "https://aviationweather.gov/api/data/isigmet"
     params = {"format": "json"}
     out: List[str] = []
@@ -67,10 +106,8 @@ def fetch_sigmet_lppc() -> List[str]:
         items = payload if isinstance(payload, list) else payload.get("features", []) or []
         for item in items:
             props: Dict[str, Any] = {}
-            if isinstance(item, dict) and "properties" in item:
-                props = item["properties"]
-            elif isinstance(item, dict):
-                props = item
+            if isinstance(item, dict) and "properties" in item: props = item["properties"]
+            elif isinstance(item, dict): props = item
             raw = (props.get("raw") or props.get("raw_text") or props.get("sigmet_text") or props.get("report") or "").strip()
             fir = (props.get("fir") or props.get("firid") or props.get("firId") or "").upper()
             if not raw and isinstance(item, dict):
@@ -81,63 +118,54 @@ def fetch_sigmet_lppc() -> List[str]:
         return []
     return out
 
-# ---------------- GAMET LPPC (IPMA) ----------------
-def _ipma_headers() -> Dict[str,str]:
-    h: Dict[str,str] = {}
-    bearer = st.secrets.get("IPMA_BEARER", "")
-    cookie = st.secrets.get("IPMA_COOKIE", "")
-    if bearer:
-        h["Authorization"] = f"Bearer {bearer}"
-    elif cookie:
-        h["Cookie"] = cookie
-    return h
+def fetch_sigmet_lppc() -> List[str]:
+    ipma = fetch_sigmet_lppc_ipma()
+    if ipma: return ipma
+    return fetch_sigmet_lppc_awc()
 
+# ---------------- GAMET LPPC (IPMA on the same showSIGMET area) ----------------
 @st.cache_data(ttl=120)
 def fetch_gamet_lppc_ipma() -> List[str]:
     """
-    Flexible fetch: you set IPMA_GAMET_URL and either IPMA_BEARER or IPMA_COOKIE in secrets.
-    We try to extract text from common fields; otherwise return raw body.
+    Use a second IPMA endpoint for GAMET (captured from showSIGMET page as well).
+    Configure in secrets:
+      IPMA_GAMET_URL
+      + either IPMA_GAMET_BEARER or IPMA_GAMET_COOKIE
     """
     url = st.secrets.get("IPMA_GAMET_URL", "")
-    if not url: 
-        return []
+    if not url: return []
     try:
-        r = requests.get(url, headers=_ipma_headers(), timeout=12)
+        r = requests.get(url, headers=_ipma_auth_headers("IPMA_GAMET_BEARER","IPMA_GAMET_COOKIE"), timeout=12)
         r.raise_for_status()
-        # Try JSON first
+        out: List[str] = []
         try:
             js = r.json()
             items = js if isinstance(js, list) else js.get("features", []) or js.get("data", []) or []
-            out: List[str] = []
-            for it in items if isinstance(items, list) else []:
-                if isinstance(it, dict):
-                    # common field names
-                    txt = it.get("raw") or it.get("raw_text") or it.get("text") or it.get("message") or it.get("gamet") or ""
-                    if not txt and "properties" in it and isinstance(it["properties"], dict):
-                        p = it["properties"]
-                        txt = p.get("raw") or p.get("raw_text") or p.get("text") or p.get("message") or p.get("gamet") or ""
-                    if txt:
-                        out.append(str(txt).strip())
-            # If still empty but json is a dict with a single text
-            if not out and isinstance(js, dict):
-                single = js.get("raw") or js.get("text") or js.get("message") or js.get("gamet")
-                if single:
-                    out.append(str(single).strip())
-            return out
+            if isinstance(items, list) and items:
+                for it in items:
+                    props: Dict[str, Any] = {}
+                    if isinstance(it, dict) and "properties" in it: props = it["properties"]
+                    elif isinstance(it, dict): props = it
+                    raw = (props.get("raw") or props.get("raw_text") or props.get("report") or props.get("gamet_text") or props.get("text") or "").strip()
+                    if raw: out.append(raw)
+            else:
+                raw = str(js.get("raw") or js.get("text") or js.get("message") or js.get("gamet") or "").strip()
+                if raw: out.append(raw)
         except ValueError:
-            # Not JSON — return plain text
-            body = r.text.strip()
-            return [body] if body else []
+            body = (r.text or "").strip()
+            if body: out = [body]
+        return out
     except Exception:
         return []
 
-# ================= UI =================
+# ============= UI =============
 st.markdown('<div class="title">Live Weather</div>', unsafe_allow_html=True)
-st.markdown('<div class="muted">Latest METAR, TAF • LPPC SIGMET • LPPC GAMET (IPMA)</div>', unsafe_allow_html=True)
+st.markdown('<div class="muted">Latest METAR, TAF • LPPC SIGMET • LPPC GAMET</div>', unsafe_allow_html=True)
 
 icao_str = st.text_input("ICAO (comma-separated)", value=",".join(DEFAULT_ICAOS))
 ICAOS = [c.strip().upper() for c in icao_str.split(",") if c.strip()]
 
+# METAR/TAF grid
 st.markdown('<div class="grid">', unsafe_allow_html=True)
 for icao in ICAOS:
     metar = fetch_metar(icao)
@@ -153,19 +181,21 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 st.divider()
 
+# SIGMET (LPPC)
 st.subheader("SIGMET (LPPC)")
-sigmets = fetch_sigmet_lppc()
-if not sigmets:
+sigs = fetch_sigmet_lppc()
+if not sigs:
     st.info("No active LPPC SIGMETs.")
 else:
-    for s in sigmets:
+    for s in sigs:
         st.markdown(f'<div class="monos">{s}</div>', unsafe_allow_html=True)
         st.markdown("---")
 
-st.subheader("GAMET (LPPC via IPMA)")
+# GAMET (LPPC)
+st.subheader("GAMET (LPPC)")
 gamets = fetch_gamet_lppc_ipma()
 if not gamets:
-    st.info("GAMET not available (configure IPMA_GAMET_URL and IPMA_BEARER / IPMA_COOKIE in secrets).")
+    st.info("No LPPC GAMET available (configure IPMA_GAMET_URL and IPMA_GAMET_BEARER or IPMA_GAMET_COOKIE in secrets).")
 else:
     for g in gamets:
         st.markdown(f'<div class="monos">{g}</div>', unsafe_allow_html=True)
