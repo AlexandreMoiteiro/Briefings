@@ -7,10 +7,15 @@
 
 from typing import List, Dict, Any, Optional
 import datetime as dt
+from zoneinfo import ZoneInfo  # stdlib: handles DST for Europe/Lisbon
 import streamlit as st
 import requests
 
-st.set_page_config(page_title="Weather (Live)", layout="wide")
+st.set_page_config(
+    page_title="Weather (Live)",
+    layout="wide",
+    initial_sidebar_state="collapsed",  # <- sidebar hidden by default
+)
 
 # ---------------- Styles ----------------
 st.markdown("""
@@ -21,7 +26,6 @@ st.markdown("""
   }
   .page-title { font-size: 2rem; font-weight: 800; margin: 0 0 .25rem; }
   .subtle { color: var(--muted); margin-bottom: .75rem; }
-  .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:.5rem 0 1rem; }
   .row { padding: 8px 0 14px; border-bottom: 1px solid var(--line); }
   .row h3 { margin: 0 0 6px; font-size: 1.1rem; }
   .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:700; font-size:.80rem; color:#fff; margin-left:8px; vertical-align:middle; }
@@ -123,12 +127,23 @@ def flight_cat_badge(decoded: Optional[Dict[str,Any]]) -> str:
     return f'<span class="badge {klass}">{cat}</span>' if klass else ""
 
 def fmt_observed(decoded: Optional[Dict[str,Any]]) -> str:
+    """
+    Returns 'YYYY-MM-DD HH:MMZ (HH:MM Portugal)' if observed is present.
+    Handles DST using Europe/Lisbon.
+    """
     if not decoded: return ""
     obs = decoded.get("observed")
     if not obs: return ""
     try:
-        t = dt.datetime.fromisoformat(obs.replace("Z","+00:00"))
-        return t.strftime("%Y-%m-%d %H:%MZ")
+        # to aware UTC
+        t_utc = dt.datetime.fromisoformat(obs.replace("Z","+00:00"))
+        if t_utc.tzinfo is None:
+            t_utc = t_utc.replace(tzinfo=dt.timezone.utc)
+        # convert to Portugal local time
+        t_pt = t_utc.astimezone(ZoneInfo("Europe/Lisbon"))
+        zulu_str = t_utc.strftime("%Y-%m-%d %H:%MZ")
+        pt_str = t_pt.strftime("%H:%M")
+        return f"{zulu_str} ({pt_str} Portugal)"
     except Exception:
         return str(obs)
 
@@ -190,6 +205,7 @@ if gamet:
     st.download_button("Download GAMET as .txt", data=gamet, file_name="gamet.txt")
 else:
     st.write("No GAMET available. Add a 'GAMET_URL' to secrets to enable live GAMET here.")
+
 
 
 
