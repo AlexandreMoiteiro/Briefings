@@ -22,6 +22,7 @@ def fetch_checkwx(endpoint: str):
     except Exception as e:
         return [f"Error fetching: {e}"]
 
+# Styling
 st.markdown(
     """
     <style>
@@ -51,21 +52,26 @@ for col, icao in zip(cols, DEFAULT_ICAOS):
         st.markdown(f"**TAF:**  \n`{shorten(taf_text, width=220)}`")
         st.markdown("</div>", unsafe_allow_html=True)
 
+# Navigation buttons
 st.write("")
 st.markdown("### Quick actions")
 cols2 = st.columns([1, 1, 1])
+
 with cols2[0]:
     if st.button("Enter Full Briefing"):
-        # Update URL params and rerun using the new API
-        st.query_params.update({"_page": "briefing"})
-        st.rerun()
+        try:
+            st.switch_page("pages/Briefing.py")
+        except Exception:
+            st.page_link("pages/Briefing.py", label="Open Full Briefing →", icon="🧭")
+
 with cols2[1]:
-    # Direct link to Weather page
-    st.markdown("[Open Weather Live page →](/Weather)", unsafe_allow_html=True)
+    st.page_link("pages/Weather.py", label="Open Weather Live page →", icon="🌤️")
+
 with cols2[2]:
     st.write("")
 
 st.info("Default airports: LPPT, LPBJ, LEBZ. Click 'Enter Full Briefing' to generate PDFs or to analyze charts.")
+
 
 
 
