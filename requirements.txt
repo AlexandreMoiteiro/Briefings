@@ -1,7 +1,6 @@
-streamlit
+streamlit>=1.36
 pillow
 requests
-openai>=1.40.0
+openai>=1.44.0
 fpdf2
 pymupdf
-airportsdata
