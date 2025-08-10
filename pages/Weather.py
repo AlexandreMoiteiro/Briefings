@@ -5,6 +5,43 @@ from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 import re
 
+# --- DIAGNOSTIC: test IPMA session from server ---
+def _ipma_headers_for_diagnostics():
+    h = {}
+    bearer = st.secrets.get("IPMA_BEARER", "")
+    cookie = st.secrets.get("IPMA_COOKIE", "")
+    if bearer:
+        h["Authorization"] = f"Bearer {bearer}"
+    if cookie:
+        h["Cookie"] = cookie
+    h["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) BriefingsApp/1.0"
+    h["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    h["Accept-Language"] = "en-US,en;q=0.9,pt;q=0.8"
+    h["Referer"] = "https://brief-ng.ipma.pt/"
+    return h
+
+def ipma_connectivity_check():
+    url = st.secrets.get("IPMA_SHOWSIGMET_URL", "")
+    if not url:
+        return {"ok": False, "msg": "Missing IPMA_SHOWSIGMET_URL in secrets."}
+    try:
+        # cache-buster para evitar páginas antigas
+        import time
+        test_url = url + ("&" if "?" in url else "?") + f"_ts={int(time.time())}"
+        r = requests.get(test_url, headers=_ipma_headers_for_diagnostics(), timeout=12, allow_redirects=True)
+        snippet = (r.text or "")[:800]
+        return {
+            "ok": r.ok,
+            "status": r.status_code,
+            "final_url": r.url,
+            "content_type": r.headers.get("content-type",""),
+            "looks_logged": ("Logged in as" in r.text) or ("logout" in r.text.lower()),
+            "has_divContent": ("id=\"divContent\"" in r.text) or ("id='divContent'" in r.text),
+            "snippet": snippet
+        }
+    except Exception as e:
+        return {"ok": False, "msg": f"Exception: {e}"}
+
 # ================= Page setup (no sidebar) =================
 st.set_page_config(page_title="Live Weather", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
