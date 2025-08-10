@@ -1,3 +1,8 @@
+# pages/Weather.py
+# Live METAR / TAF (CheckWX) + SIGMET (LPPC via AWC) + AIRMET (LPPC via CheckWX) + GAMET (try CheckWX + manual paste)
+# Default ICAOs: LPPT, LPBJ, LEBZ
+# No sidebar; clean layout
+
 import streamlit as st
 import requests
 import datetime
@@ -6,102 +11,195 @@ import datetime
 st.set_page_config(page_title="Live Weather", layout="wide")
 
 # ==== HIDE SIDEBAR & FOOTER ====
-hide_streamlit_style = """
+st.markdown(
+    """
     <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    [data-testid="stSidebar"] {display: none;}
+      #MainMenu {visibility: hidden;}
+      footer {visibility: hidden;}
+      [data-testid="stSidebar"] {display: none;}
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+      .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(0,0,0,.06); background: #fff; }
+      .card h3 { margin: 0 0 6px; }
+      .monos { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: .92rem; white-space: pre-wrap; }
     </style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True
+)
 
 # ==== CONFIG ====
-CHECKWX_API_KEY = st.secrets["CHECKWX_API_KEY"]
+CHECKWX_API_KEY = st.secrets.get("CHECKWX_API_KEY", "")
 DEFAULT_ICAOS = ["LPPT", "LPBJ", "LEBZ"]
 
-# ==== FUNCTIONS ====
-def fetch_metar(icao):
-    url = f"https://api.checkwx.com/metar/{icao}/decoded"
-    headers = {"X-API-Key": CHECKWX_API_KEY}
-    r = requests.get(url, headers=headers, timeout=10)
-    if r.status_code == 200 and r.json().get("data"):
-        return r.json()["data"][0]
-    return None
+def _cw_headers():
+    return {"X-API-Key": CHECKWX_API_KEY} if CHECKWX_API_KEY else {}
 
-def fetch_taf(icao):
-    url = f"https://api.checkwx.com/taf/{icao}/decoded"
-    headers = {"X-API-Key": CHECKWX_API_KEY}
-    r = requests.get(url, headers=headers, timeout=10)
-    if r.status_code == 200 and r.json().get("data"):
-        return r.json()["data"][0]
-    return None
-
-def fetch_sigmet_lppc():
-    """
-    Fetch LPPC FIR SIGMET from Aviation Weather Center International API.
-    Filters by FIR name or ID containing 'LPPC'.
-    """
-    url = "https://aviationweather.gov/api/data/isigmet?format=json"
+# ==== FETCHERS ====
+@st.cache_data(ttl=90)
+def fetch_metar_raw(icao: str) -> str:
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=_cw_headers(), timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data: return ""
+        if isinstance(data[0], dict):
+            return data[0].get("raw") or data[0].get("raw_text") or ""
+        return str(data[0])
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=90)
+def fetch_taf_raw(icao: str) -> str:
+    try:
+        r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=_cw_headers(), timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data: return ""
+        if isinstance(data[0], dict):
+            return data[0].get("raw") or data[0].get("raw_text") or ""
+        return str(data[0])
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=120)
+def fetch_sigmet_lppc_awc() -> list[str]:
+    """
+    AWC International SIGMET (global). Filter for LPPC (Lisbon FIR).
+    Public endpoint; no key needed.
+    """
+    try:
+        r = requests.get("https://aviationweather.gov/api/data/isigmet?format=json", timeout=12)
+        r.raise_for_status()
+        items = r.json()
+        out = []
+        for it in items:
+            firname = (it.get("firname") or "").upper()
+            firid = (it.get("firid") or "").upper()
+            raw = it.get("rawtext") or it.get("raw") or it.get("sigmet_text") or ""
+            if firid == "LPPC" or firname == "LPPC" or "LISBON" in firname:
+                if raw.strip():
+                    out.append(raw.strip())
+        return out
+    except Exception:
+        return []
+
+@st.cache_data(ttl=120)
+def fetch_airmet_lppc_checkwx() -> list[str]:
+    """AIRMET via CheckWX for LPPC FIR (decoded or raw)."""
+    if not CHECKWX_API_KEY:
+        return []
+    try:
+        # try decoded first
+        r = requests.get("https://api.checkwx.com/airmet/LPPC/decoded", headers=_cw_headers(), timeout=12)
         if r.status_code == 200:
-            sigmets = r.json()
-            lppc_sigmets = []
-            for s in sigmets:
-                if (
-                    s.get("firname", "").upper() == "LPPC" or
-                    "LISBON" in s.get("firname", "").upper() or
-                    s.get("firid", "").upper() == "LPPC"
-                ):
-                    lppc_sigmets.append(s)
-            return lppc_sigmets
+            data = r.json().get("data", [])
+            out = []
+            for it in data:
+                text = it.get("raw") or it.get("raw_text") or it.get("report") or ""
+                if text.strip():
+                    out.append(text.strip())
+            if out:
+                return out
+        # fallback raw
+        r2 = requests.get("https://api.checkwx.com/airmet/LPPC", headers=_cw_headers(), timeout=12)
+        if r2.status_code == 200:
+            data = r2.json().get("data", [])
+            out = []
+            for it in data:
+                text = it if isinstance(it, str) else (it.get("raw") or it.get("raw_text") or it.get("report") or "")
+                if str(text).strip():
+                    out.append(str(text).strip())
+            return out
+    except Exception:
+        return []
+    return []
+
+@st.cache_data(ttl=180)
+def fetch_gamet_lppc_checkwx() -> list[str]:
+    """
+    GAMET via CheckWX (only if your account has access).
+    If the endpoint is unavailable, returns [] and we’ll rely on manual paste.
+    """
+    if not CHECKWX_API_KEY:
+        return []
+    try:
+        # Some CheckWX accounts expose GAMET endpoints as /gamet/{fir}
+        r = requests.get("https://api.checkwx.com/gamet/LPPC", headers=_cw_headers(), timeout=12)
+        if r.status_code == 200:
+            data = r.json().get("data", [])
+            out = []
+            for it in data:
+                text = it if isinstance(it, str) else (it.get("raw") or it.get("raw_text") or it.get("report") or "")
+                if str(text).strip():
+                    out.append(str(text).strip())
+            return out
     except Exception:
         return []
     return []
 
 # ==== UI ====
-st.title("🌍 Live Weather - METAR / TAF / SIGMET LPPC")
+st.title("🌍 Live Weather — METAR / TAF / SIGMET (LPPC) / AIRMET (LPPC) / GAMET")
 
-# ICAO input
-icao_list = st.text_input("Enter ICAO codes separated by commas:", value=",".join(DEFAULT_ICAOS))
-icaos = [code.strip().upper() for code in icao_list.split(",") if code.strip()]
+icao_str = st.text_input("Enter ICAO codes (comma-separated):", value=",".join(DEFAULT_ICAOS))
+icaos = [x.strip().upper() for x in icao_str.split(",") if x.strip()]
 
-col1, col2, col3 = st.columns(3)
+st.markdown("### Aerodromes")
+st.write(", ".join(icaos))
 
-# METAR
-with col1:
-    st.subheader("METAR")
-    for icao in icaos:
-        metar = fetch_metar(icao)
-        if metar:
-            st.markdown(f"**{icao}** - {metar.get('raw_text', 'N/A')}")
-        else:
-            st.warning(f"{icao}: No METAR available")
+# Grid: METAR / TAF
+st.markdown("### METAR & TAF")
+st.markdown('<div class="grid">', unsafe_allow_html=True)
+for icao in icaos:
+    metar = fetch_metar_raw(icao)
+    taf = fetch_taf_raw(icao)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(f"<h3>{icao}</h3>", unsafe_allow_html=True)
+    st.caption("METAR (raw)")
+    st.markdown(f'<div class="monos">{metar or "—"}</div>', unsafe_allow_html=True)
+    st.caption("TAF (raw)")
+    st.markdown(f'<div class="monos">{taf or "—"}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
-# TAF
-with col2:
-    st.subheader("TAF")
-    for icao in icaos:
-        taf = fetch_taf(icao)
-        if taf:
-            st.markdown(f"**{icao}** - {taf.get('raw_text', 'N/A')}")
-        else:
-            st.warning(f"{icao}: No TAF available")
+# SIGMET / AIRMET / GAMET (LPPC)
+st.markdown("### LPPC FIR Advisories")
+cols = st.columns(3)
 
-# SIGMET LPPC
-with col3:
-    st.subheader("SIGMET LPPC")
-    sigmets = fetch_sigmet_lppc()
-    if sigmets:
-        for s in sigmets:
-            st.markdown(f"- **{s.get('hazard', 'Unknown')}**: {s.get('validtimefrom')} → {s.get('validtimeto')}")
-            st.code(s.get("rawtext", ""))
+with cols[0]:
+    st.subheader("SIGMET (LPPC)")
+    sigs = fetch_sigmet_lppc_awc()
+    if not sigs:
+        st.info("No active SIGMET for LPPC FIR.")
     else:
-        st.info("No SIGMETs currently active for LPPC FIR.")
+        for s in sigs:
+            st.markdown(f'<div class="monos">{s}</div>', unsafe_allow_html=True)
+            st.markdown("---")
+
+with cols[1]:
+    st.subheader("AIRMET (LPPC)")
+    airs = fetch_airmet_lppc_checkwx()
+    if not CHECKWX_API_KEY:
+        st.warning("Add CHECKWX_API_KEY in secrets to enable AIRMET.")
+    elif not airs:
+        st.info("No active AIRMET for LPPC (or endpoint not available for your account).")
+    else:
+        for a in airs:
+            st.markdown(f'<div class="monos">{a}</div>', unsafe_allow_html=True)
+            st.markdown("---")
+
+with cols[2]:
+    st.subheader("GAMET (LPPC)")
+    gamets = fetch_gamet_lppc_checkwx()
+    manual = st.text_area("Paste GAMET (raw) if needed:", value="", height=120)
+    if gamets:
+        for g in gamets:
+            st.markdown(f'<div class="monos">{g}</div>', unsafe_allow_html=True)
+            st.markdown("---")
+    if manual.strip():
+        st.markdown("**Manual GAMET (raw):**")
+        st.markdown(f'<div class="monos">{manual.strip()}</div>', unsafe_allow_html=True)
 
 # Timestamp
-st.caption(f"Last updated: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%SZ')} UTC")
-
+st.caption(f"Last updated: {datetime.datetime.utcnow():%Y-%m-%d %H:%M:%SZ} UTC")
 
 
 
