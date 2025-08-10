@@ -1,9 +1,9 @@
 # pages/Weather.py
-# Live METAR / TAF / SIGMET (LPPC only for SIGMET)
+# Live METAR / TAF / SIGMET (LPPC via AWC International SIGMET API)
 # - Defaults: LPPT, LPBJ, LEBZ
-# - ?icao=AAA or ?icao=AAA,BBB to customize list
+# - ?icao=AAA ou ?icao=AAA,BBB para custom
 
-from typing import List, Dict
+from typing import List, Dict, Any
 import streamlit as st
 import requests
 
@@ -24,45 +24,73 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-def headers() -> Dict[str,str]:
+def cw_headers() -> Dict[str,str]:
     key = st.secrets.get("CHECKWX_API_KEY","")
     return {"X-API-Key": key} if key else {}
 
 @st.cache_data(ttl=90)
 def fetch_metar(icao: str) -> str:
     try:
-        r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=headers(), timeout=10)
+        r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=cw_headers(), timeout=10)
         r.raise_for_status()
         data = r.json().get("data", [])
         if not data: return ""
-        return data[0]["raw"] if isinstance(data[0], dict) and "raw" in data[0] else (data[0].get("raw_text","") if isinstance(data[0], dict) else str(data[0]))
+        if isinstance(data[0], dict):
+            return data[0].get("raw") or data[0].get("raw_text") or ""
+        return str(data[0])
     except Exception:
         return ""
 
 @st.cache_data(ttl=90)
 def fetch_taf(icao: str) -> str:
     try:
-        r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=headers(), timeout=10)
+        r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=cw_headers(), timeout=10)
         r.raise_for_status()
         data = r.json().get("data", [])
         if not data: return ""
-        return data[0]["raw"] if isinstance(data[0], dict) and "raw" in data[0] else (data[0].get("raw_text","") if isinstance(data[0], dict) else str(data[0]))
+        if isinstance(data[0], dict):
+            return data[0].get("raw") or data[0].get("raw_text") or ""
+        return str(data[0])
     except Exception:
         return ""
 
+def awc_params() -> Dict[str,str]:
+    p: Dict[str,str] = {"loc":"eur", "format":"json"}
+    key = st.secrets.get("AWC_API_KEY","")  # opcional
+    if key:
+        p["api_key"] = key
+    return p
+
 @st.cache_data(ttl=120)
 def fetch_sigmet_lppc() -> List[str]:
+    """Busca International SIGMETs (região EUR) via AWC e filtra FIR=LPPC."""
     try:
-        r = requests.get("https://api.checkwx.com/sigmet/LPPC/decoded", headers=headers(), timeout=12)
+        r = requests.get("https://aviationweather.gov/api/data/isigmet", params=awc_params(), timeout=12)
         r.raise_for_status()
-        out = []
-        for it in r.json().get("data", []):
-            if isinstance(it, dict):
-                raw = it.get("raw") or it.get("raw_text") or it.get("report") or ""
+        data = r.json()
+        out: List[str] = []
+        # Estruturas variam; tentamos várias chaves e fallback pelo 'raw' contendo LPPC
+        for item in data if isinstance(data, list) else data.get("features", []) or []:
+            # pode vir como lista simples (json) OU geojson em features
+            obj: Dict[str,Any]
+            raw = ""
+            fir = ""
+            if isinstance(item, dict) and "properties" in item:
+                obj = item["properties"]
+                raw = obj.get("raw","") or obj.get("sigmet_text","") or ""
+                fir = (obj.get("fir","") or obj.get("firid","") or obj.get("firId","") or "").upper()
+            elif isinstance(item, dict):
+                obj = item
+                raw = obj.get("raw","") or obj.get("sigmet_text","") or ""
+                fir = (obj.get("fir","") or obj.get("firid","") or obj.get("firId","") or "").upper()
             else:
-                raw = str(it)
-            raw = (raw or "").strip()
-            if raw: out.append(raw)
+                raw = str(item)
+                fir = ""
+            text = (raw or "").strip()
+            # filtro LPPC: por campo FIR quando disponível ou por texto contendo ' LPPC ' / ' FIR LPPC '
+            if text:
+                if fir == "LPPC" or " LPPC " in f" {text} " or "FIR LPPC" in text or " LPPC FIR" in text:
+                    out.append(text)
         return out
     except Exception:
         return []
@@ -108,4 +136,5 @@ else:
     for s in sigs:
         st.markdown(f'<div class="monos">{s}</div>', unsafe_allow_html=True)
         st.markdown("---")
+
 
