@@ -1,153 +1,119 @@
+# pages/Weather.py
+# Live METAR/TAF via CheckWX (needs CHECKWX_API_KEY)
+# SIGMET LPPC via AWC International SIGMET (public)
+# Default ICAOs: LPPT, LPBJ, LEBZ. Supports ?icao=AAA or ?icao=AAA,BBB
+
+from typing import List, Dict, Any
 import streamlit as st
-import requests, time, re, json
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+import requests
 
-BASE = "https://brief-ng.ipma.pt/"
-SHOW_SIGMET = "https://brief-ng.ipma.pt/?page=showSIGMET"
+st.set_page_config(page_title="Weather (Live)", layout="wide")
 
-USER = st.secrets.get("IPMA_USER", "")
-PASS = st.secrets.get("IPMA_PASS", "")
+st.markdown("""
+<style>
+  .title { font-size: 1.9rem; font-weight: 800; margin-bottom: .25rem;}
+  .muted { color: #6b7280; margin-bottom: 1rem;}
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .card { border: 1px solid #e5e7eb; background:#fff; border-radius: 14px; padding: 14px 16px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+  .card h3 { margin: 0 0 6px; }
+  .monos { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: .95rem; white-space: pre-wrap; }
+</style>
+""", unsafe_allow_html=True)
 
-st.set_page_config(page_title="IPMA Test", layout="wide", initial_sidebar_state="collapsed")
-st.title("IPMA Auto-Login Test (SIGMET/GAMET)")
+def cw_headers() -> Dict[str,str]:
+    key = st.secrets.get("CHECKWX_API_KEY","")
+    return {"X-API-Key": key} if key else {}
 
-st.write("Diagnostics", {"has_user": bool(USER), "has_pass": bool(PASS)})
-st.code(f"SHOW_SIGMET = {SHOW_SIGMET}")
+@st.cache_data(ttl=60)
+def fetch_metar(icao: str) -> str:
+    try:
+        r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=cw_headers(), timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data: return ""
+        return data[0].get("raw") or data[0].get("raw_text","") if isinstance(data[0], dict) else str(data[0])
+    except Exception:
+        return ""
 
-HDRS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9,pt;q=0.8",
-    "Referer": BASE,
-}
+@st.cache_data(ttl=60)
+def fetch_taf(icao: str) -> str:
+    try:
+        r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=cw_headers(), timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data: return ""
+        return data[0].get("raw") or data[0].get("raw_text","") if isinstance(data[0], dict) else str(data[0])
+    except Exception:
+        return ""
 
-def looks_logged_html(html: str) -> bool:
-    h = html.lower()
-    return ("logged in as" in h) or ("logout" in h) or ("sigmet/airmet/gamet" in h) or ("saved flights" in h)
+def awc_params() -> Dict[str,str]:
+    # public endpoint; no key required
+    return {"loc":"eur", "format":"json"}
 
-def fetch_sigmet_gamet_with_session(s: requests.Session):
-    r2 = s.get(SHOW_SIGMET, timeout=12, headers=HDRS)
-    r2.raise_for_status()
-    soup = BeautifulSoup(r2.text, "html.parser")
-    content = soup.select_one("#divContent")
-    if not content:
-        st.warning("No #divContent found after login.")
-        st.code(r2.text[:800], language="html")
-        return [], []
-    for br in content.find_all("br"):
-        br.replace_with("\n")
-    text = re.sub(r"[ \t]+\n", "\n", content.get_text("\n")).strip()
-    st.subheader("Extracted text sample")
-    st.code(text[:800])
+@st.cache_data(ttl=90)
+def fetch_sigmet_lppc() -> List[str]:
+    """Fetch International SIGMETs (EUR) and filter LPPC."""
+    try:
+        r = requests.get("https://aviationweather.gov/api/data/isigmet", params=awc_params(), timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        out: List[str] = []
+        items = data if isinstance(data, list) else data.get("features", []) or []
+        for item in items:
+            props: Dict[str,Any] = {}
+            if isinstance(item, dict) and "properties" in item:
+                props = item["properties"]
+            elif isinstance(item, dict):
+                props = item
+            raw = (props.get("raw") or props.get("sigmet_text") or str(item) or "").strip()
+            fir = (props.get("fir") or props.get("firid") or props.get("firId") or "").upper()
+            if not raw: continue
+            if fir == "LPPC" or " LPPC " in f" {raw} " or "FIR LPPC" in raw or " LPPC FIR" in raw:
+                out.append(raw)
+        return out
+    except Exception:
+        return []
 
-    gamet = [m.group(0).strip() for m in re.finditer(r"(?ms)^LPPC\s+GAMET.*?(?:\n\n|$)", text)]
-    sigmet = [m.group(0).strip() for m in re.finditer(r"(?ms)^(?:LPPC\s+)?SIGMET.*?(?:\n\n|$)", text)]
-    return sigmet, gamet
+# Query params
+qp = st.query_params
+raw_icaos = qp.get("icao","")
+if isinstance(raw_icaos, list): raw_icaos = ",".join(raw_icaos)
+icaos: List[str] = []
+if raw_icaos:
+    for part in raw_icaos.split(","):
+        p = part.strip().upper()
+        if len(p)==4: icaos.append(p)
+if not icaos:
+    icaos = ["LPPT","LPBJ","LEBZ"]
 
-def try_candidates(user: str, pwd: str):
-    s = requests.Session()
-    s.headers.update(HDRS)
+st.markdown('<div class="title">Weather (Live)</div>', unsafe_allow_html=True)
+st.markdown('<div class="muted">Latest METAR, TAF and LPPC SIGMET</div>', unsafe_allow_html=True)
+st.write("Airfields:", ", ".join(icaos))
 
-    # 0) Warm-up: load page (may set lang/session)
-    r0 = s.get(SHOW_SIGMET, timeout=12, allow_redirects=True)
-    r0.raise_for_status()
+# METAR / TAF cards
+st.markdown('<div class="grid">', unsafe_allow_html=True)
+for icao in icaos:
+    metar = fetch_metar(icao)
+    taf = fetch_taf(icao)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(f"<h3>{icao}</h3>", unsafe_allow_html=True)
+    st.caption("METAR")
+    st.markdown(f'<div class="monos">{metar or "—"}</div>', unsafe_allow_html=True)
+    st.caption("TAF")
+    st.markdown(f'<div class="monos">{taf or "—"}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
-    # 1) Likely endpoints & payloads (both classic form and JSON/XHR)
-    endpoints = [
-        SHOW_SIGMET,                        # sometimes posting to same URL works
-        urljoin(SHOW_SIGMET, "?page=doLogin"),
-        urljoin(SHOW_SIGMET, "?page=login"),
-        urljoin(SHOW_SIGMET, "/login"),
-        urljoin(SHOW_SIGMET, "login"),
-        urljoin(SHOW_SIGMET, "ajax/login.php"),
-        urljoin(SHOW_SIGMET, "js/user.js"),   # some apps post here
-    ]
-    fields = [
-        ("username","password"),
-        ("user","password"),
-        ("usr","pwd"),
-    ]
-
-    attempts = []
-    for ep in endpoints:
-        for ukey, pkey in fields:
-            # Form POST
-            attempts.append(("POST", ep, {"data": {ukey: user, pkey: pwd}, "headers": {}}))
-            # GET (querystring)
-            attempts.append(("GET", ep, {"params": {ukey: user, pkey: pwd}, "headers": {}}))
-            # JSON XHR
-            attempts.append(("POST", ep, {"json": {ukey: user, pkey: pwd}, "headers": {"X-Requested-With":"XMLHttpRequest", "Content-Type":"application/json"}}))
-
-    # 2) Try them
-    for method, url, opts in attempts:
-        try:
-            if method == "GET":
-                r = s.get(url, timeout=12, allow_redirects=True, **opts)
-            else:
-                r = s.post(url, timeout=12, allow_redirects=True, **opts)
-            # If JSON came back simply note it
-            ctype = r.headers.get("content-type","")
-            ok = False
-            if "text/html" in ctype or "<html" in r.text[:200].lower():
-                ok = looks_logged_html(r.text)
-            else:
-                # Some endpoints return JSON like {"ok":true} then you must GET the page
-                try:
-                    js = r.json()
-                    ok = bool(js)  # if any response, try to proceed
-                except Exception:
-                    ok = False
-
-            st.write({"attempt": f"{method} {url}", "status": r.status_code, "ctype": ctype, "logged_html_heuristic": ok})
-            if ok:
-                # Confirm by visiting target page
-                r_check = s.get(SHOW_SIGMET, timeout=12)
-                if looks_logged_html(r_check.text):
-                    st.success(f"Logged in via: {method} {url}")
-                    st.code(r_check.text[:600], language="html")
-                    return s
-        except Exception as e:
-            st.write({"attempt": f"{method} {url}", "error": str(e)})
-            continue
-
-    # 3) Last-resort: force hash login view then reload
-    r1b = s.get(SHOW_SIGMET + "#showLogin", timeout=12, allow_redirects=True)
-    st.write({"force_showLogin_status": r1b.status_code})
-    r1c = s.get(SHOW_SIGMET, timeout=12, allow_redirects=True)
-    st.write({"after_force_status": r1c.status_code, "looks_logged": looks_logged_html(r1c.text)})
-    if looks_logged_html(r1c.text):
-        return s
-    return None
-
-if not USER or not PASS:
-    st.error("Add IPMA_USER and IPMA_PASS to .streamlit/secrets.toml")
-    st.stop()
-
-session = try_candidates(USER, PASS)
-
-if session:
-    sig, gam = fetch_sigmet_gamet_with_session(session)
-    st.subheader("SIGMET (LPPC)")
-    st.write(sig or "No active LPPC SIGMET found.")
-    st.subheader("GAMET (LPPC)")
-    st.write(gam or "No LPPC GAMET found.")
+# LPPC SIGMET
+st.divider()
+st.subheader("SIGMET (LPPC)")
+sigs = fetch_sigmet_lppc()
+if not sigs:
+    st.write("—")
 else:
-    st.error("Login did not succeed. Next step: capture the real login request (URL + fields).")
-    with st.expander("How to capture the real login request"):
-        st.markdown("""
-1. Open Firefox → **Network** tab → go to `?page=showSIGMET`.
-2. Click the **Login** button on the page (so the site sends the real request).
-3. In Network, click the request that happened **when you clicked Login** (usually **XHR**).
-4. Copy:
-   - **Request URL**
-   - **Method (GET/POST)**
-   - **Request Headers** (just `X-Requested-With` if present)
-   - **Request Body / Form Data** (the **field names** for user & password, e.g. `usr` and `pwd`)
-5. Paste those here and I’ll wire them in exactly.
-""")
-
-
+    for s in sigs:
+        st.markdown(f'<div class="monos">{s}</div>', unsafe_allow_html=True)
+        st.markdown("---")
 
 
 
