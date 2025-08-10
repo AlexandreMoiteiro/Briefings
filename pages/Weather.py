@@ -1,14 +1,25 @@
-~import streamlit as st
+import streamlit as st
 import requests
 import datetime
 
+# ==== PAGE CONFIG ====
 st.set_page_config(page_title="Live Weather", layout="wide")
 
-# ===== CONFIG =====
+# ==== HIDE SIDEBAR & FOOTER ====
+hide_streamlit_style = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    [data-testid="stSidebar"] {display: none;}
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+# ==== CONFIG ====
 CHECKWX_API_KEY = st.secrets["CHECKWX_API_KEY"]
 DEFAULT_ICAOS = ["LPPT", "LPBJ", "LEBZ"]
 
-# ===== FUNCTIONS =====
+# ==== FUNCTIONS ====
 def fetch_metar(icao):
     url = f"https://api.checkwx.com/metar/{icao}/decoded"
     headers = {"X-API-Key": CHECKWX_API_KEY}
@@ -26,21 +37,29 @@ def fetch_taf(icao):
     return None
 
 def fetch_sigmet_lppc():
-    """Fetch LPPC FIR SIGMET from Aviation Weather Center (AWC) International API"""
-    url = "https://aviationweather.gov/api/data/isigmet"
+    """
+    Fetch LPPC FIR SIGMET from Aviation Weather Center International API.
+    Filters by FIR name or ID containing 'LPPC'.
+    """
+    url = "https://aviationweather.gov/api/data/isigmet?format=json"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
             sigmets = r.json()
-            return [
-                s for s in sigmets
-                if "fir" in s and s["fir"].upper() == "LPPC"
-            ]
+            lppc_sigmets = []
+            for s in sigmets:
+                if (
+                    s.get("firname", "").upper() == "LPPC" or
+                    "LISBON" in s.get("firname", "").upper() or
+                    s.get("firid", "").upper() == "LPPC"
+                ):
+                    lppc_sigmets.append(s)
+            return lppc_sigmets
     except Exception:
         return []
     return []
 
-# ===== UI =====
+# ==== UI ====
 st.title("🌍 Live Weather - METAR / TAF / SIGMET LPPC")
 
 # ICAO input
@@ -82,6 +101,7 @@ with col3:
 
 # Timestamp
 st.caption(f"Last updated: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%SZ')} UTC")
+
 
 
 
