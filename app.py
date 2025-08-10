@@ -1,19 +1,16 @@
 # app.py
-# Flight Briefing generator — Raw (EN, no summaries) + Detailed (PT)
-# - Raw PDF: charts only + live link to Weather page for METAR/TAF/SIGMET
-# - Detailed PDF: expert Portuguese explanations of charts (GPT-5)
-# - No sidebar; clean UI
-# Secrets needed in .streamlit/secrets.toml:
-#   OPENAI_API_KEY = "sk-..."
-#   CHECKWX_API_KEY = "..."
-#
-# Weather live page lives at /Weather (see pages/Weather.py)
+# Flight Briefing generator — Raw (EN) + Detailed (PT)
+# - Per-chart type selection (SIGWX / SPC / Wind&Temp / Other)
+# - Detailed (PT): analysis per chart + overall synthesis (Portugal first, then focus Alentejo)
+# - Raw (EN): charts only + live link for METAR/TAF/SIGMET
+# - Weather page lives at /Weather and shows live METAR/TAF and LPPC SIGMET
+# Secrets: .streamlit/secrets.toml with OPENAI_API_KEY and CHECKWX_API_KEY
 
 import io
 import os
 import base64
 import tempfile
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple
 
 import streamlit as st
 from PIL import Image
@@ -21,18 +18,20 @@ from fpdf import FPDF
 import fitz  # PyMuPDF
 from openai import OpenAI
 
-APP_BASE_URL = "https://briefings.streamlit.app/Weather"
+APP_WEATHER_URL = "https://briefings.streamlit.app/Weather"  # used in RAW PDF links
 
-# ========== Setup ==========
+# ===== UI base =====
 st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown(
     """
     <style>
-      .app-title { font-size: 2rem; font-weight: 700; margin-bottom: .25rem;}
+      .app-title { font-size: 2rem; font-weight: 800; margin-bottom: .5rem;}
       .muted { color: #6b7280; }
+      .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
       .card { border: 1px solid #e5e7eb; border-radius: 14px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-      .section-title { font-weight: 700; font-size: 1.1rem; margin: 16px 0 6px; }
+      .section-title { font-weight: 700; font-size: 1.05rem; margin: 16px 0 6px; }
       .btn-row button { margin-right: 8px; }
+      .small { font-size:.9rem; color:#6b7280 }
     </style>
     """,
     unsafe_allow_html=True,
@@ -40,7 +39,7 @@ st.markdown(
 
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
-# ========== Helpers ==========
+# ===== Helpers =====
 def downscale_image(img: Image.Image, width: int = 1400) -> Tuple[Image.Image, io.BytesIO]:
     if img.width > width:
         r = width / img.width
@@ -50,88 +49,163 @@ def downscale_image(img: Image.Image, width: int = 1400) -> Tuple[Image.Image, i
     out.seek(0)
     return img, out
 
-def get_first_pdf_page_as_image(uploaded_pdf_bytes: bytes) -> Image.Image:
+def first_pdf_page(uploaded_pdf_bytes: bytes) -> Image.Image:
     doc = fitz.open(stream=uploaded_pdf_bytes, filetype="pdf")
     page = doc.load_page(0)
     png = page.get_pixmap(dpi=200).tobytes("png")
     return Image.open(io.BytesIO(png)).convert("RGB").copy()
 
-# ========== GPT-5 (Detailed analysis, Portuguese) ==========
-def gpt5_chart_explainer_pt(kind: str, focus: str, img_b64: str) -> str:
+# ===== GPT-5 — chart-specific explainers (PT) =====
+def gpt5_sigwx_pt(focus: str, img_b64: str) -> str:
     sys = (
-        "És meteorologista aeronáutico sénior. Analisa o chart fornecido em português, em texto corrido, "
-        "sem listas, explicando exatamente o que se vê e o que implica para o voo. "
-        "Usa apenas informação visível. Se algo estiver ilegível, diz que está ilegível e não faças suposições."
+        "És meteorologista aeronáutico sénior. Explica o chart SIGWX em português, em texto corrido (sem listas), "
+        "usando apenas o que está visível. Se algo estiver ilegível, diz que está ilegível e não infiras."
     )
     user = (
-        f"Chart: {kind}. Foco/região: {focus}. "
-        "Explica frentes, níveis de nuvens, jatos, turbulência/gelo, simbologia, FL/UTC e contexto operacional."
+        f"Foco/região: {focus}. Cobre frentes, tipos/níveis de nuvens, convecção, "
+        "turbulência/icing, níveis de congelamento, jatos, FL/UTC, símbolos e notas."
     )
-    content = [
-        {"type": "input_text", "text": user},
-        {"type": "input_image", "image_data": img_b64, "mime_type": "image/png"},
-    ]
     try:
         resp = client.responses.create(
             model="gpt-5",
             input=[
-                {"role": "system", "content": [{"type":"input_text","text": sys}]},
-                {"role": "user", "content": content},
+                {"role":"system","content":[{"type":"input_text","text":sys}]},
+                {"role":"user","content":[
+                    {"type":"input_text","text":user},
+                    {"type":"input_image","image_data":img_b64,"mime_type":"image/png"}
+                ]}
             ],
-            max_output_tokens=1500,
-            temperature=0.15,
+            max_output_tokens=1400,
+            temperature=0.14,
         )
         return (resp.output_text or "").strip()
     except Exception as e:
-        return f"Não foi possível gerar a análise agora (erro: {e})."
+        return f"Não foi possível gerar análise SIGWX (erro: {e})."
 
-# ========== PDF classes ==========
+def gpt5_spc_pt(focus: str, img_b64: str) -> str:
+    sys = (
+        "És meteorologista aeronáutico sénior. Interpreta um Surface Pressure Chart (SPC) em texto corrido, "
+        "usando só o que está visível; assinala incertezas sem extrapolar."
+    )
+    user = (
+        f"Foco/região: {focus}. Explica isóbaras/gradiente, centros A/B, frentes e implicações, "
+        "padrões de vento, símbolos/zonas e validade UTC."
+    )
+    try:
+        resp = client.responses.create(
+            model="gpt-5",
+            input=[
+                {"role":"system","content":[{"type":"input_text","text":sys}]},
+                {"role":"user","content":[
+                    {"type":"input_text","text":user},
+                    {"type":"input_image","image_data":img_b64,"mime_type":"image/png"}
+                ]}
+            ],
+            max_output_tokens=1200,
+            temperature=0.14,
+        )
+        return (resp.output_text or "").strip()
+    except Exception as e:
+        return f"Não foi possível gerar análise SPC (erro: {e})."
+
+def gpt5_windtemp_pt(focus: str, img_b64: str) -> str:
+    sys = (
+        "És meteorologista aeronáutico sénior. Explica o chart de Vento e Temperatura em português, em prosa, "
+        "usando só dados visíveis."
+    )
+    user = (
+        f"Foco/região: {focus}. Resume direção/velocidade por níveis, temperaturas, eixos/força de jet streams, "
+        "marcadores de turbulência/gelo, níveis representados e validade."
+    )
+    try:
+        resp = client.responses.create(
+            model="gpt-5",
+            input=[
+                {"role":"system","content":[{"type":"input_text","text":sys}]},
+                {"role":"user","content":[
+                    {"type":"input_text","text":user},
+                    {"type":"input_image","image_data":img_b64,"mime_type":"image/png"}
+                ]}
+            ],
+            max_output_tokens=1200,
+            temperature=0.14,
+        )
+        return (resp.output_text or "").strip()
+    except Exception as e:
+        return f"Não foi possível gerar análise Wind/Temp (erro: {e})."
+
+def gpt5_overview_pt(images_b64: List[str]) -> str:
+    """Synthesis across all charts: Portugal (geral) then foco Alentejo."""
+    sys = (
+        "És meteorologista aeronáutico sénior. Vais fazer uma síntese a partir de múltiplos charts. "
+        "Primeiro descreve a situação geral sobre Portugal, depois faz um foco específico no Alentejo. "
+        "Escreve em parágrafos corridos, objetivos e operacionais. Usa só o que é visível."
+    )
+    user = "Tarefa: 1) Análise geral de Portugal. 2) Foco no Alentejo (detalhes, riscos, níveis)."
+    content = [{"type":"input_text","text":user}]
+    for b64 in images_b64:
+        content.append({"type":"input_image","image_data":b64,"mime_type":"image/png"})
+    try:
+        resp = client.responses.create(
+            model="gpt-5",
+            input=[
+                {"role":"system","content":[{"type":"input_text","text":sys}]},
+                {"role":"user","content":content}
+            ],
+            max_output_tokens=1600,
+            temperature=0.14,
+        )
+        return (resp.output_text or "").strip()
+    except Exception as e:
+        return f"Não foi possível gerar a síntese (erro: {e})."
+
+# ===== PDFs =====
 class RawPDF(FPDF):
     def header(self): pass
     def footer(self): pass
-
     def cover(self, mission: str):
         self.add_page(orientation="L")
-        self.set_xy(0, 60)
-        self.set_font("Arial", "B", 30)
-        self.cell(0, 18, "Weather Briefing (RAW)", ln=True, align="C")
-        self.ln(6)
-        self.set_font("Arial", "", 14)
-        self.cell(0, 10, f"Mission: {mission}", ln=True, align="C")
-        self.ln(12)
-
+        self.set_xy(0, 58)
+        self.set_font("Arial","B",30)
+        self.cell(0,18,"Weather Briefing (RAW)", ln=True, align="C")
+        self.ln(4)
+        self.set_font("Arial","",13)
+        self.cell(0,8,f"Mission: {mission}", ln=True, align="C")
+        self.ln(10)
     def live_links(self, icaos: List[str], base_url: str):
-        if not icaos: return
         self.add_page(orientation="P")
-        self.set_font("Arial", "B", 18)
-        self.cell(0, 12, "Current METAR / TAF / SIGMET", ln=True, align="C")
+        self.set_font("Arial","B",18)
+        self.cell(0,12,"Current METAR / TAF / SIGMET", ln=True, align="C")
+        self.set_font("Arial","",12)
         self.ln(4)
-        self.set_font("Arial", "", 12)
-        self.multi_cell(0, 8, "This briefing intentionally omits time-sensitive METAR/TAF/SIGMET text. "
-                               "Use the live link(s) below to see the latest data at the time of review.")
-        self.ln(4)
-        for icao in sorted(set([i.upper() for i in icaos])):
-            url = f"{base_url}?icao={icao}"
-            # FPDF doesn't support real hyperlinks without link zones; we include the URL text (clickable in most viewers).
-            self.set_font("Arial", "B", 12)
-            self.cell(0, 8, f"{icao}: {url}", ln=True)
-
+        self.multi_cell(0,7,"This document intentionally omits time-sensitive METAR/TAF/SIGMET text. "
+                            "Use the live links below for the latest conditions.")
+        self.ln(2)
+        unique = sorted({i.upper() for i in icaos if i.strip()})
+        if unique:
+            for icao in unique:
+                url = f"{base_url}?icao={icao}"
+                self.set_font("Arial","B",12)
+                self.cell(0,8,f"{icao}: {url}", ln=True)
+        else:
+            url = f"{base_url}"
+            self.set_font("Arial","B",12)
+            self.cell(0,8,f"{url}", ln=True)
     def chart_fullpage(self, title: str, subtitle: str, img_bytes: io.BytesIO):
         self.add_page(orientation="L")
-        self.set_font("Arial", "B", 18)
-        self.cell(0, 10, title, ln=True, align="C")
+        self.set_font("Arial","B",18)
+        self.cell(0,10,title, ln=True, align="C")
         if subtitle:
-            self.set_font("Arial", "I", 13)
-            self.cell(0, 8, subtitle, ln=True, align="C")
-        self.ln(2)
+            self.set_font("Arial","I",12)
+            self.cell(0,8,subtitle, ln=True, align="C")
         max_w = self.w - 30
         max_h = self.h - 50
         img = Image.open(img_bytes)
         iw, ih = img.size
-        r = min(max_w / iw, max_h / ih)
-        w, h = int(iw * r), int(ih * r)
-        x = (self.w - w) // 2
-        y = self.get_y()
+        r = min(max_w/iw, max_h/ih)
+        w, h = int(iw*r), int(ih*r)
+        x = (self.w - w)//2
+        y = self.get_y() + 4
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             img.save(tmp, format="PNG")
             path = tmp.name
@@ -141,110 +215,132 @@ class RawPDF(FPDF):
 class DetailedPDF(FPDF):
     def header(self): pass
     def footer(self): pass
-
     def cover(self, mission: str):
         self.add_page(orientation="L")
-        self.set_xy(0, 60)
-        self.set_font("Arial", "B", 30)
-        self.cell(0, 18, "Briefing Detalhado (PT)", ln=True, align="C")
-        self.ln(6)
-        self.set_font("Arial", "", 14)
-        self.cell(0, 10, f"Missão: {mission}", ln=True, align="C")
-        self.ln(12)
-
+        self.set_xy(0, 58)
+        self.set_font("Arial","B",30)
+        self.cell(0,18,"Briefing Detalhado (PT)", ln=True, align="C")
+        self.ln(4)
+        self.set_font("Arial","",13)
+        self.cell(0,8,f"Missão: {mission}", ln=True, align="C")
+        self.ln(10)
     def chart_explained(self, title: str, subtitle: str, img_bytes: io.BytesIO, analysis_pt: str):
         self.add_page(orientation="L")
-        self.set_font("Arial", "B", 18)
-        self.cell(0, 10, title, ln=True, align="C")
+        self.set_font("Arial","B",18)
+        self.cell(0,10,title, ln=True, align="C")
         if subtitle:
-            self.set_font("Arial", "I", 13)
-            self.cell(0, 8, subtitle, ln=True, align="C")
-        self.ln(2)
+            self.set_font("Arial","I",12)
+            self.cell(0,8,subtitle, ln=True, align="C")
         max_w = self.w - 30
-        max_h = (self.h // 2) - 20
+        max_h = (self.h // 2) - 18
         img = Image.open(img_bytes)
         iw, ih = img.size
-        r = min(max_w / iw, max_h / ih)
-        w, h = int(iw * r), int(ih * r)
-        x = (self.w - w) // 2
-        y = self.get_y()
+        r = min(max_w/iw, max_h/ih)
+        w, h = int(iw*r), int(ih*r)
+        x = (self.w - w)//2
+        y = self.get_y() + 4
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             img.save(tmp, format="PNG")
             path = tmp.name
         self.image(path, x=x, y=y, w=w, h=h)
         os.remove(path)
         self.ln(h + 6)
-        self.set_font("Arial", "", 12)
-        self.multi_cell(0, 7, analysis_pt)
+        self.set_font("Arial","",12)
+        self.multi_cell(0,7,analysis_pt)
+    def synthesis_pages(self, text_pt: str):
+        # Portugal (geral) + Alentejo (no mesmo texto, em sequência)
+        self.add_page(orientation="P")
+        self.set_font("Arial","B",18)
+        self.cell(0,12,"Síntese Geral (Portugal) e Foco no Alentejo", ln=True, align="C")
+        self.set_font("Arial","",12)
+        self.ln(2)
+        self.multi_cell(0,7,text_pt)
 
-# ========== UI ==========
+# ===== Page UI =====
 st.markdown('<div class="app-title">Flight Briefings</div>', unsafe_allow_html=True)
 st.markdown('<div class="muted">Raw (EN) for instructor • Detailed (PT) for prep</div>', unsafe_allow_html=True)
 st.divider()
 
-# Upload charts
-st.markdown('<div class="section-title">Charts</div>', unsafe_allow_html=True)
-st.caption("Upload SIGWX / Wind & Temp / Surface Pressure charts (PDF or image).")
-files = st.file_uploader("Upload charts", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True, label_visibility="collapsed")
-
-# ICAOs for live links
-st.markdown('<div class="section-title">Aerodromes for live weather</div>', unsafe_allow_html=True)
+# Default aerodromes used in weather link and your live page
 default_icaos = ["LPPT", "LPBJ", "LEBZ"]
-icaos_text = st.text_input("ICAOs (comma-separated)", value=",".join(default_icaos))
+icaos_text = st.text_input("ICAOs for live weather (comma-separated)", value=",".join(default_icaos))
 icaos = [i.strip().upper() for i in icaos_text.split(",") if i.strip()]
 
-# Mission / notes
-colA, colB = st.columns([0.6, 0.4])
-with colA:
-    mission = st.text_input("Mission / Remarks", value="")
-with colB:
-    st.markdown('<div class="btn-row">', unsafe_allow_html=True)
-    gen_both = st.button("Generate PDFs", use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Charts</div>', unsafe_allow_html=True)
+st.caption("Upload SIGWX / Wind & Temp / Surface Pressure charts (PDF or image). Choose the type for best analysis.")
+uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg"], accept_multiple_files=True, label_visibility="collapsed")
 
-# Prepare charts
-charts: List[Dict[str, Any]] = []
-if files:
-    for f in files:
+# Build chart list with per-item controls
+chart_items: List[Dict[str,Any]] = []
+if uploads:
+    for idx, f in enumerate(uploads):
         try:
             if f.type == "application/pdf":
-                img = get_first_pdf_page_as_image(f.read())
+                img = first_pdf_page(f.read())
             else:
                 img = Image.open(f).convert("RGB").copy()
             _, img_bytes = downscale_image(img)
-            # Guess type by filename
-            name = (f.name or "").lower()
-            if "sigwx" in name:
-                title = "Significant Weather Chart (SIGWX)"
-            elif "wind" in name or "temp" in name:
-                title = "Wind and Temperature Chart"
-            elif "pressure" in name or "spc" in name:
-                title = "Surface Pressure Chart (SPC)"
-            else:
-                title = "Weather Chart"
-            charts.append({"title": title, "subtitle": "", "img_bytes": img_bytes})
+
+            with st.container():
+                col1, col2, col3 = st.columns([0.35, 0.35, 0.3])
+                with col1:
+                    kind = st.selectbox(
+                        f"Chart type (#{idx+1})",
+                        ["SIGWX","Surface Pressure (SPC)","Wind & Temp","Other"],
+                        index=0 if "sigwx" in (f.name or "").lower() else (1 if "spc" in (f.name or "").lower() or "press" in (f.name or "").lower() else (2 if "wind" in (f.name or "").lower() or "temp" in (f.name or "").lower() else 0)),
+                        key=f"kind_{idx}"
+                    )
+                with col2:
+                    title = st.text_input("Title", value=kind if kind!="Other" else "Weather Chart", key=f"title_{idx}")
+                with col3:
+                    subtitle = st.text_input("Subtitle (optional)", value="", key=f"subtitle_{idx}")
+            chart_items.append({"kind": kind, "title": title, "subtitle": subtitle, "img_bytes": img_bytes})
         except Exception as e:
             st.error(f"Failed to read {f.name}: {e}")
 
-# Generate PDFs
-if gen_both:
-    # RAW (EN) — charts only + live link
+st.markdown('<div class="section-title">Mission / Notes</div>', unsafe_allow_html=True)
+mission = st.text_input("Mission / Remarks", value="")
+
+st.markdown('<div class="btn-row">', unsafe_allow_html=True)
+gen_btn = st.button("Generate RAW (EN) + DETAILED (PT)", type="primary")
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ===== Generate PDFs =====
+if gen_btn:
+    # RAW: charts + live links
     raw_pdf = RawPDF()
     raw_pdf.cover(mission or "")
-    raw_pdf.live_links(icaos, APP_BASE_URL)
-    for ch in charts:
+    raw_pdf.live_links(icaos, APP_WEATHER_URL)
+    for ch in chart_items:
         raw_pdf.chart_fullpage(ch["title"], ch.get("subtitle",""), ch["img_bytes"])
     raw_name = "briefing_raw.pdf"
     raw_pdf.output(raw_name)
 
-    # DETAILED (PT) — add AI explanations
+    # DETAILED: per-chart + synthesis (Portugal -> Alentejo)
     det_pdf = DetailedPDF()
     det_pdf.cover(mission or "")
-    for ch in charts:
+
+    all_b64: List[str] = []
+    for ch in chart_items:
         img_b64 = base64.b64encode(ch["img_bytes"].getvalue()).decode("utf-8")
-        kind = ch["title"]
-        analysis_pt = gpt5_chart_explainer_pt(kind, "Portugal e áreas adjacentes", img_b64)
-        det_pdf.chart_explained(ch["title"], ch.get("subtitle",""), ch["img_bytes"], analysis_pt)
+        all_b64.append(img_b64)
+        kind = ch["kind"]
+        if kind == "SIGWX":
+            analysis = gpt5_sigwx_pt("Portugal e áreas adjacentes", img_b64)
+        elif kind == "Surface Pressure (SPC)":
+            analysis = gpt5_spc_pt("Portugal e áreas adjacentes", img_b64)
+        elif kind == "Wind & Temp":
+            analysis = gpt5_windtemp_pt("Portugal e áreas adjacentes", img_b64)
+        else:
+            # fallback: treat as SIGWX-style narrative
+            analysis = gpt5_sigwx_pt("Portugal e áreas adjacentes", img_b64)
+        det_pdf.chart_explained(ch["title"], ch.get("subtitle",""), ch["img_bytes"], analysis)
+
+    # Overview / Synthesis: Portugal first, then Alentejo
+    if all_b64:
+        synthesis = gpt5_overview_pt(all_b64)
+        det_pdf.synthesis_pages(synthesis)
+
     det_name = "briefing_detalhado.pdf"
     det_pdf.output(det_name)
 
@@ -256,14 +352,12 @@ if gen_both:
         with open(det_name, "rb") as f:
             st.download_button("Download DETALHADO (PT)", f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
 
-# Quick link to Weather page
 st.divider()
 st.markdown("**Live Weather page:**")
 if len(icaos) == 1:
-    st.write(f"{APP_BASE_URL}?icao={icaos[0]}")
+    st.write(f"{APP_WEATHER_URL}?icao={icaos[0]}")
 else:
-    # default link (shows LPPT, LPBJ, LEBZ by default)
-    st.write(APP_BASE_URL)
+    st.write(APP_WEATHER_URL)
 
 
 
