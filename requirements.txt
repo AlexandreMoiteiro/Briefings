@@ -9,3 +9,7 @@ pytz
 pdfrw==0.4
 pypdf>=4.2.0
 reportlab
+
+pandas>=2.0
+folium>=0.15
+streamlit-folium>=0.20
