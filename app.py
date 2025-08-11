@@ -76,53 +76,94 @@ def ensure_png_bytes(uploaded):
 def b64_png(img_bytes: io.BytesIO) -> str:
     return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
-# ---------- CheckWX helpers ----------
+# ---------- Weather/NOTAM helpers (CheckWX primary + AVWX fallback) ----------
 
 def cw_headers() -> Dict[str,str]:
-    key = st.secrets.get("CHECKWX_API_KEY","")
+    key = st.secrets.get("CHECKWX_API_KEY", "").strip()
     return {"X-API-Key": key} if key else {}
 
+def avwx_headers() -> Dict[str,str]:
+    token = (st.secrets.get("AVWX_TOKEN") or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+# --- METAR ---
 
 def fetch_metar_now(icao: str) -> str:
+    """METAR from CheckWX, fallback to AVWX. Returns RAW string or empty."""
+    # Try CheckWX
     try:
-        r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=cw_headers(), timeout=10)
-        r.raise_for_status(); data = r.json().get("data", [])
-        if not data: return ""
-        return data[0].get("raw") or data[0].get("raw_text","") if isinstance(data[0], dict) else str(data[0])
-    except Exception: return ""
+        if cw_headers():
+            r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=cw_headers(), timeout=10)
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            if data:
+                return (data[0].get("raw") or data[0].get("raw_text") or "") if isinstance(data[0], dict) else str(data[0])
+    except Exception:
+        pass
+    # Fallback AVWX
+    try:
+        if avwx_headers():
+            r = requests.get(f"https://avwx.rest/api/metar/{icao}", headers=avwx_headers(), params={"format":"json"}, timeout=10)
+            r.raise_for_status()
+            j = r.json() or {}
+            return (j.get("raw") or j.get("sanitized") or "")
+    except Exception:
+        pass
+    return ""
 
+# --- TAF ---
 
 def fetch_taf_now(icao: str) -> str:
+    """TAF from CheckWX, fallback to AVWX. Returns RAW string or empty."""
+    # Try CheckWX
     try:
-        r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=cw_headers(), timeout=10)
-        r.raise_for_status(); data = r.json().get("data", [])
-        if not data: return ""
-        return data[0].get("raw") or data[0].get("raw_text","") if isinstance(data[0], dict) else str(data[0])
-    except Exception: return ""
+        if cw_headers():
+            r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=cw_headers(), timeout=10)
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            if data:
+                return (data[0].get("raw") or data[0].get("raw_text") or "") if isinstance(data[0], dict) else str(data[0])
+    except Exception:
+        pass
+    # Fallback AVWX
+    try:
+        if avwx_headers():
+            r = requests.get(f"https://avwx.rest/api/taf/{icao}", headers=avwx_headers(), params={"format":"json"}, timeout=10)
+            r.raise_for_status()
+            j = r.json() or {}
+            return (j.get("raw") or j.get("sanitized") or "")
+    except Exception:
+        pass
+    return ""
 
+# --- NOTAMs (AVWX) ---
 
 def fetch_notams(icao: str) -> List[str]:
-    """Fetch NOTAMs for an ICAO. Returns list of raw strings. Robust to different payload shapes."""
+    """NOTAMs via AVWX. Requires AVWX_TOKEN in secrets. Returns list of raw strings."""
     try:
+        if not avwx_headers():
+            return []
         r = requests.get(
-            f"https://api.checkwx.com/notam/{icao}", headers=cw_headers(), timeout=15
+            f"https://avwx.rest/api/notam/{icao}",
+            headers=avwx_headers(),
+            params={"format": "json"},
+            timeout=15,
         )
         r.raise_for_status()
-        j = r.json()
-        arr = j.get("data", []) if isinstance(j, dict) else (j or [])
+        data = r.json() or []
         out: List[str] = []
-        for it in arr:
+        for it in data:
             if isinstance(it, str):
                 raw = it.strip()
-                if raw: out.append(raw)
-            elif isinstance(it, dict):
-                raw = (it.get("raw") or it.get("text") or it.get("notam") or it.get("message") or "")
-                if raw: out.append(str(raw).strip())
+            else:
+                raw = (it.get("raw") or it.get("text") or it.get("notam") or "").strip()
+            if raw:
+                out.append(raw)
         return out
     except Exception:
         return []
 
-# ---------- SIGMET LPPC (AWC) ----------
+# ---------- SIGMET LPPC (AWC) ---------- (AWC) ----------
 
 def fetch_sigmet_lppc_auto() -> List[str]:
     try:
@@ -581,6 +622,7 @@ st.divider()
 # st.markdown(f"**Live NOTAMs:** {APP_NOTAMS_URL}")
 # st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
 # st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
+
 
 
 
