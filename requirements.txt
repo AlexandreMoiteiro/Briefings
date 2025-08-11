@@ -6,4 +6,6 @@ requests
 openai>=1.40.0
 
 pytz
-pdfrw
+pdfrw==0.4
+pypdf>=4.2.0
+reportlab
