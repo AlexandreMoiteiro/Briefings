@@ -1,3 +1,4 @@
+# -------------------------------
 # pages/NOTAMs.py — AVWX (NOTAMs)
 # -------------------------------
 from typing import Dict, Any, List
