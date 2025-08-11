@@ -8,7 +8,7 @@ openai>=1.40.0
 pytz
 pdfrw==0.4
 pypdf>=4.2.0
-reportlab
+fpdf2
 
 pandas>=2.0
 folium>=0.15
