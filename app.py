@@ -1,7 +1,7 @@
 # app.py
-# Briefings — Detailed (PT) early; Final Briefing (EN) later (with future M&B/Performance)
+# Briefings — Detailed (PT) early; Final Briefing (EN) later (Charts + Flight Plan + M&B PDF)
 from typing import Dict, Any, List, Tuple
-import io, os, base64, tempfile, unicodedata, json
+import io, os, re, base64, tempfile, unicodedata, json
 import streamlit as st
 from pathlib import Path
 from PIL import Image
@@ -14,6 +14,7 @@ from openai import OpenAI
 APP_WEATHER_URL = "https://briefings.streamlit.app/Weather"
 APP_NOTAMS_URL  = "https://briefings.streamlit.app/NOTAMs"
 APP_VFRMAP_URL  = "https://briefings.streamlit.app/VFRMap"
+APP_MNB_URL     = "https://briefings.streamlit.app/MassBalance"  # se a tua página tiver outro nome/URL, ajusta aqui
 
 # ---------- Page & styles ----------
 st.set_page_config(page_title="Briefings", layout="wide")
@@ -35,7 +36,13 @@ client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 def ascii_safe(text: str) -> str:
     if text is None: return ""
     t = unicodedata.normalize("NFKD", str(text)).encode("ascii","ignore").decode("ascii")
-    return (t.replace("\u00A0"," ").replace("\u2009"," ").replace("\u2013","-").replace("\u2014","-").replace("\uFEFF",""))
+    return (t.replace("\u00A0"," ").replace("\u2009"," ").replace("\u2013","-")
+             .replace("\u2014","-").replace("\uFEFF",""))
+
+# ---------- ICAO parser (vírgulas, espaços e quebras de linha) ----------
+def parse_icaos(s: str) -> List[str]:
+    tokens = re.split(r"[,\s]+", (s or "").strip(), flags=re.UNICODE)
+    return [t.upper() for t in tokens if t]
 
 # ---------- Image helpers ----------
 def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 300):
@@ -151,22 +158,60 @@ def load_gamet_from_gist() -> Dict[str,Any]:
     except Exception:
         return {"text":"", "updated_utc":None}
 
+# ---------- GPT wrapper (texto) com fallback ----------
+def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1200) -> str:
+    """
+    Tenta Responses API. Se vier vazio/erro, faz fallback para Chat Completions (texto).
+    """
+    # 1) Responses
+    last_err = ""
+    try:
+        r = client.responses.create(
+            model="gpt-5",
+            input=[
+                {"role":"system","content":[{"type":"input_text","text":prompt_system}]},
+                {"role":"user","content":[{"type":"input_text","text":prompt_user}]},
+            ],
+            max_output_tokens=max_tokens
+        )
+        out = getattr(r, "output_text", None)
+        if out and out.strip():
+            return ascii_safe(out.strip())
+        last_err = "(responses returned empty)"
+    except Exception as e:
+        last_err = f"(responses) {e}"
+
+    # 2) Fallback Chat Completions (texto)
+    try:
+        r2 = client.chat.completions.create(
+            model="gpt-5",
+            messages=[
+                {"role":"system","content":prompt_system},
+                {"role":"user","content":prompt_user},
+            ],
+            max_tokens=max_tokens
+        )
+        content = r2.choices[0].message.content
+        if content and content.strip():
+            return ascii_safe(content.strip())
+        return ascii_safe(f"Falha na interpretacao: {last_err}; fallback chat vazio")
+    except Exception as e2:
+        return ascii_safe(f"Falha na interpretacao: {last_err}; fallback chat: {e2}")
+
 # ---------- Analyses (PT) ----------
 def analyze_chart_pt(kind: str, img_b64: str) -> str:
     sys = (
         "Es meteorologista aeronautico senior. Analisa o chart fornecido em portugues, SEM listas: "
-        "Escreve prosa corrida estruturada em 3 blocos claramente separados por paragrafo: "
-        "1) Visao geral; 2) Portugal; 3) Alentejo. "
-        "Adicionalmente, identifica e NOMEIA simbolos e anotacoes relevantes (ex.: turbulencia leve/moderada/severa, gelo/icing, "
-        "obscuracao de montanha, trovoada/TS/CB, jet streams (direcao, nucleo, intensidade), frentes (quente/fria/oclusao), "
-        "tops/bases (com FL), ondas orograficas, linhas de squall, isobara/gradiente (em SPC), setas de vento/velocidade (em Wind/Temp), "
-        "janelas temporais/validade/horarios, e qualquer codigo abreviado. "
-        "Desambigua numeros (FL vs horas) com base no contexto; usa apenas informacao visivel no chart. "
-        "Foca o impacto operacional (altitudes afetadas, rotas, niveis a evitar, alternantes). Nao inventes."
+        "Prosa corrida em 3 blocos (paragrafos distintos): 1) Visao geral; 2) Portugal; 3) Alentejo. "
+        "Identifica e NOMEIA simbolos/anotacoes (turbulencia L/M/S; gelo/icing; obscuracao de montanha; "
+        "TS/CB; jet streams com direcao/nucleo/velocidade; frentes (quente/fria/oclusao); tops/bases com FL; "
+        "ondas orograficas; linhas de squall; isobaras/gradiente; setas de vento/velocidade; janelas temporais/validade). "
+        "Desambigua numeros (FL vs horas) pelo contexto. Usa apenas conteudo visivel e conclui com impacto operacional "
+        "(niveis a evitar, rotas afetadas, alternantes recomendados). Nao inventes."
     )
     user = f"Tipo de chart: {kind}. Forneco imagem; faz a analise acima."
     try:
-        resp = client.responses.create(
+        r = client.responses.create(
             model="gpt-5",
             input=[
                 {"role":"system","content":[{"type":"input_text","text":sys}]},
@@ -175,9 +220,9 @@ def analyze_chart_pt(kind: str, img_b64: str) -> str:
                     {"type":"input_image","image_data":img_b64,"mime_type":"image/png"}
                 ]},
             ],
-            max_output_tokens=1600  # sem temperature
+            max_output_tokens=1600
         )
-        return ascii_safe((resp.output_text or "").strip())
+        return ascii_safe((r.output_text or "").strip())
     except Exception as e:
         return ascii_safe(f"Nao foi possivel analisar o chart (erro: {e}).")
 
@@ -185,50 +230,17 @@ def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
     sys = ("Es meteorologista aeronautico senior. Em PT e texto corrido, interpreta METAR e TAF, "
            "explicando codigos e impacto operacional para voo. Usa apenas o texto fornecido.")
     user = f"Aerodromo {icao}\nMETAR:\n{metar}\n\nTAF:\n{taf}"
-    try:
-        resp = client.responses.create(
-            model="gpt-5",
-            input=[
-                {"role":"system","content":[{"type":"input_text","text":sys}]},
-                {"role":"user","content":[{"type":"input_text","text":user}]}
-            ],
-            max_output_tokens=1200
-        )
-        return ascii_safe((resp.output_text or "").strip())
-    except Exception as e:
-        return ascii_safe(f"Nao foi possivel interpretar METAR/TAF (erro: {e}).")
+    return gpt_text(sys, user, max_tokens=1200)
 
 def analyze_sigmet_pt(sigmet_text: str) -> str:
     sys = ("Es meteorologista aeronautico senior. Em PT e prosa corrida, interpreta o SIGMET LPPC: "
            "fenomeno, area, niveis/FL, validade/horas, movimento/intensidade, e impacto operacional.")
-    try:
-        resp = client.responses.create(
-            model="gpt-5",
-            input=[
-                {"role":"system","content":[{"type":"input_text","text":sys}]},
-                {"role":"user","content":[{"type":"input_text","text":sigmet_text}]}
-            ],
-            max_output_tokens=900
-        )
-        return ascii_safe((resp.output_text or "").strip())
-    except Exception as e:
-        return ascii_safe(f"Nao foi possivel interpretar o SIGMET (erro: {e}).")
+    return gpt_text(sys, sigmet_text, max_tokens=900)
 
 def analyze_gamet_pt(gamet_text: str) -> str:
     sys = ("Es meteorologista aeronautico senior. Em PT e texto corrido, explica o GAMET LPPC: "
            "fenomenos, niveis, areas e impacto operacional. Usa apenas o texto fornecido.")
-    try:
-        resp = client.responses.create(
-            model="gpt-5",
-            input=[
-                {"role":"system","content":[{"type":"input_text","text":sys}]},
-                {"role":"user","content":[{"type":"input_text","text":gamet_text}]}
-            ],
-            max_output_tokens=1200
-        )
-        return ascii_safe((resp.output_text or "").strip())
-    except Exception as e:
-        return ascii_safe(f"Nao foi possivel interpretar o GAMET (erro: {e}).")
+    return gpt_text(sys, gamet_text, max_tokens=1200)
 
 def analyze_notams_pt(icao: str, notams_raw: List[str]) -> str:
     text = "\n\n".join(notams_raw).strip()
@@ -238,18 +250,7 @@ def analyze_notams_pt(icao: str, notams_raw: List[str]) -> str:
            "enfatizando impacto operacional (pistas/taxiways/iluminacao/NAVAIDs/horarios/restricoes), "
            "periodos de validade e recomendacoes. Nao inventes.")
     user = f"Aerodromo {icao} — NOTAMs RAW:\n{text}"
-    try:
-        resp = client.responses.create(
-            model="gpt-5",
-            input=[
-                {"role":"system","content":[{"type":"input_text","text":sys}]},
-                {"role":"user","content":[{"type":"input_text","text":user}]}
-            ],
-            max_output_tokens=1000
-        )
-        return ascii_safe((resp.output_text or "").strip())
-    except Exception as e:
-        return ascii_safe(f"Nao foi possivel interpretar os NOTAMs (erro: {e}).")
+    return gpt_text(sys, user, max_tokens=1000)
 
 # ---------- PDF helpers ----------
 PASTEL = (90,127,179)  # azul suave
@@ -267,6 +268,15 @@ def place_image_full(pdf: FPDF, png_bytes: io.BytesIO, max_h_pad: int=58):
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         img.save(tmp, format="PNG"); path = tmp.name
     pdf.image(path, x=x, y=y, w=w, h=h); os.remove(path); pdf.ln(h+10)
+
+def pdf_embed_first_page(pdf: FPDF, pdf_bytes: bytes, title: str):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = doc.load_page(0)
+    png = page.get_pixmap(dpi=300).tobytes("png")
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    bio = io.BytesIO(); img.save(bio, format="PNG"); bio.seek(0)
+    pdf.add_page(orientation="L"); draw_header(pdf, ascii_safe(title))
+    place_image_full(pdf, bio)
 
 class DetailedPDF(FPDF):
     def header(self): pass
@@ -287,7 +297,6 @@ class DetailedPDF(FPDF):
         self.set_text_color(0,0,0)
 
     def metar_taf_block(self, analyses: List[Tuple[str,str]]):
-        if not analyses: return
         self.add_page(orientation="P"); draw_header(self,"METAR / TAF — Interpretacao (PT)")
         self.set_font("Helvetica","",12); self.ln(2)
         for icao, text in analyses:
@@ -373,14 +382,16 @@ class FinalBriefPDF(FPDF):
 
 # ---------- UI: header & quick links ----------
 st.markdown('<div class="app-title">Briefings</div>', unsafe_allow_html=True)
-links = st.columns(3)
+links = st.columns(4)
 with links[0]:
     st.page_link("pages/Weather.py", label="Open Weather (Live) 🌤️")
 with links[1]:
     st.page_link("pages/NOTAMs.py", label="Open NOTAMs (Live) 📄")
 with links[2]:
-    # VFR Map app já existe (ativo)
     st.page_link("pages/VFRMap.py", label="Open VFR Map 🗺️")
+with links[3]:
+    # se a tua app de M&B for noutra URL/app, podes usar st.link_button(APP_MNB_URL, "Open Mass & Balance / Performance ✈️")
+    st.page_link("pages/MassBalance.py", label="Mass & Balance / Performance ✈️")
 
 st.divider()
 
@@ -397,15 +408,15 @@ with colC:
     flight_date = st.date_input("Flight date")
     time_utc = st.text_input("UTC time", "")
 
-# ---------- ICAOs para METAR/TAF e NOTAMs ----------
+# ---------- ICAOs ----------
 st.markdown("#### Aerodromes")
 c1, c2 = st.columns(2)
 with c1:
-    icaos_metar_str = st.text_input("ICAO list for METAR/TAF (comma-separated)", value="LPPT, LPBJ, LEBZ")
-    icaos_metar = [x.strip().upper() for x in icaos_metar_str.split(",") if x.strip()]
+    icaos_metar_str = st.text_input("ICAO list for METAR/TAF (comma / space / newline)", value="LPPT, LPBJ, LEBZ")
+    icaos_metar = parse_icaos(icaos_metar_str)
 with c2:
-    icaos_notam_str = st.text_input("ICAO list for NOTAMs (comma-separated)", value="LPSO, LPCB, LPEV")
-    icaos_notam = [x.strip().upper() for x in icaos_notam_str.split(",") if x.strip()]
+    icaos_notam_str = st.text_input("ICAO list for NOTAMs (comma / space / newline)", value="LPSO, LPCB, LPEV")
+    icaos_notam = parse_icaos(icaos_notam_str)
 
 # ---------- Charts upload ----------
 st.markdown("#### Charts")
@@ -417,30 +428,31 @@ charts: List[Dict[str,Any]] = []
 if uploads:
     for idx, f in enumerate(uploads):
         img_png = ensure_png_bytes(f)
-        c1, c2, c3 = st.columns([0.34,0.33,0.33])
-        with c1:
+        c1r, c2r, c3r = st.columns([0.34,0.33,0.33])
+        with c1r:
             guess = 0; name = (f.name or "").lower()
             if "spc" in name or "press" in name: guess = 1
             elif "wind" in name or "temp" in name: guess = 2
             kind = st.selectbox(f"Chart type #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"], index=guess, key=f"kind_{idx}")
-        with c2:
+        with c2r:
             title = st.text_input("Title", value=("Significant Weather Chart (SIGWX)" if kind=="SIGWX" else
                                                   "Surface Pressure Chart (SPC)" if kind=="SPC" else
                                                   "Wind and Temperature Chart" if kind=="Wind & Temp" else
                                                   "Weather Chart"), key=f"title_{idx}")
-        with c3:
+        with c3r:
             subtitle = st.text_input("Subtitle (optional)", value="", key=f"subtitle_{idx}")
         charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png})
 
-# ---------- Generate Detailed (PT) immediately after charts ----------
+# ---------- Generate Detailed (PT) ----------
 gen_det = st.button("Generate Detailed (PT)")
 if gen_det:
-    # METAR/TAF interpretations
+    # METAR/TAF interpretations (não saltar nenhum ICAO)
     metar_analyses: List[Tuple[str,str]] = []
     for icao in icaos_metar:
-        metar = fetch_metar_now(icao); taf = fetch_taf_now(icao)
-        if metar or taf:
-            metar_analyses.append((icao, analyze_metar_taf_pt(icao, metar, taf)))
+        metar = fetch_metar_now(icao) or ""
+        taf   = fetch_taf_now(icao) or ""
+        txt = analyze_metar_taf_pt(icao, metar, taf) if (metar or taf) else "Sem METAR/TAF disponiveis neste momento."
+        metar_analyses.append((icao, txt))
 
     # SIGMET LPPC
     sigmets = fetch_sigmet_lppc_auto()
@@ -449,7 +461,7 @@ if gen_det:
 
     # GAMET from Gist (manual)
     gamet_saved = load_gamet_from_gist()
-    gamet_text = gamet_saved.get("text","").strip()
+    gamet_text = (gamet_saved.get("text","") or "").strip()
     gamet_analysis = analyze_gamet_pt(gamet_text) if gamet_text else ""
 
     # NOTAMs (resumo + apêndice RAW)
@@ -482,11 +494,7 @@ if gen_det:
 
 st.divider()
 
-# ---------- (Future) Mass & Balance / Performance ----------
-# Aqui vamos integrar a tua app de M&B/Performance (inputs, cálculos, envelopes, takeoff/landing perf, etc.)
-# Quando me deres a estrutura, gero as tabelas/plots e insiro tudo no PDF final.
-
-# ---------- Optional Flight Plan image (to include in final briefing) ----------
+# ---------- Optional Flight Plan & M&B PDFs (para incluir no Briefing final) ----------
 st.markdown("#### Flight Plan (optional image/PDF/GIF)")
 fp_upload = st.file_uploader("Upload your flight plan (PDF/PNG/JPG/JPEG/GIF)", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=False)
 fp_img_png: io.BytesIO | None = None
@@ -494,15 +502,27 @@ if fp_upload:
     fp_img_png = ensure_png_bytes(fp_upload)
     st.success("Flight plan will be included in the final briefing.")
 
+st.markdown("#### M&B / Performance PDF (from external app)")
+mb_upload = st.file_uploader("Upload M&B/Performance PDF to embed", type=["pdf"], accept_multiple_files=False)
+
 # ---------- Generate Final Briefing (EN) ----------
 gen_final = st.button("Generate Final Briefing (EN)")
 if gen_final:
     fb = FinalBriefPDF()
     fb.cover(mission_no, pilot, aircraft_type, callsign, registration, str(flight_date), time_utc)
+
+    # Insere M&B PDF (se subido)
+    if mb_upload is not None:
+        mb_bytes = mb_upload.read()
+        pdf_embed_first_page(fb, mb_bytes, "Mass & Balance / Performance")
+
+    # Insere Flight Plan (se subido)
     if fp_img_png is not None:
         fb.flightplan_image("Flight Plan", fp_img_png)
-    # charts (images only)
+
+    # Charts (imagens)
     fb.charts_only([(c["title"], c["subtitle"], c["img_png"]) for c in charts])
+
     final_name = f"Briefing - Missao {mission_no or 'X'}.pdf"
     fb.output(final_name)
     with open(final_name, "rb") as f:
@@ -512,10 +532,7 @@ st.divider()
 st.markdown(f"**Live Weather:** {APP_WEATHER_URL}")
 st.markdown(f"**Live NOTAMs:** {APP_NOTAMS_URL}")
 st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
-
-
-
-
+st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
 
 
 
