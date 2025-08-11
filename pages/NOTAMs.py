@@ -1,6 +1,5 @@
-# -------------------------------
-# pages/NOTAMs.py — Gist (Saved)
-# -------------------------------
+# pages/NOTAMs.py — NOTAMs (Saved via Gist) + notas por ICAO
+
 from typing import Dict, Any, List
 import streamlit as st, requests, json
 
@@ -34,7 +33,7 @@ def load_notams_saved() -> Dict[str,Any]:
         fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
         r = requests.get(
             f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}"},
+            headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
             timeout=10,
         )
         r.raise_for_status(); files = r.json().get("files", {})
@@ -54,9 +53,9 @@ def load_notams_saved() -> Dict[str,Any]:
         return {"map": {}, "updated_utc": None}
 
 st.markdown('<div class="page-title">NOTAMs (Saved)</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtle">Type ICAOs (comma-separated) and press Refresh</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtle">Reads NOTAMs from a GitHub Gist you control. Add local notes per aerodrome below.</div>', unsafe_allow_html=True)
 
-col = st.columns([0.75,0.25])
+col = st.columns([0.65,0.35])
 with col[0]:
     icaos_str = st.text_input("ICAO list", value="LPSO, LPCB, LPEV")
 with col[1]:
@@ -68,20 +67,44 @@ if saved.get("updated_utc"):
     st.markdown(f'<div class="info">Last saved (UTC): {saved["updated_utc"]}</div>', unsafe_allow_html=True)
 
 m = saved.get("map") or {}
-for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
-    st.markdown(f"### {icao}")
+icaos = [x.strip().upper() for x in icaos_str.split(",") if x.strip()]
+
+st.markdown("### Extra notes per ICAO")
+ncol1, ncol2, ncol3 = st.columns(3)
+ncols = [ncol1, ncol2, ncol3]
+notes: Dict[str,str] = {}
+for i, icao in enumerate(icaos):
+    with ncols[i % 3]:
+        notes[icao] = st.text_area(
+            f"{icao} — extra notes",
+            value="",
+            placeholder="Ex.: AERODROME BEACON ONLY FLASH-GREEN LIGHT OPERATIVE.\nFROM: 29th Jul 2025 15:10 TO: 29th Sep 2025 18:18 EST",
+            key=f"note_{icao}",
+            height=90
+        )
+
+st.markdown("---")
+for icao in icaos:
+    st.markdown(f"## {icao}")
     items: List[str] = list((m.get(icao) or []))
-    if not items:
+    extra = (notes.get(icao) or "").strip()
+    # Mostra bloco interpretado simples (lista + nota)
+    compiled = items + ([f"NOTE: {extra}"] if extra else [])
+    if not compiled:
         st.write("—")
     else:
-        for n in items:
+        for n in compiled:
             st.markdown(f'<div class="monos">{n}</div>', unsafe_allow_html=True)
             st.markdown("---")
 
+# Export
 flat = []
-for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
+for icao in icaos:
     for n in (m.get(icao) or []):
         flat.append(f"[{icao}] {n}")
+    extra = (notes.get(icao) or "").strip()
+    if extra:
+        flat.append(f"[{icao}][NOTE] {extra}")
 if flat:
-    st.download_button("Download filtered NOTAMs (.txt)", data="\\n\\n".join(flat), file_name="notams.txt")
+    st.download_button("Download filtered NOTAMs (.txt)", data="\n\n".join(flat), file_name="notams.txt")
 
