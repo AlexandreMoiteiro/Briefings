@@ -33,6 +33,7 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
 # ---------- OpenAI client ----------
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
+
 def ascii_safe(text: str) -> str:
     if text is None: return ""
     t = unicodedata.normalize("NFKD", str(text)).encode("ascii","ignore").decode("ascii")
@@ -40,22 +41,27 @@ def ascii_safe(text: str) -> str:
              .replace("\u2014","-").replace("\uFEFF",""))
 
 # ---------- ICAO parser (vírgulas, espaços e quebras de linha) ----------
+
 def parse_icaos(s: str) -> List[str]:
     tokens = re.split(r"[,\s]+", (s or "").strip(), flags=re.UNICODE)
     return [t.upper() for t in tokens if t]
 
 # ---------- Image helpers ----------
+
 def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 300):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf"); page = doc.load_page(0)
     png = page.get_pixmap(dpi=dpi).tobytes("png")
     return Image.open(io.BytesIO(png)).convert("RGB").copy()
 
+
 def gif_first_frame(file_bytes: bytes):
     im = Image.open(io.BytesIO(file_bytes)); im.seek(0)
     return im.convert("RGB").copy()
 
+
 def to_png_bytes(img: Image.Image) -> io.BytesIO:
     out = io.BytesIO(); img.save(out, format="PNG"); out.seek(0); return out
+
 
 def ensure_png_bytes(uploaded):
     if uploaded.type == "application/pdf":
@@ -66,13 +72,16 @@ def ensure_png_bytes(uploaded):
         img = Image.open(uploaded).convert("RGB").copy()
     return to_png_bytes(img)
 
+
 def b64_png(img_bytes: io.BytesIO) -> str:
     return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
 # ---------- CheckWX helpers ----------
+
 def cw_headers() -> Dict[str,str]:
     key = st.secrets.get("CHECKWX_API_KEY","")
     return {"X-API-Key": key} if key else {}
+
 
 def fetch_metar_now(icao: str) -> str:
     try:
@@ -82,6 +91,7 @@ def fetch_metar_now(icao: str) -> str:
         return data[0].get("raw") or data[0].get("raw_text","") if isinstance(data[0], dict) else str(data[0])
     except Exception: return ""
 
+
 def fetch_taf_now(icao: str) -> str:
     try:
         r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=cw_headers(), timeout=10)
@@ -90,16 +100,21 @@ def fetch_taf_now(icao: str) -> str:
         return data[0].get("raw") or data[0].get("raw_text","") if isinstance(data[0], dict) else str(data[0])
     except Exception: return ""
 
+
 def fetch_notams(icao: str) -> List[str]:
+    """Fetch NOTAMs for an ICAO. Returns list of raw strings. Robust to different payload shapes."""
     try:
-        r = requests.get(f"https://api.checkwx.com/notam/{icao}", headers=cw_headers(), timeout=15)
+        r = requests.get(
+            f"https://api.checkwx.com/notam/{icao}", headers=cw_headers(), timeout=15
+        )
         r.raise_for_status()
         j = r.json()
         arr = j.get("data", []) if isinstance(j, dict) else (j or [])
         out: List[str] = []
         for it in arr:
             if isinstance(it, str):
-                out.append(it.strip())
+                raw = it.strip()
+                if raw: out.append(raw)
             elif isinstance(it, dict):
                 raw = (it.get("raw") or it.get("text") or it.get("notam") or it.get("message") or "")
                 if raw: out.append(str(raw).strip())
@@ -108,6 +123,7 @@ def fetch_notams(icao: str) -> List[str]:
         return []
 
 # ---------- SIGMET LPPC (AWC) ----------
+
 def fetch_sigmet_lppc_auto() -> List[str]:
     try:
         r = requests.get("https://aviationweather.gov/api/data/isigmet",
@@ -128,15 +144,18 @@ def fetch_sigmet_lppc_auto() -> List[str]:
         return []
 
 # ---------- GAMET (Gist) ----------
+
 def _get_gist_secrets():
     token = (st.secrets.get("GAMET_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get("GAMET_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
     fn    = (st.secrets.get("GAMET_GIST_FILENAME") or st.secrets.get("GIST_FILENAME") or "").strip()
     return token, gid, fn
 
+
 def gamet_gist_config_ok() -> bool:
     token, gid, fn = _get_gist_secrets()
     return all([token, gid, fn])
+
 
 def load_gamet_from_gist() -> Dict[str,Any]:
     if not gamet_gist_config_ok(): return {"text":"", "updated_utc":None}
@@ -159,9 +178,11 @@ def load_gamet_from_gist() -> Dict[str,Any]:
         return {"text":"", "updated_utc":None}
 
 # ---------- GPT wrapper (texto) com fallback ----------
+
 def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1200) -> str:
     """
     Tenta Responses API. Se vier vazio/erro, faz fallback para Chat Completions (texto).
+    Corrigido: Chat Completions com gpt-5 usa 'max_completion_tokens'.
     """
     # 1) Responses
     last_err = ""
@@ -189,7 +210,7 @@ def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1200) -> st
                 {"role":"system","content":prompt_system},
                 {"role":"user","content":prompt_user},
             ],
-            max_tokens=max_tokens
+            max_completion_tokens=max_tokens  # <-- FIX
         )
         content = r2.choices[0].message.content
         if content and content.strip():
@@ -199,6 +220,7 @@ def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1200) -> st
         return ascii_safe(f"Falha na interpretacao: {last_err}; fallback chat: {e2}")
 
 # ---------- Analyses (PT) ----------
+
 def analyze_chart_pt(kind: str, img_b64: str) -> str:
     sys = (
         "Es meteorologista aeronautico senior. Analisa o chart fornecido em portugues, SEM listas: "
@@ -226,21 +248,25 @@ def analyze_chart_pt(kind: str, img_b64: str) -> str:
     except Exception as e:
         return ascii_safe(f"Nao foi possivel analisar o chart (erro: {e}).")
 
+
 def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
     sys = ("Es meteorologista aeronautico senior. Em PT e texto corrido, interpreta METAR e TAF, "
            "explicando codigos e impacto operacional para voo. Usa apenas o texto fornecido.")
     user = f"Aerodromo {icao}\nMETAR:\n{metar}\n\nTAF:\n{taf}"
     return gpt_text(sys, user, max_tokens=1200)
 
+
 def analyze_sigmet_pt(sigmet_text: str) -> str:
     sys = ("Es meteorologista aeronautico senior. Em PT e prosa corrida, interpreta o SIGMET LPPC: "
            "fenomeno, area, niveis/FL, validade/horas, movimento/intensidade, e impacto operacional.")
     return gpt_text(sys, sigmet_text, max_tokens=900)
 
+
 def analyze_gamet_pt(gamet_text: str) -> str:
     sys = ("Es meteorologista aeronautico senior. Em PT e texto corrido, explica o GAMET LPPC: "
            "fenomenos, niveis, areas e impacto operacional. Usa apenas o texto fornecido.")
     return gpt_text(sys, gamet_text, max_tokens=1200)
+
 
 def analyze_notams_pt(icao: str, notams_raw: List[str]) -> str:
     text = "\n\n".join(notams_raw).strip()
@@ -255,10 +281,12 @@ def analyze_notams_pt(icao: str, notams_raw: List[str]) -> str:
 # ---------- PDF helpers ----------
 PASTEL = (90,127,179)  # azul suave
 
+
 def draw_header(pdf: FPDF, text: str):
     pdf.set_draw_color(229,231,235); pdf.set_line_width(0.3)
     pdf.set_font("Helvetica","B",18)
     pdf.cell(0, 12, ascii_safe(text), ln=True, align="C", border="B")
+
 
 def place_image_full(pdf: FPDF, png_bytes: io.BytesIO, max_h_pad: int=58):
     max_w = pdf.w - 22; max_h = pdf.h - max_h_pad
@@ -269,6 +297,7 @@ def place_image_full(pdf: FPDF, png_bytes: io.BytesIO, max_h_pad: int=58):
         img.save(tmp, format="PNG"); path = tmp.name
     pdf.image(path, x=x, y=y, w=w, h=h); os.remove(path); pdf.ln(h+10)
 
+
 def pdf_embed_first_page(pdf: FPDF, pdf_bytes: bytes, title: str):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     page = doc.load_page(0)
@@ -278,9 +307,11 @@ def pdf_embed_first_page(pdf: FPDF, pdf_bytes: bytes, title: str):
     pdf.add_page(orientation="L"); draw_header(pdf, ascii_safe(title))
     place_image_full(pdf, bio)
 
+
 class DetailedPDF(FPDF):
     def header(self): pass
     def footer(self): pass
+
     def cover(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc):
         self.add_page(orientation="L"); self.set_xy(0,36)
         self.set_font("Helvetica","B",28); self.cell(0,14,"Briefing Detalhado (PT)", ln=True, align="C")
@@ -290,10 +321,11 @@ class DetailedPDF(FPDF):
             self.cell(0,8,ascii_safe(f"Piloto: {pilot}   Aeronave: {aircraft}   Callsign: {callsign}   Matricula: {reg}"), ln=True, align="C")
         if date_str or time_utc:
             self.cell(0,8,ascii_safe(f"Data: {date_str}   UTC: {time_utc}"), ln=True, align="C")
-        # links (pastel, só URL)
+        # Texto explicativo + links
         self.ln(6); self.set_font("Helvetica","I",12)
-        self.set_text_color(*PASTEL); self.cell(0,7,APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
-        self.cell(0,7,APP_NOTAMS_URL,  ln=True, align="C", link=APP_NOTAMS_URL)
+        self.set_text_color(*PASTEL)
+        self.cell(0,7,ascii_safe("METAR/TAF/GAMET (Live): ") + APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
+        self.cell(0,7,ascii_safe("NOTAMs (Live): ") + APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
         self.set_text_color(0,0,0)
 
     def metar_taf_block(self, analyses: List[Tuple[str,str]]):
@@ -320,23 +352,34 @@ class DetailedPDF(FPDF):
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
 
     def notams_block(self, parsed: List[Tuple[str,str,List[str]]]):
-        any_data = any(r for _,_,r in parsed)
-        if not any_data: return
+        # Sempre criar secao de NOTAMs, mesmo que vazia, para evitar 'nao aparece'.
         self.add_page(orientation="P"); draw_header(self,"NOTAMs — Interpretacao (PT)")
         for icao, analysis, raws in parsed:
-            if not raws: continue
             self.set_font("Helvetica","B",12); self.cell(0,8,ascii_safe(icao), ln=True)
-            self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis)); self.ln(2)
+            self.set_font("Helvetica","",12)
+            if raws:
+                self.multi_cell(0,7,ascii_safe(analysis))
+            else:
+                self.multi_cell(0,7,ascii_safe("Sem NOTAMs disponiveis."))
+            self.ln(2)
         # Apêndice RAW
         self.add_page(orientation="P"); draw_header(self,"NOTAMs — RAW (Apendice)")
         self.set_font("Helvetica","",12); self.ln(2)
+        any_raw = False
         for icao, _, arr in parsed:
-            if not arr: continue
             self.set_font("Helvetica","B",12); self.cell(0,8,ascii_safe(icao), ln=True)
             self.set_font("Helvetica","",12)
-            for n in arr:
-                self.multi_cell(0,7,ascii_safe(n)); self.ln(1)
+            if arr:
+                any_raw = True
+                for n in arr:
+                    self.multi_cell(0,7,ascii_safe(n)); self.ln(1)
+            else:
+                self.multi_cell(0,7,ascii_safe("Sem entradas."))
             self.ln(2)
+        if not any_raw:
+            # Se nenhuma entrada, clarificar
+            self.set_font("Helvetica","I",11)
+            self.multi_cell(0,7,ascii_safe("Sem NOTAMs ativos devolvidos pela API para os aerodromos selecionados."))
 
     def chart_block(self, title, subtitle, img_png, analysis_pt):
         self.add_page(orientation="L"); draw_header(self,ascii_safe(title))
@@ -352,9 +395,11 @@ class DetailedPDF(FPDF):
         # texto (metade inferior)
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
 
+
 class FinalBriefPDF(FPDF):
     def header(self): pass
     def footer(self): pass
+
     def cover(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc):
         self.add_page(orientation="L"); self.set_xy(0,36)
         self.set_font("Helvetica","B",28); self.cell(0,14,"Briefing", ln=True, align="C")
@@ -364,10 +409,11 @@ class FinalBriefPDF(FPDF):
             self.cell(0,8,ascii_safe(f"Pilot: {pilot}   Aircraft: {aircraft}   Callsign: {callsign}   Reg: {reg}"), ln=True, align="C")
         if date_str or time_utc:
             self.cell(0,8,ascii_safe(f"Date: {date_str}   UTC: {time_utc}"), ln=True, align="C")
-        # links (pastel, só URL)
+        # Texto explicativo + links
         self.ln(6); self.set_font("Helvetica","I",12)
-        self.set_text_color(*PASTEL); self.cell(0,7,APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
-        self.cell(0,7,APP_NOTAMS_URL,  ln=True, align="C", link=APP_NOTAMS_URL)
+        self.set_text_color(*PASTEL)
+        self.cell(0,7,ascii_safe("Live Weather (METAR/TAF/GAMET): ") + APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
+        self.cell(0,7,ascii_safe("Live NOTAMs: ") + APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
         self.set_text_color(0,0,0)
 
     def flightplan_image(self, title, img_png):
@@ -529,10 +575,12 @@ if gen_final:
         st.download_button("Download Final Briefing (EN)", data=f.read(), file_name=final_name, mime="application/pdf", use_container_width=True)
 
 st.divider()
-st.markdown(f"**Live Weather:** {APP_WEATHER_URL}")
-st.markdown(f"**Live NOTAMs:** {APP_NOTAMS_URL}")
-st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
-st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
+# Removi os links crús na pagina: ja tens os botoes em cima.
+# (Se quiseres voltar a mostrar, basta repor as linhas abaixo.)
+# st.markdown(f"**Live Weather:** {APP_WEATHER_URL}")
+# st.markdown(f"**Live NOTAMs:** {APP_NOTAMS_URL}")
+# st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
+# st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
 
 
 
