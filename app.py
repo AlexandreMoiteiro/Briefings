@@ -1,16 +1,19 @@
 # app.py
-# Flight Briefings
-# - RAW (EN): charts + link Weather + RAW GAMET (saved in Gist) + RAW SIGMET (LPPC auto)
-# - DETAILED (PT): interpreta METAR/TAF atuais, GAMET (saved), SIGMET (LPPC auto), e cada chart (Overview → Portugal → Alentejo)
-# - No sidebar, layout limpo, Unicode-safe (DejaVu)
+# Briefings (RAW EN + Detailed PT)
+# - Two ICAO lists: METAR/TAF and NOTAMs (defaults as requested)
+# - NOTAMs fetched from CheckWX for NOTAMs list; RAW includes raw NOTAMs; Detailed includes PT interpretation
+# - SIGMET LPPC auto (AWC); GAMET saved to Gist (manual)
+# - Unicode-safe (DejaVu fonts) and high-quality images; GIF/PDF supported
+# - Separate buttons to generate RAW and DETAILED
 
 from typing import Dict, Any, List, Tuple, Optional
 import io, os, json, base64, tempfile, datetime as dt
 from zoneinfo import ZoneInfo
+from pathlib import Path
 
 import requests
 import streamlit as st
-from PIL import Image, ImageSequence
+from PIL import Image
 from fpdf import FPDF
 import fitz  # PyMuPDF
 from openai import OpenAI
@@ -18,9 +21,10 @@ from openai import OpenAI
 APP_WEATHER_URL = "https://briefings.streamlit.app/Weather"
 
 # ---------- Page & Styles ----------
-st.set_page_config(page_title="Flight Briefings", layout="wide")
+st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown("""
 <style>
+/* Hide sidebar entirely */
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
 [data-testid="stSidebarCollapseButton"] { display:none !important; }
 header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
@@ -35,26 +39,74 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
 
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
-# ---------- Fonts (Unicode) ----------
+# ---------- Fonts (Unicode, robust lookup) ----------
 _FONTS_REGISTERED = False
+_UNICODE_FONTS_READY = False
+
+def _first_existing(candidates, bases):
+    for base in bases:
+        for name in candidates:
+            p = (base / name).resolve()
+            if p.exists():
+                return p
+    return None
+
 def register_fonts():
-    """Register DejaVu fonts for full Unicode support."""
-    global _FONTS_REGISTERED
+    """
+    Registers DejaVu fonts using absolute paths.
+    Looks for:
+      - DejaVuSans.ttf
+      - DejaVuSans-Bold.ttf
+      - DejaVuSans-Oblique.ttf (or DejaVuSans-Italic.ttf)
+      - DejaVuSans-BoldOblique.ttf (optional)
+    """
+    global _FONTS_REGISTERED, _UNICODE_FONTS_READY
     if _FONTS_REGISTERED:
         return
-    FPDF.add_font("DejaVu", "", "fonts/DejaVuSans.ttf", uni=True)
-    FPDF.add_font("DejaVu", "B", "fonts/DejaVuSans-Bold.ttf", uni=True)
-    FPDF.add_font("DejaVu", "I", "fonts/DejaVuSans-Oblique.ttf", uni=True)
-    _FONTS_REGISTERED = True
+
+    here = Path(__file__).resolve().parent
+    bases = [here / "fonts", Path.cwd() / "fonts"]
+
+    reg  = _first_existing(["DejaVuSans.ttf"], bases)
+    bold = _first_existing(["DejaVuSans-Bold.ttf"], bases)
+    ital = _first_existing(["DejaVuSans-Oblique.ttf", "DejaVuSans-Italic.ttf"], bases)
+    boldital = _first_existing(["DejaVuSans-BoldOblique.ttf", "DejaVuSans-BoldItalic.ttf"], bases)
+
+    missing = []
+    if not reg:  missing.append("DejaVuSans.ttf")
+    if not bold: missing.append("DejaVuSans-Bold.ttf")
+    if not ital: missing.append("DejaVuSans-Oblique.ttf (or DejaVuSans-Italic.ttf)")
+
+    if missing:
+        _UNICODE_FONTS_READY = False
+        _FONTS_REGISTERED = True
+        st.error(
+            "DejaVu TTF files not found in ./fonts: " + ", ".join(missing) +
+            "\nLooked in:\n- " + "\n- ".join(str(b.resolve()) for b in bases)
+        )
+        return
+
+    try:
+        FPDF.add_font("DejaVu", "", str(reg), uni=True)
+        FPDF.add_font("DejaVu", "B", str(bold), uni=True)
+        FPDF.add_font("DejaVu", "I", str(ital), uni=True)
+        if boldital:
+            FPDF.add_font("DejaVu", "BI", str(boldital), uni=True)
+        _UNICODE_FONTS_READY = True
+    except Exception as e:
+        _UNICODE_FONTS_READY = False
+        st.error(f"Could not register DejaVu fonts: {e}")
+    finally:
+        _FONTS_REGISTERED = True
 
 def clean_text(s: str) -> str:
     if not s:
         return ""
     return (s
-            .replace("\u00A0", " ")   # NBSP -> space
-            .replace("\u2009", " ")   # thin space
-            .replace("\u2013", "-")   # en dash
-            .replace("\uFEFF", ""))   # BOM
+            .replace("\u00A0", " ")
+            .replace("\u2009", " ")
+            .replace("\u2013", "-")
+            .replace("\uFEFF", ""))
 
 # ---------- Image helpers ----------
 def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 300):
@@ -67,8 +119,7 @@ def gif_first_frame(file_bytes: bytes):
     return im.convert("RGB").copy()
 
 def to_png_bytes(img: Image.Image) -> io.BytesIO:
-    out = io.BytesIO(); img.save(out, format="PNG")  # keep sharpness
-    out.seek(0); return out
+    out = io.BytesIO(); img.save(out, format="PNG"); out.seek(0); return out
 
 def ensure_png_bytes(uploaded):
     if uploaded.type == "application/pdf":
@@ -82,7 +133,7 @@ def ensure_png_bytes(uploaded):
 def b64_png(img_bytes: io.BytesIO) -> str:
     return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
-# ---------- METAR/TAF ----------
+# ---------- CheckWX helpers ----------
 def cw_headers() -> Dict[str,str]:
     key = st.secrets.get("CHECKWX_API_KEY","")
     return {"X-API-Key": key} if key else {}
@@ -102,6 +153,27 @@ def fetch_taf_now(icao: str) -> str:
         if not data: return ""
         return data[0].get("raw") or data[0].get("raw_text","") if isinstance(data[0], dict) else str(data[0])
     except Exception: return ""
+
+def fetch_notams(icao: str) -> List[str]:
+    """
+    Fetch NOTAMs for ICAO from CheckWX.
+    Returns list of RAW strings (one per NOTAM). If API returns objects, picks useful fields.
+    """
+    try:
+        r = requests.get(f"https://api.checkwx.com/notam/{icao}", headers=cw_headers(), timeout=15)
+        r.raise_for_status()
+        j = r.json()
+        arr = j.get("data", []) if isinstance(j, dict) else (j or [])
+        out: List[str] = []
+        for it in arr:
+            if isinstance(it, str):
+                out.append(it.strip())
+            elif isinstance(it, dict):
+                raw = (it.get("raw") or it.get("text") or it.get("notam") or it.get("message") or "")
+                if raw: out.append(str(raw).strip())
+        return out
+    except Exception:
+        return []
 
 # ---------- SIGMET LPPC (auto AWC) ----------
 def fetch_sigmet_lppc_auto() -> List[str]:
@@ -125,7 +197,6 @@ def fetch_sigmet_lppc_auto() -> List[str]:
 
 # ---------- GAMET (Gist persistence) ----------
 def _get_gist_secrets():
-    # Prefer GAMET_GIST_*, fallback to GIST_* if present
     token = (st.secrets.get("GAMET_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get("GAMET_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
     fn    = (st.secrets.get("GAMET_GIST_FILENAME") or st.secrets.get("GIST_FILENAME") or "").strip()
@@ -140,8 +211,7 @@ def load_gamet_from_gist() -> Dict[str,Any]:
     try:
         token, gid, fn = _get_gist_secrets()
         r = requests.get(f"https://api.github.com/gists/{gid}",
-                         headers={"Authorization": f"token {token}",
-                                  "Accept":"application/vnd.github+json"},
+                         headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
                          timeout=12)
         r.raise_for_status()
         files = r.json().get("files", {})
@@ -163,8 +233,7 @@ def save_gamet_to_gist(text: str) -> bool:
         payload = {"text": text.strip(), "updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%d %H:%MZ")}
         files = {fn: {"content": json.dumps(payload, ensure_ascii=False, indent=2)}}
         r = requests.patch(f"https://api.github.com/gists/{gid}",
-                           headers={"Authorization": f"token {token}",
-                                    "Accept":"application/vnd.github+json"},
+                           headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
                            json={"files": files}, timeout=15)
         return r.status_code in (200, 201)
     except Exception:
@@ -235,6 +304,28 @@ def analyze_gamet_pt(gamet_text: str) -> str:
     except Exception as e:
         return f"Não foi possível interpretar o GAMET (erro: {e})."
 
+def analyze_notams_pt(icao: str, notams_raw: List[str]) -> str:
+    """
+    PT explanation of NOTAMs for one aerodrome (operational summary).
+    """
+    text = "\n\n".join(notams_raw)
+    if not text.strip():
+        return "Sem NOTAMs disponíveis para este aeródromo no momento."
+    sys = ("És meteorologista/briefing officer. Em Português, resume os NOTAMs abaixo de forma corrida, clara e operacional, "
+           "destacando impacto para o voo (pistas/taxiways/iluminação/NAVAIDs/horários/restrições), níveis/horários de validade "
+           "e ações recomendadas. Não inventes; usa apenas o texto fornecido.")
+    user = f"Aeródromo {icao} — NOTAMs (RAW):\n{text}"
+    try:
+        resp = client.responses.create(
+            model="gpt-5",
+            input=[{"role":"system","content":[{"type":"input_text","text":sys}]},
+                   {"role":"user","content":[{"type":"input_text","text":user}]}],
+            max_output_tokens=1000, temperature=0.12,
+        )
+        return clean_text(resp.output_text or "").strip()
+    except Exception as e:
+        return f"Não foi possível interpretar os NOTAMs (erro: {e})."
+
 # ---------- PDF helpers ----------
 class Brand: line = (229,231,235)
 
@@ -257,20 +348,27 @@ class RawPDF(FPDF):
     def footer(self): pass
     def cover(self, pilot, aircraft, callsign, reg, date_str, time_utc, mission):
         self.add_page(orientation="L"); self.set_xy(0,40)
-        self.set_font("DejaVu","B",28); self.cell(0,14,"Weather Briefing (RAW)", ln=True, align="C")
+        self.set_font("DejaVu","B",28); self.cell(0,14,"Briefing (RAW)", ln=True, align="C")
         self.set_font("DejaVu","",13); self.ln(2)
         self.cell(0,8,clean_text(f"Pilot: {pilot}   Aircraft: {aircraft}   Callsign: {callsign}   Reg: {reg}"), ln=True, align="C")
         self.cell(0,8,clean_text(f"Date: {date_str}   UTC: {time_utc}"), ln=True, align="C"); self.ln(6)
-        self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(f"Current METAR / TAF / SIGMET: {APP_WEATHER_URL}"), ln=True, align="C")
+        self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(f"Live METAR / TAF / SIGMET: {APP_WEATHER_URL}"), ln=True, align="C")
         if mission: self.ln(4); self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(f"Remarks: {mission}"), align="C")
+    def section_text(self, title: str, body: str):
+        self.add_page(orientation="P"); draw_header(self, title)
+        self.set_font("DejaVu","",12); self.ln(3); self.multi_cell(0,7,clean_text(body))
+    def notams_raw(self, icao: str, notams: List[str]):
+        if not notams: return
+        self.add_page(orientation="P"); draw_header(self, f"NOTAMs — {icao} (RAW)")
+        self.set_font("DejaVu","",12); self.ln(3)
+        for n in notams:
+            self.multi_cell(0,7,clean_text(n)); self.ln(2)
     def gamet_raw(self, text):
         if not text.strip(): return
-        self.add_page(orientation="P"); draw_header(self,"GAMET (RAW)")
-        self.set_font("DejaVu","",12); self.ln(3); self.multi_cell(0,7,clean_text(text))
+        self.section_text("GAMET (RAW)", text)
     def sigmet_raw(self, text):
         if not text.strip(): return
-        self.add_page(orientation="P"); draw_header(self,"SIGMET (LPPC) — RAW")
-        self.set_font("DejaVu","",12); self.ln(3); self.multi_cell(0,7,clean_text(text))
+        self.section_text("SIGMET (LPPC) — RAW", text)
     def chart_full(self, title, subtitle, img_png):
         self.add_page(orientation="L"); draw_header(self,clean_text(title))
         if subtitle: self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(subtitle), ln=True, align="C")
@@ -285,7 +383,7 @@ class DetailedPDF(FPDF):
         self.set_font("DejaVu","",13); self.ln(2)
         self.cell(0,8,clean_text(f"Piloto: {pilot}   Aeronave: {aircraft}   Callsign: {callsign}   Matrícula: {reg}"), ln=True, align="C")
         self.cell(0,8,clean_text(f"Data: {date_str}   UTC: {time_utc}"), ln=True, align="C"); self.ln(6)
-        self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(f"METAR / TAF / SIGMET atualizados: {APP_WEATHER_URL}"), ln=True, align="C")
+        self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(f"METAR / TAF / SIGMET ao vivo: {APP_WEATHER_URL}"), ln=True, align="C")
         if mission: self.ln(4); self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(f"Notas: {mission}"), align="C")
     def metar_taf_block(self, analyses: List[Tuple[str,str]]):
         if not analyses: return
@@ -294,6 +392,15 @@ class DetailedPDF(FPDF):
         for icao, text in analyses:
             self.set_font("DejaVu","B",13); self.cell(0,8,clean_text(icao), ln=True)
             self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(text)); self.ln(2)
+    def notams_block(self, parsed: List[Tuple[str,str,List[str]]]):
+        # parsed: list of (icao, analysis_pt, raw_list)
+        any_data = any(r for _,_,r in parsed)
+        if not any_data: return
+        self.add_page(orientation="P"); draw_header(self,"NOTAMs — Interpretação (PT)")
+        for icao, analysis, raws in parsed:
+            if not raws: continue
+            self.set_font("DejaVu","B",12); self.cell(0,8,clean_text(icao), ln=True)
+            self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(analysis)); self.ln(2)
     def sigmet_block(self, sigmet_text: str, analysis_pt: str):
         if not sigmet_text.strip(): return
         self.add_page(orientation="P"); draw_header(self,"SIGMET (LPPC) — Interpretação (PT)")
@@ -311,7 +418,7 @@ class DetailedPDF(FPDF):
     def chart_block(self, title, subtitle, img_png, analysis_pt):
         self.add_page(orientation="L"); draw_header(self,clean_text(title))
         if subtitle: self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(subtitle), ln=True, align="C")
-        # image (upper)
+        # image (upper half)
         max_w = self.w - 22; max_h = (self.h // 2) - 16
         img = Image.open(img_png); iw, ih = img.size
         r = min(max_w/iw, max_h/ih); w, h = int(iw*r), int(ih*r)
@@ -323,7 +430,7 @@ class DetailedPDF(FPDF):
         self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(analysis_pt))
 
 # ---------- UI ----------
-st.markdown('<div class="app-title">Flight Briefings</div>', unsafe_allow_html=True)
+st.markdown('<div class="app-title">Briefings</div>', unsafe_allow_html=True)
 st.markdown('<div class="muted">Raw (EN) for instructor • Detailed (PT) for your prep</div>', unsafe_allow_html=True)
 st.divider()
 
@@ -343,10 +450,15 @@ with colC:
 st.markdown("#### Remarks / Mission")
 mission = st.text_input("Remarks", "")
 
-# Aerodromes
-st.markdown("#### Aerodromes")
-icaos_str = st.text_input("ICAO list (comma-separated)", value="LPPT, LPBJ, LEBZ")
-icaos = [x.strip().upper() for x in icaos_str.split(",") if x.strip()]
+# Aerodromes for METAR/TAF
+st.markdown("#### Aerodromes for METAR/TAF")
+icaos_metar_str = st.text_input("ICAO list (comma-separated)", value="LPPT, LPBJ, LEBZ")
+icaos_metar = [x.strip().upper() for x in icaos_metar_str.split(",") if x.strip()]
+
+# Aerodromes for NOTAMs
+st.markdown("#### Aerodromes for NOTAMs")
+icaos_notam_str = st.text_input("ICAO list for NOTAMs (comma-separated)", value="LPSO, LPCB, LPEV")
+icaos_notam = [x.strip().upper() for x in icaos_notam_str.split(",") if x.strip()]
 
 # GAMET — Manual (Gist)
 st.markdown("#### GAMET (LPPC) — Manual (saved)")
@@ -391,16 +503,34 @@ gen_det = colGen2.button("Generate DETAILED (PT)")
 if gen_raw:
     register_fonts()
     date_str = str(flight_date)
+
     # Auto SIGMET LPPC
     sigmets = fetch_sigmet_lppc_auto()
     sigmet_text = "\n\n---\n\n".join(sigmets).strip()
+
+    # Fetch NOTAMs for NOTAM list
+    notams_map: Dict[str,List[str]] = {icao: fetch_notams(icao) for icao in icaos_notam}
+
     # RAW
     raw_pdf = RawPDF()
     raw_pdf.cover(pilot, aircraft_type, callsign, registration, date_str, time_utc, mission)
-    if gamet_text.strip(): raw_pdf.gamet_raw(gamet_text)
-    if sigmet_text: raw_pdf.sigmet_raw(sigmet_text)
+
+    # GAMET RAW
+    if gamet_text.strip():
+        raw_pdf.gamet_raw(gamet_text)
+
+    # SIGMET RAW
+    if sigmet_text:
+        raw_pdf.sigmet_raw(sigmet_text)
+
+    # NOTAMs RAW per aerodrome
+    for icao, arr in notams_map.items():
+        raw_pdf.notams_raw(icao, arr)
+
+    # Charts (full)
     for ch in chart_rows:
         raw_pdf.chart_full(ch["title"], ch["subtitle"], ch["img_png"])
+
     raw_name = "briefing_raw.pdf"; raw_pdf.output(raw_name)
     with open(raw_name, "rb") as f:
         st.download_button("Download RAW (EN)", data=f.read(), file_name=raw_name, mime="application/pdf", use_container_width=True)
@@ -409,38 +539,54 @@ if gen_raw:
 if gen_det:
     register_fonts()
     date_str = str(flight_date)
+
     # Auto SIGMET LPPC
     sigmets = fetch_sigmet_lppc_auto()
     sigmet_text = "\n\n---\n\n".join(sigmets).strip()
+
     # DETAILED
     det_pdf = DetailedPDF()
     det_pdf.cover(pilot, aircraft_type, callsign, registration, date_str, time_utc, mission)
-    # METAR/TAF interpretations
+
+    # METAR/TAF interpretations for METAR list
     metar_analyses: List[Tuple[str,str]] = []
-    for icao in icaos:
+    for icao in icaos_metar:
         metar = fetch_metar_now(icao); taf = fetch_taf_now(icao)
         if metar or taf:
             metar_analyses.append((icao, analyze_metar_taf_pt(icao, metar, taf)))
     det_pdf.metar_taf_block(metar_analyses)
+
+    # NOTAMs (interpretation) for NOTAM list
+    notams_map: Dict[str,List[str]] = {icao: fetch_notams(icao) for icao in icaos_notam}
+    notam_parsed: List[Tuple[str,str,List[str]]] = []
+    for icao, arr in notams_map.items():
+        analysis = analyze_notams_pt(icao, arr) if arr else "Sem NOTAMs disponíveis."
+        notam_parsed.append((icao, analysis, arr))
+    det_pdf.notams_block(notam_parsed)
+
     # SIGMET interpretation (auto)
     if sigmet_text:
         det_pdf.sigmet_block(sigmet_text, analyze_sigmet_pt(sigmet_text))
+
     # GAMET interpretation (saved)
     if gamet_text.strip():
         det_pdf.gamet_block(gamet_text, analyze_gamet_pt(gamet_text))
-    # Charts
+
+    # Charts with 3-block analysis
     for ch in chart_rows:
         txt = analyze_chart_pt(
             kind=("SIGWX" if ch["kind"]=="SIGWX" else "SPC" if ch["kind"]=="SPC" else "WindTemp" if ch["kind"]=="Wind & Temp" else "Other"),
             img_b64=b64_png(ch["img_png"])
         )
         det_pdf.chart_block(ch["title"], ch["subtitle"], ch["img_png"], txt)
+
     det_name = "briefing_detalhado.pdf"; det_pdf.output(det_name)
     with open(det_name, "rb") as f:
         st.download_button("Download DETAILED (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
 
 st.divider()
 st.markdown(f"**Live Weather page:** {APP_WEATHER_URL}")
+
 
 
 
