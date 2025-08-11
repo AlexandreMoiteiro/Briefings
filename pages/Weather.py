@@ -1,33 +1,40 @@
-# pages/Weather.py — Live only (CheckWX), no "saved", no persistence
+# pages/Weather.py — METAR/TAF (CheckWX) + SIGMET LPPC (AWC) + GAMET (Gist) — layout limpo
 from typing import List, Dict, Any, Optional
-import datetime as dt, requests
+import datetime as dt, json, requests
 from zoneinfo import ZoneInfo
 import streamlit as st
 
+# ---------- Page ----------
 st.set_page_config(page_title="Weather", layout="wide")
 
-# --- Styles ---
+# ---------- Styles ----------
 st.markdown("""
 <style>
+/* Hide sidebar */
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
 [data-testid="stSidebarCollapseButton"] { display:none !important; }
 header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
+/* Tokens */
 :root { --line:#e5e7eb; --muted:#6b7280; --vfr:#16a34a; --mvfr:#f59e0b; --ifr:#ef4444; --lifr:#7c3aed; }
+/* Page */
 .page-title{font-size:2rem;font-weight:800;margin:0 0 .25rem}
-.subtle{color:var(--muted);margin-bottom:.75rem}
-.row{padding:8px 0 14px;border-bottom:1px solid var(--line)}
-.row h3{margin:0 0 6px;font-size:1.1rem}
+.subtle{color:var(--muted);margin:0 0 1rem}
+/* Cards */
+.card{border:1px solid var(--line); border-radius:14px; padding:14px 16px; background:#fff}
+.card h3{margin:0 0 8px; font-size:1.05rem}
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-weight:700;font-size:.80rem;color:#fff;margin-left:8px;vertical-align:middle}
 .vfr{background:var(--vfr)} .mvfr{background:var(--mvfr)} .ifr{background:var(--ifr)} .lifr{background:var(--lifr)}
-.muted{color:var(--muted)}
+.meta{font-size:.9rem;color:var(--muted);margin-left:8px}
 .monos{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-size:.95rem;white-space:pre-wrap}
-.info-line{font-size:.92rem;color:var(--muted)}
+.section{margin-top:18px}
+.hr{height:1px;background:var(--line);margin:10px 0}
 </style>
 """, unsafe_allow_html=True)
 
+# ---------- Defaults ----------
 DEFAULT_ICAOS = ["LPPT","LPBJ","LEBZ"]
 
-# --- Helpers ---
+# ---------- Helpers ----------
 def cw_headers() -> Dict[str,str]:
     key = st.secrets.get("CHECKWX_API_KEY","")
     return {"X-API-Key": key} if key else {}
@@ -50,7 +57,7 @@ def zulu_plus_pt(d: Optional[dt.datetime]) -> str:
     d_pt  = d_utc.astimezone(ZoneInfo("Europe/Lisbon"))
     return f"{d_utc.strftime('%Y-%m-%d %H:%MZ')} ({d_pt.strftime('%H:%M')} Portugal)"
 
-# --- Data (CheckWX live) ---
+# ---------- Data (CheckWX/AWC) ----------
 @st.cache_data(ttl=75)
 def fetch_metar_decoded(icao: str) -> Optional[Dict[str,Any]]:
     try:
@@ -59,8 +66,7 @@ def fetch_metar_decoded(icao: str) -> Optional[Dict[str,Any]]:
         r = requests.get(f"https://api.checkwx.com/metar/{icao}/decoded", headers=hdr, timeout=10)
         r.raise_for_status(); data = r.json().get("data", [])
         return data[0] if data else None
-    except Exception:
-        return None
+    except Exception: return None
 
 @st.cache_data(ttl=75)
 def fetch_metar_raw(icao: str) -> str:
@@ -72,8 +78,7 @@ def fetch_metar_raw(icao: str) -> str:
         if not data: return ""
         if isinstance(data[0], dict): return data[0].get("raw") or data[0].get("raw_text","") or ""
         return str(data[0])
-    except Exception:
-        return ""
+    except Exception: return ""
 
 @st.cache_data(ttl=75)
 def fetch_taf_decoded(icao: str) -> Optional[Dict[str,Any]]:
@@ -83,8 +88,7 @@ def fetch_taf_decoded(icao: str) -> Optional[Dict[str,Any]]:
         r = requests.get(f"https://api.checkwx.com/taf/{icao}/decoded", headers=hdr, timeout=10)
         r.raise_for_status(); data = r.json().get("data", [])
         return data[0] if data else None
-    except Exception:
-        return None
+    except Exception: return None
 
 @st.cache_data(ttl=75)
 def fetch_taf_raw(icao: str) -> str:
@@ -96,16 +100,13 @@ def fetch_taf_raw(icao: str) -> str:
         if not data: return ""
         if isinstance(data[0], dict): return data[0].get("raw") or data[0].get("raw_text","") or ""
         return str(data[0])
-    except Exception:
-        return ""
+    except Exception: return ""
 
 @st.cache_data(ttl=120)
 def fetch_sigmet_lppc() -> List[str]:
     try:
-        r = requests.get(
-            "https://aviationweather.gov/api/data/isigmet",
-            params={"loc":"eur","format":"json"}, timeout=12
-        )
+        r = requests.get("https://aviationweather.gov/api/data/isigmet",
+                         params={"loc":"eur","format":"json"}, timeout=12)
         r.raise_for_status(); js = r.json()
         items = js if isinstance(js, list) else js.get("features", []) or []
         out: List[str] = []
@@ -114,76 +115,115 @@ def fetch_sigmet_lppc() -> List[str]:
             if not props and isinstance(it, dict): props = it
             raw = (props.get("raw") or props.get("raw_text") or props.get("sigmet_text") or "").strip()
             fir = (props.get("fir") or props.get("firid") or props.get("firId") or "").upper()
-            if raw and (fir == "LPPC" or " LPPC " in f" {raw} " or "FIR LPPC" in raw or " LPPC FIR" in raw):
+            if not raw: continue
+            if fir == "LPPC" or " LPPC " in f" {raw} " or "FIR LPPC" in raw or " LPPC FIR" in raw:
                 out.append(raw)
         return out
-    except Exception:
-        return []
+    except Exception: return []
 
-# --- UI ---
+# ---------- GAMET (Gist) ----------
+def gamet_gist_config_ok() -> bool:
+    return bool(
+        st.secrets.get("GAMET_GIST_TOKEN","") and
+        st.secrets.get("GAMET_GIST_ID","") and
+        st.secrets.get("GAMET_GIST_FILENAME","")
+    )
+
+@st.cache_data(ttl=90)
+def load_gamet() -> Dict[str,Any]:
+    """Read GAMET text from a Gist. We only show the text — no 'saved' labels."""
+    if not gamet_gist_config_ok():
+        return {"text":"", "updated_utc":None}
+    try:
+        token = st.secrets["GAMET_GIST_TOKEN"]; gid = st.secrets["GAMET_GIST_ID"]; fn = st.secrets["GAMET_GIST_FILENAME"]
+        r = requests.get(
+            f"https://api.github.com/gists/{gid}",
+            headers={"Authorization": f"token {token}"},
+            timeout=10
+        )
+        r.raise_for_status(); files = r.json().get("files", {})
+        if fn in files and "content" in files[fn]:
+            content = files[fn]["content"]
+            try: return json.loads(content)
+            except Exception: return {"text": content, "updated_utc": None}
+    except Exception: pass
+    return {"text":"", "updated_utc":None}
+
+# ---------- UI: Header ----------
 st.markdown('<div class="page-title">Weather</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtle">Live METAR, TAF and LPPC SIGMET</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtle">METAR · TAF · SIGMET (LPPC) · GAMET</div>', unsafe_allow_html=True)
 
-# Query params → ICAO list
+# Query params -> ICAOs
 try:
     q = st.query_params
     raw = q.get("icao", "")
     if isinstance(raw, list): raw = ",".join(raw)
 except Exception:
-    qp = st.experimental_get_query_params(); raw = qp.get("icao", [","])[0]
-
+    raw = ""
 if not raw:
     raw = ",".join(DEFAULT_ICAOS)
-icaos = [p.strip().upper() for p in raw.split(",") if p.strip()]
 
-col1, col2 = st.columns([0.7, 0.3])
-with col1:
-    icaos_input = st.text_input("ICAO list (comma-separated)", value=",".join(icaos))
-with col2:
+# Controls
+cc1, cc2 = st.columns([0.75,0.25])
+with cc1:
+    icaos_input = st.text_input("ICAO list (comma-separated)", value=raw)
+with cc2:
     if st.button("Refresh"):
         st.cache_data.clear()
+
 icaos = [x.strip().upper() for x in icaos_input.split(",") if x.strip()]
 
-# Per-ICAO block
-for icao in icaos:
-    metar_dec = fetch_metar_decoded(icao); metar_raw = fetch_metar_raw(icao)
-    taf_dec   = fetch_taf_decoded(icao);   taf_raw   = fetch_taf_raw(icao)
+# ---------- METAR/TAF grid ----------
+st.markdown('<div class="section"></div>', unsafe_allow_html=True)
 
-    # badge categoria de voo
-    cat = (metar_dec or {}).get("flight_category","").upper()
-    klass = {"VFR":"vfr","MVFR":"mvfr","IFR":"ifr","LIFR":"lifr"}.get(cat,"")
-    badge = f'<span class="badge {klass}">{cat}</span>' if klass else ""
+# 2-col layout (mais estável que auto-grid em Streamlit)
+def chunked(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
 
-    # horas
-    metar_obs = ""
-    if metar_dec and metar_dec.get("observed"):
-        metar_obs = zulu_plus_pt(parse_iso_utc(metar_dec["observed"]))
-    taf_issued = ""
-    if taf_dec:
-        ts = (taf_dec.get("timestamp") or {}) if isinstance(taf_dec.get("timestamp"), dict) else {}
-        issued = ts.get("issued") or taf_dec.get("issued")
-        taf_issued = zulu_plus_pt(parse_iso_utc(issued)) if issued else ""
+for row in chunked(icaos, 2):
+    cols = st.columns(len(row))
+    for col, icao in zip(cols, row):
+        with col:
+            metar_dec = fetch_metar_decoded(icao)
+            taf_dec   = fetch_taf_decoded(icao)
+            metar_raw = fetch_metar_raw(icao)
+            taf_raw   = fetch_taf_raw(icao)
 
-    st.markdown('<div class="row">', unsafe_allow_html=True)
-    st.markdown(f"<h3>{icao} {badge}</h3>" + (f'<span class="info-line">Observed: {metar_obs}</span>' if metar_obs else ""), unsafe_allow_html=True)
-    st.markdown(
-        f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n'
-        f'<strong>TAF</strong> {taf_raw or "—"}'
-        + (f"\n\n<strong>TAF Issued</strong> {taf_issued}" if taf_issued else "")
-        + '</div>',
-        unsafe_allow_html=True
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+            cat = (metar_dec or {}).get("flight_category","").upper()
+            klass = {"VFR":"vfr","MVFR":"mvfr","IFR":"ifr","LIFR":"lifr"}.get(cat,"")
+            badge = f'<span class="badge {klass}">{cat}</span>' if klass else ""
 
-# SIGMET LPPC
+            obs = zulu_plus_pt(parse_iso_utc((metar_dec or {}).get("observed")))
+            issued = (taf_dec or {}).get("timestamp", {}) or {}
+            issued_str = zulu_plus_pt(parse_iso_utc(issued.get("issued"))) if isinstance(issued, dict) and issued.get("issued") else ""
+
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(f'<h3>{icao} {badge}' + (f'<span class="meta">Observed {obs}</span>' if obs else "") + '</h3>', unsafe_allow_html=True)
+            st.markdown(f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n<strong>TAF</strong> {taf_raw or "—"}' + (f'\n\n<strong>TAF Issued</strong> {issued_str}' if issued_str else "") + '</div>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+# ---------- SIGMET LPPC ----------
+st.markdown('<div class="section"></div>', unsafe_allow_html=True)
 st.subheader("SIGMET (LPPC)")
 sigs = fetch_sigmet_lppc()
 if not sigs:
     st.write("—")
 else:
     for s in sigs:
-        st.markdown(f'<div class="monos">{s}</div>', unsafe_allow_html=True)
-        st.markdown("---")
+        st.markdown(f'<div class="card monos">{s}</div>', unsafe_allow_html=True)
+
+# ---------- GAMET ----------
+st.markdown('<div class="section"></div>', unsafe_allow_html=True)
+st.subheader("GAMET")
+gamet = load_gamet()
+text = (gamet.get("text") or "").strip()
+if text:
+    st.markdown(f'<div class="card monos">{text}</div>', unsafe_allow_html=True)
+    # download opcional (sem dizer "saved")
+    st.download_button("Download GAMET (.txt)", data=text, file_name="gamet.txt")
+else:
+    st.write("—")
 
 
 
