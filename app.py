@@ -1,13 +1,7 @@
 # app.py
-# Briefings (RAW EN + Detailed PT)
-# - Two ICAO lists: METAR/TAF and NOTAMs (defaults as requested)
-# - NOTAMs fetched from CheckWX for NOTAMs list; RAW includes raw NOTAMs; Detailed includes PT interpretation
-# - SIGMET LPPC auto (AWC); GAMET saved to Gist (manual)
-# - Unicode-safe (DejaVu fonts) and high-quality images; GIF/PDF supported
-# - Separate buttons to generate RAW and DETAILED
-
+# Briefings (EN raw + PT detailed) — simplified fonts (Helvetica) with ASCII normalization
 from typing import Dict, Any, List, Tuple, Optional
-import io, os, json, base64, tempfile, datetime as dt
+import io, os, json, base64, tempfile, datetime as dt, unicodedata
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -24,7 +18,6 @@ APP_WEATHER_URL = "https://briefings.streamlit.app/Weather"
 st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown("""
 <style>
-/* Hide sidebar entirely */
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
 [data-testid="stSidebarCollapseButton"] { display:none !important; }
 header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
@@ -39,74 +32,18 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
 
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
-# ---------- Fonts (Unicode, robust lookup) ----------
-_FONTS_REGISTERED = False
-_UNICODE_FONTS_READY = False
-
-def _first_existing(candidates, bases):
-    for base in bases:
-        for name in candidates:
-            p = (base / name).resolve()
-            if p.exists():
-                return p
-    return None
-
-def register_fonts():
-    """
-    Registers DejaVu fonts using absolute paths.
-    Looks for:
-      - DejaVuSans.ttf
-      - DejaVuSans-Bold.ttf
-      - DejaVuSans-Oblique.ttf (or DejaVuSans-Italic.ttf)
-      - DejaVuSans-BoldOblique.ttf (optional)
-    """
-    global _FONTS_REGISTERED, _UNICODE_FONTS_READY
-    if _FONTS_REGISTERED:
-        return
-
-    here = Path(__file__).resolve().parent
-    bases = [here / "fonts", Path.cwd() / "fonts"]
-
-    reg  = _first_existing(["DejaVuSans.ttf"], bases)
-    bold = _first_existing(["DejaVuSans-Bold.ttf"], bases)
-    ital = _first_existing(["DejaVuSans-Oblique.ttf", "DejaVuSans-Italic.ttf"], bases)
-    boldital = _first_existing(["DejaVuSans-BoldOblique.ttf", "DejaVuSans-BoldItalic.ttf"], bases)
-
-    missing = []
-    if not reg:  missing.append("DejaVuSans.ttf")
-    if not bold: missing.append("DejaVuSans-Bold.ttf")
-    if not ital: missing.append("DejaVuSans-Oblique.ttf (or DejaVuSans-Italic.ttf)")
-
-    if missing:
-        _UNICODE_FONTS_READY = False
-        _FONTS_REGISTERED = True
-        st.error(
-            "DejaVu TTF files not found in ./fonts: " + ", ".join(missing) +
-            "\nLooked in:\n- " + "\n- ".join(str(b.resolve()) for b in bases)
-        )
-        return
-
-    try:
-        FPDF.add_font("DejaVu", "", str(reg), uni=True)
-        FPDF.add_font("DejaVu", "B", str(bold), uni=True)
-        FPDF.add_font("DejaVu", "I", str(ital), uni=True)
-        if boldital:
-            FPDF.add_font("DejaVu", "BI", str(boldital), uni=True)
-        _UNICODE_FONTS_READY = True
-    except Exception as e:
-        _UNICODE_FONTS_READY = False
-        st.error(f"Could not register DejaVu fonts: {e}")
-    finally:
-        _FONTS_REGISTERED = True
-
-def clean_text(s: str) -> str:
-    if not s:
+# ---------- Text cleaning (ASCII for Helvetica) ----------
+def ascii_safe(text: str) -> str:
+    if text is None:
         return ""
-    return (s
-            .replace("\u00A0", " ")
-            .replace("\u2009", " ")
-            .replace("\u2013", "-")
-            .replace("\uFEFF", ""))
+    # normalize and strip non-ascii (accents, em-dash, etc.)
+    t = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode("ascii")
+    # normalize common dashes/spaces just in case
+    return (t.replace("\u00A0", " ")
+             .replace("\u2009", " ")
+             .replace("\u2013", "-")
+             .replace("\u2014", "-")
+             .replace("\uFEFF", ""))
 
 # ---------- Image helpers ----------
 def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 300):
@@ -155,10 +92,6 @@ def fetch_taf_now(icao: str) -> str:
     except Exception: return ""
 
 def fetch_notams(icao: str) -> List[str]:
-    """
-    Fetch NOTAMs for ICAO from CheckWX.
-    Returns list of RAW strings (one per NOTAM). If API returns objects, picks useful fields.
-    """
     try:
         r = requests.get(f"https://api.checkwx.com/notam/{icao}", headers=cw_headers(), timeout=15)
         r.raise_for_status()
@@ -241,10 +174,10 @@ def save_gamet_to_gist(text: str) -> bool:
 
 # ---------- GPT-5 analyses (PT) ----------
 def analyze_chart_pt(kind: str, img_b64: str) -> str:
-    sys = ("És meteorologista aeronáutico sénior. Analisa o chart fornecido (PT), em prosa contínua, "
-           "com 3 blocos: 1) Visão geral; 2) Portugal; 3) Alentejo. "
-           "Sem listas. Usa só informação visível.")
-    user = f"Tipo: {kind}. Faz a análise pedida."
+    sys = ("Es meteorologista aeronautico senior. Analisa o chart fornecido (PT), em prosa continua, "
+           "com 3 blocos: 1) Visao geral; 2) Portugal; 3) Alentejo. "
+           "Sem listas. Usa so informacao visivel.")
+    user = f"Tipo: {kind}. Faz a analise pedida."
     try:
         resp = client.responses.create(
             model="gpt-5",
@@ -257,14 +190,14 @@ def analyze_chart_pt(kind: str, img_b64: str) -> str:
             ],
             max_output_tokens=1500, temperature=0.14,
         )
-        return clean_text(resp.output_text or "").strip()
+        return ascii_safe((resp.output_text or "").strip())
     except Exception as e:
-        return f"Não foi possível analisar o chart (erro: {e})."
+        return ascii_safe(f"Nao foi possivel analisar o chart (erro: {e}).")
 
 def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
-    sys = ("És meteorologista aeronáutico sénior. Em PT, interpreta METAR e TAF de forma corrida, "
-           "explicando códigos e impacto operacional. Não inventes.")
-    user = f"Aeródromo {icao}. METAR:\n{metar}\n\nTAF:\n{taf}"
+    sys = ("Es meteorologista aeronautico senior. Em PT, interpreta METAR e TAF de forma corrida, "
+           "explicando codigos e impacto operacional. Nao inventes.")
+    user = f"Aerodromo {icao}. METAR:\n{metar}\n\nTAF:\n{taf}"
     try:
         resp = client.responses.create(
             model="gpt-5",
@@ -272,13 +205,13 @@ def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
                    {"role":"user","content":[{"type":"input_text","text":user}]}],
             max_output_tokens=1200, temperature=0.14,
         )
-        return clean_text(resp.output_text or "").strip()
+        return ascii_safe((resp.output_text or "").strip())
     except Exception as e:
-        return f"Não foi possível interpretar METAR/TAF (erro: {e})."
+        return ascii_safe(f"Nao foi possivel interpretar METAR/TAF (erro: {e}).")
 
 def analyze_sigmet_pt(sigmet_text: str) -> str:
-    sys = ("És meteorologista aeronáutico sénior. Em PT, interpreta o SIGMET (LPPC) de forma corrida e operacional; "
-           "fenómeno, área, níveis, validade e impacto.")
+    sys = ("Es meteorologista aeronautico senior. Em PT, interpreta o SIGMET (LPPC) de forma corrida e operacional; "
+           "fenomeno, area, niveis, validade e impacto.")
     try:
         resp = client.responses.create(
             model="gpt-5",
@@ -286,13 +219,13 @@ def analyze_sigmet_pt(sigmet_text: str) -> str:
                    {"role":"user","content":[{"type":"input_text","text":sigmet_text}]}],
             max_output_tokens=900, temperature=0.14,
         )
-        return clean_text(resp.output_text or "").strip()
+        return ascii_safe((resp.output_text or "").strip())
     except Exception as e:
-        return f"Não foi possível interpretar o SIGMET (erro: {e})."
+        return ascii_safe(f"Nao foi possivel interpretar o SIGMET (erro: {e}).")
 
 def analyze_gamet_pt(gamet_text: str) -> str:
-    sys = ("És meteorologista aeronáutico sénior. Em PT, explica o GAMET num parágrafo corrido; "
-           "fenómenos, níveis e impacto operacional. Usa só o texto.")
+    sys = ("Es meteorologista aeronautico senior. Em PT, explica o GAMET num paragrafo corrido; "
+           "fenomenos, niveis e impacto operacional. Usa so o texto.")
     try:
         resp = client.responses.create(
             model="gpt-5",
@@ -300,21 +233,18 @@ def analyze_gamet_pt(gamet_text: str) -> str:
                    {"role":"user","content":[{"type":"input_text","text":gamet_text}]}],
             max_output_tokens=1200, temperature=0.14,
         )
-        return clean_text(resp.output_text or "").strip()
+        return ascii_safe((resp.output_text or "").strip())
     except Exception as e:
-        return f"Não foi possível interpretar o GAMET (erro: {e})."
+        return ascii_safe(f"Nao foi possivel interpretar o GAMET (erro: {e}).")
 
 def analyze_notams_pt(icao: str, notams_raw: List[str]) -> str:
-    """
-    PT explanation of NOTAMs for one aerodrome (operational summary).
-    """
     text = "\n\n".join(notams_raw)
     if not text.strip():
-        return "Sem NOTAMs disponíveis para este aeródromo no momento."
-    sys = ("És meteorologista/briefing officer. Em Português, resume os NOTAMs abaixo de forma corrida, clara e operacional, "
-           "destacando impacto para o voo (pistas/taxiways/iluminação/NAVAIDs/horários/restrições), níveis/horários de validade "
-           "e ações recomendadas. Não inventes; usa apenas o texto fornecido.")
-    user = f"Aeródromo {icao} — NOTAMs (RAW):\n{text}"
+        return "Sem NOTAMs disponiveis para este aerodromo no momento."
+    sys = ("Es briefing officer. Em Portugues (sem acentos), resume os NOTAMs abaixo de forma corrida e operacional, "
+           "destacando impacto para o voo (pistas/taxiways/iluminacao/NAVAIDs/horarios/restricoes), niveis/horarios "
+           "e acoes recomendadas. Nao inventes; usa apenas o texto fornecido.")
+    user = f"Aerodromo {icao} — NOTAMs (RAW):\n{text}"
     try:
         resp = client.responses.create(
             model="gpt-5",
@@ -322,17 +252,17 @@ def analyze_notams_pt(icao: str, notams_raw: List[str]) -> str:
                    {"role":"user","content":[{"type":"input_text","text":user}]}],
             max_output_tokens=1000, temperature=0.12,
         )
-        return clean_text(resp.output_text or "").strip()
+        return ascii_safe((resp.output_text or "").strip())
     except Exception as e:
-        return f"Não foi possível interpretar os NOTAMs (erro: {e})."
+        return ascii_safe(f"Nao foi possivel interpretar os NOTAMs (erro: {e}).")
 
 # ---------- PDF helpers ----------
 class Brand: line = (229,231,235)
 
 def draw_header(pdf: FPDF, text: str):
     pdf.set_draw_color(*Brand.line); pdf.set_line_width(0.3)
-    pdf.set_font("DejaVu","B",18)
-    pdf.cell(0, 12, clean_text(text), ln=True, align="C", border="B")
+    pdf.set_font("Helvetica","B",18)
+    pdf.cell(0, 12, ascii_safe(text), ln=True, align="C", border="B")
 
 def place_image_full(pdf: FPDF, png_bytes: io.BytesIO, max_h_pad: int=58):
     max_w = pdf.w - 22; max_h = pdf.h - max_h_pad
@@ -348,30 +278,30 @@ class RawPDF(FPDF):
     def footer(self): pass
     def cover(self, pilot, aircraft, callsign, reg, date_str, time_utc, mission):
         self.add_page(orientation="L"); self.set_xy(0,40)
-        self.set_font("DejaVu","B",28); self.cell(0,14,"Briefing (RAW)", ln=True, align="C")
-        self.set_font("DejaVu","",13); self.ln(2)
-        self.cell(0,8,clean_text(f"Pilot: {pilot}   Aircraft: {aircraft}   Callsign: {callsign}   Reg: {reg}"), ln=True, align="C")
-        self.cell(0,8,clean_text(f"Date: {date_str}   UTC: {time_utc}"), ln=True, align="C"); self.ln(6)
-        self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(f"Live METAR / TAF / SIGMET: {APP_WEATHER_URL}"), ln=True, align="C")
-        if mission: self.ln(4); self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(f"Remarks: {mission}"), align="C")
+        self.set_font("Helvetica","B",28); self.cell(0,14,"Briefing", ln=True, align="C")  # no "RAW"
+        self.set_font("Helvetica","",13); self.ln(2)
+        self.cell(0,8,ascii_safe(f"Pilot: {pilot}   Aircraft: {aircraft}   Callsign: {callsign}   Reg: {reg}"), ln=True, align="C")
+        self.cell(0,8,ascii_safe(f"Date: {date_str}   UTC: {time_utc}"), ln=True, align="C"); self.ln(6)
+        self.set_font("Helvetica","I",12); self.cell(0,8,ascii_safe(f"Live METAR / TAF / SIGMET: {APP_WEATHER_URL}"), ln=True, align="C")
+        if mission: self.ln(4); self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(f"Remarks: {mission}"), align="C")
     def section_text(self, title: str, body: str):
         self.add_page(orientation="P"); draw_header(self, title)
-        self.set_font("DejaVu","",12); self.ln(3); self.multi_cell(0,7,clean_text(body))
+        self.set_font("Helvetica","",12); self.ln(3); self.multi_cell(0,7,ascii_safe(body))
     def notams_raw(self, icao: str, notams: List[str]):
         if not notams: return
-        self.add_page(orientation="P"); draw_header(self, f"NOTAMs — {icao} (RAW)")
-        self.set_font("DejaVu","",12); self.ln(3)
+        self.add_page(orientation="P"); draw_header(self, f"NOTAMs - {icao} (RAW)")
+        self.set_font("Helvetica","",12); self.ln(3)
         for n in notams:
-            self.multi_cell(0,7,clean_text(n)); self.ln(2)
+            self.multi_cell(0,7,ascii_safe(n)); self.ln(2)
     def gamet_raw(self, text):
         if not text.strip(): return
         self.section_text("GAMET (RAW)", text)
     def sigmet_raw(self, text):
         if not text.strip(): return
-        self.section_text("SIGMET (LPPC) — RAW", text)
+        self.section_text("SIGMET (LPPC) - RAW", text)
     def chart_full(self, title, subtitle, img_png):
-        self.add_page(orientation="L"); draw_header(self,clean_text(title))
-        if subtitle: self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(subtitle), ln=True, align="C")
+        self.add_page(orientation="L"); draw_header(self,ascii_safe(title))
+        if subtitle: self.set_font("Helvetica","I",12); self.cell(0,8,ascii_safe(subtitle), ln=True, align="C")
         place_image_full(self, img_png)
 
 class DetailedPDF(FPDF):
@@ -379,45 +309,44 @@ class DetailedPDF(FPDF):
     def footer(self): pass
     def cover(self, pilot, aircraft, callsign, reg, date_str, time_utc, mission):
         self.add_page(orientation="L"); self.set_xy(0,40)
-        self.set_font("DejaVu","B",28); self.cell(0,14,"Briefing Detalhado (PT)", ln=True, align="C")
-        self.set_font("DejaVu","",13); self.ln(2)
-        self.cell(0,8,clean_text(f"Piloto: {pilot}   Aeronave: {aircraft}   Callsign: {callsign}   Matrícula: {reg}"), ln=True, align="C")
-        self.cell(0,8,clean_text(f"Data: {date_str}   UTC: {time_utc}"), ln=True, align="C"); self.ln(6)
-        self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(f"METAR / TAF / SIGMET ao vivo: {APP_WEATHER_URL}"), ln=True, align="C")
-        if mission: self.ln(4); self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(f"Notas: {mission}"), align="C")
+        self.set_font("Helvetica","B",28); self.cell(0,14,"Briefing Detalhado (PT)", ln=True, align="C")
+        self.set_font("Helvetica","",13); self.ln(2)
+        self.cell(0,8,ascii_safe(f"Piloto: {pilot}   Aeronave: {aircraft}   Callsign: {callsign}   Matricula: {reg}"), ln=True, align="C")
+        self.cell(0,8,ascii_safe(f"Data: {date_str}   UTC: {time_utc}"), ln=True, align="C"); self.ln(6)
+        self.set_font("Helvetica","I",12); self.cell(0,8,ascii_safe(f"METAR / TAF / SIGMET ao vivo: {APP_WEATHER_URL}"), ln=True, align="C")
+        if mission: self.ln(4); self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(f"Notas: {mission}"), align="C")
     def metar_taf_block(self, analyses: List[Tuple[str,str]]):
         if not analyses: return
-        self.add_page(orientation="P"); draw_header(self,"METAR / TAF — Interpretação (PT)")
-        self.set_font("DejaVu","",12); self.ln(2)
+        self.add_page(orientation="P"); draw_header(self,"METAR / TAF - Interpretacao (PT)")
+        self.set_font("Helvetica","",12); self.ln(2)
         for icao, text in analyses:
-            self.set_font("DejaVu","B",13); self.cell(0,8,clean_text(icao), ln=True)
-            self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(text)); self.ln(2)
+            self.set_font("Helvetica","B",13); self.cell(0,8,ascii_safe(icao), ln=True)
+            self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(text)); self.ln(2)
     def notams_block(self, parsed: List[Tuple[str,str,List[str]]]):
-        # parsed: list of (icao, analysis_pt, raw_list)
         any_data = any(r for _,_,r in parsed)
         if not any_data: return
-        self.add_page(orientation="P"); draw_header(self,"NOTAMs — Interpretação (PT)")
+        self.add_page(orientation="P"); draw_header(self,"NOTAMs - Interpretacao (PT)")
         for icao, analysis, raws in parsed:
             if not raws: continue
-            self.set_font("DejaVu","B",12); self.cell(0,8,clean_text(icao), ln=True)
-            self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(analysis)); self.ln(2)
+            self.set_font("Helvetica","B",12); self.cell(0,8,ascii_safe(icao), ln=True)
+            self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis)); self.ln(2)
     def sigmet_block(self, sigmet_text: str, analysis_pt: str):
         if not sigmet_text.strip(): return
-        self.add_page(orientation="P"); draw_header(self,"SIGMET (LPPC) — Interpretação (PT)")
-        self.ln(2); self.set_font("DejaVu","B",12); self.cell(0,8,"Texto (RAW):", ln=True)
-        self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(sigmet_text)); self.ln(4)
-        self.set_font("DejaVu","B",12); self.cell(0,8,"Interpretação:", ln=True)
-        self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(analysis_pt))
+        self.add_page(orientation="P"); draw_header(self,"SIGMET (LPPC) - Interpretacao (PT)")
+        self.ln(2); self.set_font("Helvetica","B",12); self.cell(0,8,"Texto (RAW):", ln=True)
+        self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(sigmet_text)); self.ln(4)
+        self.set_font("Helvetica","B",12); self.cell(0,8,"Interpretacao:", ln=True)
+        self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
     def gamet_block(self, gamet_text: str, analysis_pt: str):
         if not gamet_text.strip(): return
-        self.add_page(orientation="P"); draw_header(self,"GAMET — Interpretação (PT)")
-        self.ln(2); self.set_font("DejaVu","B",12); self.cell(0,8,"Texto (RAW):", ln=True)
-        self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(gamet_text)); self.ln(4)
-        self.set_font("DejaVu","B",12); self.cell(0,8,"Interpretação:", ln=True)
-        self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(analysis_pt))
+        self.add_page(orientation="P"); draw_header(self,"GAMET - Interpretacao (PT)")
+        self.ln(2); self.set_font("Helvetica","B",12); self.cell(0,8,"Texto (RAW):", ln=True)
+        self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(gamet_text)); self.ln(4)
+        self.set_font("Helvetica","B",12); self.cell(0,8,"Interpretacao:", ln=True)
+        self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
     def chart_block(self, title, subtitle, img_png, analysis_pt):
-        self.add_page(orientation="L"); draw_header(self,clean_text(title))
-        if subtitle: self.set_font("DejaVu","I",12); self.cell(0,8,clean_text(subtitle), ln=True, align="C")
+        self.add_page(orientation="L"); draw_header(self,ascii_safe(title))
+        if subtitle: self.set_font("Helvetica","I",12); self.cell(0,8,ascii_safe(subtitle), ln=True, align="C")
         # image (upper half)
         max_w = self.w - 22; max_h = (self.h // 2) - 16
         img = Image.open(img_png); iw, ih = img.size
@@ -427,7 +356,7 @@ class DetailedPDF(FPDF):
             img.save(tmp, format="PNG"); path = tmp.name
         self.image(path, x=x, y=y, w=w, h=h); os.remove(path); self.ln(h+8)
         # text (lower)
-        self.set_font("DejaVu","",12); self.multi_cell(0,7,clean_text(analysis_pt))
+        self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
 
 # ---------- UI ----------
 st.markdown('<div class="app-title">Briefings</div>', unsafe_allow_html=True)
@@ -501,14 +430,13 @@ gen_det = colGen2.button("Generate DETAILED (PT)")
 
 # ---------- Generate RAW ----------
 if gen_raw:
-    register_fonts()
     date_str = str(flight_date)
 
     # Auto SIGMET LPPC
     sigmets = fetch_sigmet_lppc_auto()
     sigmet_text = "\n\n---\n\n".join(sigmets).strip()
 
-    # Fetch NOTAMs for NOTAM list
+    # NOTAMs for NOTAM list
     notams_map: Dict[str,List[str]] = {icao: fetch_notams(icao) for icao in icaos_notam}
 
     # RAW
@@ -531,13 +459,13 @@ if gen_raw:
     for ch in chart_rows:
         raw_pdf.chart_full(ch["title"], ch["subtitle"], ch["img_png"])
 
-    raw_name = "briefing_raw.pdf"; raw_pdf.output(raw_name)
+    raw_name = "briefing.pdf"  # no "(RAW)"
+    raw_pdf.output(raw_name)
     with open(raw_name, "rb") as f:
-        st.download_button("Download RAW (EN)", data=f.read(), file_name=raw_name, mime="application/pdf", use_container_width=True)
+        st.download_button("Download Briefing (EN)", data=f.read(), file_name=raw_name, mime="application/pdf", use_container_width=True)
 
 # ---------- Generate DETAILED ----------
 if gen_det:
-    register_fonts()
     date_str = str(flight_date)
 
     # Auto SIGMET LPPC
@@ -560,7 +488,7 @@ if gen_det:
     notams_map: Dict[str,List[str]] = {icao: fetch_notams(icao) for icao in icaos_notam}
     notam_parsed: List[Tuple[str,str,List[str]]] = []
     for icao, arr in notams_map.items():
-        analysis = analyze_notams_pt(icao, arr) if arr else "Sem NOTAMs disponíveis."
+        analysis = analyze_notams_pt(icao, arr) if arr else "Sem NOTAMs disponiveis."
         notam_parsed.append((icao, analysis, arr))
     det_pdf.notams_block(notam_parsed)
 
@@ -580,9 +508,10 @@ if gen_det:
         )
         det_pdf.chart_block(ch["title"], ch["subtitle"], ch["img_png"], txt)
 
-    det_name = "briefing_detalhado.pdf"; det_pdf.output(det_name)
+    det_name = "briefing_detalhado.pdf"
+    det_pdf.output(det_name)
     with open(det_name, "rb") as f:
-        st.download_button("Download DETAILED (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
+        st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
 
 st.divider()
 st.markdown(f"**Live Weather page:** {APP_WEATHER_URL}")
