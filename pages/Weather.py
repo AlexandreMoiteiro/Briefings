@@ -1,4 +1,4 @@
-# pages/Weather.py — METAR/TAF (CheckWX) + SIGMET LPPC (AWC) + GAMET (Gist) — layout limpo
+# pages/Weather.py — METAR/TAF (CheckWX) + SIGMET LPPC (AWC) + GAMET (Gist)
 from typing import List, Dict, Any, Optional
 import datetime as dt, json, requests
 from zoneinfo import ZoneInfo
@@ -14,20 +14,23 @@ st.markdown("""
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
 [data-testid="stSidebarCollapseButton"] { display:none !important; }
 header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
+
 /* Tokens */
 :root { --line:#e5e7eb; --muted:#6b7280; --vfr:#16a34a; --mvfr:#f59e0b; --ifr:#ef4444; --lifr:#7c3aed; }
+
 /* Page */
 .page-title{font-size:2rem;font-weight:800;margin:0 0 .25rem}
 .subtle{color:var(--muted);margin:0 0 1rem}
-/* Cards */
-.card{border:1px solid var(--line); border-radius:14px; padding:14px 16px; background:#fff}
+
+/* Cards (full width, stacked) */
+.card{border:1px solid var(--line); border-radius:14px; padding:14px 16px; background:#fff; margin-bottom:12px}
 .card h3{margin:0 0 8px; font-size:1.05rem}
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-weight:700;font-size:.80rem;color:#fff;margin-left:8px;vertical-align:middle}
 .vfr{background:var(--vfr)} .mvfr{background:var(--mvfr)} .ifr{background:var(--ifr)} .lifr{background:var(--lifr)}
 .meta{font-size:.9rem;color:var(--muted);margin-left:8px}
+
 .monos{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-size:.95rem;white-space:pre-wrap}
 .section{margin-top:18px}
-.hr{height:1px;background:var(--line);margin:10px 0}
 </style>
 """, unsafe_allow_html=True)
 
@@ -131,7 +134,7 @@ def gamet_gist_config_ok() -> bool:
 
 @st.cache_data(ttl=90)
 def load_gamet() -> Dict[str,Any]:
-    """Read GAMET text from a Gist. We only show the text — no 'saved' labels."""
+    """Read GAMET text from a Gist. Only show the text; no extra labels."""
     if not gamet_gist_config_ok():
         return {"text":"", "updated_utc":None}
     try:
@@ -173,38 +176,25 @@ with cc2:
 
 icaos = [x.strip().upper() for x in icaos_input.split(",") if x.strip()]
 
-# ---------- METAR/TAF grid ----------
-st.markdown('<div class="section"></div>', unsafe_allow_html=True)
+# ---------- METAR/TAF (stacked cards) ----------
+for icao in icaos:
+    metar_dec = fetch_metar_decoded(icao)
+    metar_raw = fetch_metar_raw(icao)
+    taf_raw   = fetch_taf_raw(icao)
 
-# 2-col layout (mais estável que auto-grid em Streamlit)
-def chunked(lst, n):
-    for i in range(0, len(lst), n):
-        yield lst[i:i+n]
+    cat = (metar_dec or {}).get("flight_category","").upper()
+    klass = {"VFR":"vfr","MVFR":"mvfr","IFR":"ifr","LIFR":"lifr"}.get(cat,"")
+    badge = f'<span class="badge {klass}">{cat}</span>' if klass else ""
 
-for row in chunked(icaos, 2):
-    cols = st.columns(len(row))
-    for col, icao in zip(cols, row):
-        with col:
-            metar_dec = fetch_metar_decoded(icao)
-            taf_dec   = fetch_taf_decoded(icao)
-            metar_raw = fetch_metar_raw(icao)
-            taf_raw   = fetch_taf_raw(icao)
+    obs = zulu_plus_pt(parse_iso_utc((metar_dec or {}).get("observed")))
 
-            cat = (metar_dec or {}).get("flight_category","").upper()
-            klass = {"VFR":"vfr","MVFR":"mvfr","IFR":"ifr","LIFR":"lifr"}.get(cat,"")
-            badge = f'<span class="badge {klass}">{cat}</span>' if klass else ""
-
-            obs = zulu_plus_pt(parse_iso_utc((metar_dec or {}).get("observed")))
-            issued = (taf_dec or {}).get("timestamp", {}) or {}
-            issued_str = zulu_plus_pt(parse_iso_utc(issued.get("issued"))) if isinstance(issued, dict) and issued.get("issued") else ""
-
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown(f'<h3>{icao} {badge}' + (f'<span class="meta">Observed {obs}</span>' if obs else "") + '</h3>', unsafe_allow_html=True)
-            st.markdown(f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n<strong>TAF</strong> {taf_raw or "—"}' + (f'\n\n<strong>TAF Issued</strong> {issued_str}' if issued_str else "") + '</div>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown(f'<h3>{icao} {badge}' + (f'<span class="meta">Observed {obs}</span>' if obs else "") + '</h3>', unsafe_allow_html=True)
+    # no "TAF Issued" line, as requested
+    st.markdown(f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n<strong>TAF</strong> {taf_raw or "—"}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------- SIGMET LPPC ----------
-st.markdown('<div class="section"></div>', unsafe_allow_html=True)
 st.subheader("SIGMET (LPPC)")
 sigs = fetch_sigmet_lppc()
 if not sigs:
@@ -214,17 +204,13 @@ else:
         st.markdown(f'<div class="card monos">{s}</div>', unsafe_allow_html=True)
 
 # ---------- GAMET ----------
-st.markdown('<div class="section"></div>', unsafe_allow_html=True)
 st.subheader("GAMET")
 gamet = load_gamet()
 text = (gamet.get("text") or "").strip()
 if text:
     st.markdown(f'<div class="card monos">{text}</div>', unsafe_allow_html=True)
-    # download opcional (sem dizer "saved")
-    st.download_button("Download GAMET (.txt)", data=text, file_name="gamet.txt")
 else:
     st.write("—")
-
 
 
 
