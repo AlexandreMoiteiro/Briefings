@@ -211,31 +211,39 @@ def ldg_corrections(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
 # =========================
 # PDF helpers (pypdf only)
 # =========================
-def pypdf_write_fields(template_path: Path, out_path: Path, field_values: dict, extra_pages: List[Path] = None):
+from pypdf import PdfReader as Rd_pypdf, PdfWriter as Wr_pypdf
+from pypdf.generic import NameObject, BooleanObject, DictionaryObject
+
+def pypdf_write_fields(template_path: Path, out_path: Path, field_values: dict, extra_pages: list[Path] = None):
+    """
+    Fill AcroForm fields using pypdf only.
+    - Creates a fresh /AcroForm in the writer (no cross-doc refs).
+    - Sets /NeedAppearances true so values render everywhere.
+    - Updates fields on every page.
+    - Appends extra PDFs (e.g., the calculations page).
+    """
     base_r = Rd_pypdf(str(template_path))
     w = Wr_pypdf()
 
-    # copy pages
+    # 1) Copy template pages
     for p in base_r.pages:
         w.add_page(p)
 
-    # merge AcroForm + NeedAppearances
-    root = base_r.trailer["/Root"]
-    if "/AcroForm" in root:
-        acro = root["/AcroForm"]
-        acro.update({"/NeedAppearances": True})
-        w._root_object.update({"/AcroForm": acro})
+    # 2) Fresh /AcroForm with NeedAppearances=True (don't reuse reader objects!)
+    w._root_object[NameObject("/AcroForm")] = DictionaryObject()
+    w._root_object["/AcroForm"][NameObject("/NeedAppearances")] = BooleanObject(True)
 
-    # update form fields on every page
+    # 3) Update fields on every page (unknown names are silently ignored)
     for page in w.pages:
         w.update_page_form_field_values(page, field_values)
 
-    # append extra pages (calc)
+    # 4) Append extra pages (e.g., FPDF calculation sheet)
     for x in (extra_pages or []):
         xr = Rd_pypdf(str(x))
         for p in xr.pages:
             w.add_page(p)
 
+    # 5) Write out
     with open(out_path, "wb") as f:
         w.write(f)
 
