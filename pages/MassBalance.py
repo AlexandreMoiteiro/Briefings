@@ -557,60 +557,82 @@ if st.button("Generate filled PDF"):
         for p in calc_r.pages: merger.add_page(p)
         with open(out_main_path, "wb") as f: merger.write(f)
 
-    # 2b) PyPDF pass to FORCE appearances and fill all candidate names (robust)
-    rd = Rd_pypdf(str(out_main_path))
-    wr = Wr_pypdf()
+   # 2b) PyPDF pass to FORCE appearances and fill all candidate names (robust)
+from pypdf.generic import NameObject, BooleanObject
 
-    values = {}
-    def add_vals(names, value):
-        if not isinstance(names, (list, tuple)):
-            names = [names]
-        for n in names:
-            values[str(n)] = str(value)
+rd = Rd_pypdf(str(out_main_path))
+wr = Wr_pypdf()
 
-    # base
-    add_vals(BASE_FIELDS["date"], date_str)
-    add_vals(BASE_FIELDS["reg"], reg)
-    add_vals(BASE_FIELDS["total_w"], f"{total_weight:.1f}")
-    add_vals(BASE_FIELDS["cg"], f"{cg:.3f}")
-    add_vals(BASE_FIELDS["mtow"], f"{AC['max_takeoff_weight']:.0f}")
-    add_vals(BASE_FIELDS["extra_fuel"], f"{remaining_fuel_l:.1f} L")
-    add_vals(BASE_FIELDS["extra_reason"], f"limited by {limit_label}")
+# Add all pages to the writer first
+for page in rd.pages:
+    wr.add_page(page)
 
-    # per role
-    for role, rnames in ROLE_FIELDS.items():
-        rr = role_to_row.get(role)
-        if not rr: continue
-        add_vals(rnames["airfield"], rr["icao"])
-        add_vals(rnames["qfu"], f"{rr['qfu']:.0f} deg")
-        add_vals(rnames["elev"], f"{rr['elev_ft']:.0f}")
-        add_vals(rnames["qnh"], f"{rr['qnh']:.1f}")
-        add_vals(rnames["temp"], f"{rr['temp']:.1f}")
-        add_vals(rnames["wind"], f"{rr['hw_comp']:.0f} kt")
-        add_vals(rnames["pa"], f"{rr['pa_ft']:.0f}")
-        add_vals(rnames["da"], f"{rr['da_ft']:.0f}")
-        add_vals(rnames["toda_lda"], f"{int(rr['toda_av'])}/{int(rr['lda_av'])}")
-        add_vals(rnames["todr"], f"{rr['to_50']:.0f}")
-        add_vals(rnames["ldr"], f"{rr['ldg_50']:.0f}")
-        try:
-            roc_val = roc_interp(rr['pa_ft'], rr['temp'], total_weight)
-            add_vals(rnames["roc"], f"{roc_val:.0f}")
-        except Exception:
-            pass
+# Build values dict (same as you already had)
+values = {}
+def add_vals(names, value):
+    if not isinstance(names, (list, tuple)):
+        names = [names]
+    for n in names:
+        values[str(n)] = str(value)
 
-    # Make viewer render appearances
-    if "/AcroForm" in rd.trailer["/Root"]:
-        rd.trailer["/Root"]["/AcroForm"].update({"/NeedAppearances": True})
+# base fields
+add_vals(BASE_FIELDS["date"], date_str)
+add_vals(BASE_FIELDS["reg"], reg)
+add_vals(BASE_FIELDS["total_w"], f"{total_weight:.1f}")
+add_vals(BASE_FIELDS["cg"], f"{cg:.3f}")
+add_vals(BASE_FIELDS["mtow"], f"{AC['max_takeoff_weight']:.0f}")
+add_vals(BASE_FIELDS["extra_fuel"], f"{remaining_fuel_l:.1f} L")
+add_vals(BASE_FIELDS["extra_reason"], f"limited by {limit_label}")
 
-    for page in rd.pages:
-        wr.add_page(page)
+# per-role fields
+for role, rnames in ROLE_FIELDS.items():
+    rr = role_to_row.get(role)
+    if not rr:
+        continue
+    add_vals(rnames["airfield"], rr["icao"])
+    add_vals(rnames["qfu"], f"{rr['qfu']:.0f} deg")
+    add_vals(rnames["elev"], f"{rr['elev_ft']:.0f}")
+    add_vals(rnames["qnh"], f"{rr['qnh']:.1f}")
+    add_vals(rnames["temp"], f"{rr['temp']:.1f}")
+    add_vals(rnames["wind"], f"{rr['hw_comp']:.0f} kt")
+    add_vals(rnames["pa"], f"{rr['pa_ft']:.0f}")
+    add_vals(rnames["da"], f"{rr['da_ft']:.0f}")
+    add_vals(rnames["toda_lda"], f"{int(rr['toda_av'])}/{int(rr['lda_av'])}")
+    add_vals(rnames["todr"], f"{rr['to_50']:.0f}")
+    add_vals(rnames["ldr"], f"{rr['ldg_50']:.0f}")
+    try:
+        roc_val = roc_interp(rr['pa_ft'], rr['temp'], total_weight)
+        add_vals(rnames["roc"], f"{roc_val:.0f}")
+    except Exception:
+        pass
+
+# Ensure the writer has an AcroForm:
+# Prefer the AcroForm from the ORIGINAL TEMPLATE (most reliable),
+# falling back to the merged PDF if it happens to still have one.
+tmpl_reader = Rd_pypdf(str(PDF_TEMPLATE))
+acro = None
+if "/AcroForm" in tmpl_reader.trailer["/Root"]:
+    acro = tmpl_reader.trailer["/Root"]["/AcroForm"]
+elif "/AcroForm" in rd.trailer["/Root"]:
+    acro = rd.trailer["/Root"]["/AcroForm"]
+
+if acro is not None:
+    wr._root_object.update({NameObject("/AcroForm"): acro})
+    # Force viewers to render appearances
+    wr._root_object["/AcroForm"].update({NameObject("/NeedAppearances"): BooleanObject(True)})
+
+    # Now it is safe to update form field values on each page
+    for page in wr.pages:
         wr.update_page_form_field_values(page, values)
+else:
+    # No AcroForm found at all — just write pages (nothing to fill)
+    st.warning("No AcroForm found in template; fields cannot be filled. Check the template PDF.")
 
-    with open(out_main_path, "wb") as f:
-        wr.write(f)
+with open(out_main_path, "wb") as f:
+    wr.write(f)
 
-    st.success("PDF generated successfully!")
-    with open(out_main_path, "rb") as f:
-        st.download_button("Download PDF", f, file_name=out_main_path.name, mime="application/pdf")
+st.success("PDF generated successfully!")
+with open(out_main_path, "rb") as f:
+    st.download_button("Download PDF", f, file_name=out_main_path.name, mime="application/pdf")
 
 
