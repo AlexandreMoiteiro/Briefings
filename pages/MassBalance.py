@@ -643,8 +643,19 @@ if st.button("Generate filled PDF"):
     engine_name, reader = load_pdf_any(PDF_TEMPLATE)
     out_main_path = APP_DIR / f"MB_Performance_Mission_{mission}.pdf"
 
-    if engine_name == "pdfrw" and hasattr(reader, 'Root') and '/AcroForm' in reader.Root:
-        fields_all = iter_fields_pdfrw(reader)
+    engine_name, reader = load_pdf_any(PDF_TEMPLATE)
+
+    fields_all = []
+    if engine_name == "pdfrw":
+        try:
+            fields_all = iter_fields_pdfrw(reader)
+        except Exception:
+            fields_all = []
+    
+        if not fields_all:
+            # No fields found or pdfrw failed → fall back to pypdf handling
+            engine_name = "pypdf"
+
 
         # Base fields
         pdfrw_set_field(fields_all, ["Textbox19","REG","Registration"], reg)
