@@ -212,15 +212,22 @@ def ldg_corrections(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
 # PDF helpers (pypdf only)
 # =========================
 from pypdf import PdfReader as Rd_pypdf, PdfWriter as Wr_pypdf
-from pypdf.generic import NameObject, BooleanObject, DictionaryObject
+from pypdf.generic import NameObject, BooleanObject, DictionaryObject, TextStringObject
+
+def _stringify_field_name(t):
+    # t is a TextStringObject like "(Textbox19)" or "Textbox19"
+    s = str(t)
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1]
+    return s
 
 def pypdf_write_fields(template_path: Path, out_path: Path, field_values: dict, extra_pages: list[Path] = None):
     """
-    Fill AcroForm fields using pypdf only.
-    - Creates a fresh /AcroForm in the writer (no cross-doc refs).
-    - Sets /NeedAppearances true so values render everywhere.
-    - Updates fields on every page.
-    - Appends extra PDFs (e.g., the calculations page).
+    Robust, pypdf-only filler:
+    - Copies pages
+    - Creates fresh /AcroForm with NeedAppearances=True
+    - Fills values by walking page /Annots (Subtype /Widget) and writing /V
+    - Appends extra PDFs (e.g., calculations page)
     """
     base_r = Rd_pypdf(str(template_path))
     w = Wr_pypdf()
@@ -229,15 +236,29 @@ def pypdf_write_fields(template_path: Path, out_path: Path, field_values: dict, 
     for p in base_r.pages:
         w.add_page(p)
 
-    # 2) Fresh /AcroForm with NeedAppearances=True (don't reuse reader objects!)
+    # 2) Fresh /AcroForm (no cross-object copying) + NeedAppearances
     w._root_object[NameObject("/AcroForm")] = DictionaryObject()
     w._root_object["/AcroForm"][NameObject("/NeedAppearances")] = BooleanObject(True)
 
-    # 3) Update fields on every page (unknown names are silently ignored)
+    # 3) Fill widgets by /Annots directly (avoid update_page_form_field_values)
     for page in w.pages:
-        w.update_page_form_field_values(page, field_values)
+        if "/Annots" not in page:
+            continue
+        for annot_ref in list(page["/Annots"]):
+            annot = annot_ref.get_object()
+            if annot.get("/Subtype") != NameObject("/Widget"):
+                continue
+            t = annot.get("/T")
+            if not t:
+                continue
+            fname = _stringify_field_name(t)
+            if fname in field_values:
+                annot[NameObject("/V")] = TextStringObject(str(field_values[fname]))
+                # Drop appearance so NeedAppearances can rebuild in viewer
+                if "/AP" in annot:
+                    del annot["/AP"]
 
-    # 4) Append extra pages (e.g., FPDF calculation sheet)
+    # 4) Append extra pages (e.g., FPDF calc page)
     for x in (extra_pages or []):
         xr = Rd_pypdf(str(x))
         for p in xr.pages:
