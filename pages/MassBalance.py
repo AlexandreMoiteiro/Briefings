@@ -246,34 +246,65 @@ def load_pdf_any(path: Path):
         except Exception as e:
             raise RuntimeError(f"Could not read the PDF: {e}")
 
+from pdfrw import PdfDict  # keep your existing imports
+
 def iter_fields_pdfrw(reader_pdfrw):
-    """Yield all pdfrw field dicts recursively (handles Kids)."""
-    def _walk(objs):
-        if not objs:
-            return
-        for f in objs:
-            yield f
-            kids = f.get('/Kids', [])
-            if kids:
-                yield from _walk(kids)
-    acro = getattr(reader_pdfrw, 'Root', {}).get('/AcroForm', None)
-    if not acro:
+    """Return a flat list of all field dicts (handles Kids). Safe for pdfrw."""
+    # Some files lack an AcroForm or Fields—handle gracefully
+    root = getattr(reader_pdfrw, "Root", None)
+    if root is None:
         return []
-    return list(_walk(acro.get('/Fields', [])))
+
+    acroform = getattr(root, "AcroForm", None)
+    if acroform is None:
+        return []
+
+    fields = getattr(acroform, "Fields", None)
+    if not fields:
+        return []
+
+    out = []
+
+    def _walk(items):
+        if not items:
+            return
+        for f in items:
+            # Only accept PdfDict-like objects
+            if not isinstance(f, PdfDict):
+                continue
+            out.append(f)
+            kids = getattr(f, "Kids", None)
+            if kids:
+                _walk(kids)
+
+    _walk(fields)
+    return out
 
 def pdfrw_set_field(fields_all, candidates, value, color_rgb=None):
-    """Set first field that matches any candidate name; return True if set."""
+    """Set first field with any matching name; return True if set."""
     if not isinstance(candidates, (list, tuple)):
         candidates = [candidates]
-    for name in candidates:
+
+    # Helper to read field name robustly
+    def get_name(f):
+        t = getattr(f, "T", None)
+        if t is None:
+            # pdfrw PdfDict supports .get with PdfName; but attribute path is safer
+            t = f.get("T") or f.get("/T")
+        if isinstance(t, str):
+            # strip parens if present "(Name)"
+            return t[1:-1] if (t.startswith("(") and t.endswith(")")) else t
+        return t
+
+    for cand in candidates:
         for f in fields_all:
-            t = f.get('/T')
-            if not t:
+            fname = get_name(f)
+            if not fname:
                 continue
-            fname = t[1:-1] if isinstance(t, str) and t.startswith('(') and t.endswith(')') else t
-            if fname == name:
+            if fname == cand:
+                # Set value and clear appearance so viewers redraw
                 f.update(PdfDict(V=str(value)))
-                f.update(PdfDict(AP=None))  # drop appearance to force refresh
+                f.update(PdfDict(AP=None))
                 if color_rgb:
                     r, g, b = color_rgb
                     f.update(PdfDict(DA=f"{r/255:.3f} {g/255:.3f} {b/255:.3f} rg /Helv 10 Tf"))
