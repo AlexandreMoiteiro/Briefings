@@ -23,10 +23,15 @@ from fpdf import FPDF
 # Helpers & style
 # =========================
 
-def ascii_safe(text):
-    if not isinstance(text, str):
-        return str(text)
-    return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
+def ascii_safe(txt):
+    """Return a latin-1 safe string for FPDF. Never returns None."""
+    if txt is None:
+        return ""
+    s = str(txt)
+    try:
+        return s.encode("latin-1", "replace").decode("latin-1")
+    except Exception:
+        return s.encode("ascii", "replace").decode("ascii")
 
 st.set_page_config(
     page_title="Tecnam P2008 – Mass & Balance & Performance (EN)",
@@ -71,7 +76,7 @@ AC = {
 }
 
 # =========================
-# Aerodrome defaults (practical values, can edit in UI)
+# Aerodrome defaults (editable)
 # =========================
 AERODROMES_DEFAULT = [
     {"role":"Departure","icao":"LPSO","elev_ft":390.0,"qfu":30.0,"toda":1800.0,"lda":1800.0,
@@ -153,7 +158,7 @@ def bilinear(pa, temp, table, key):
     v11 = table[p1][key][t1]
     v0 = interp1(t, t0, t1, v00, v01)
     v1 = interp1(t, t0, t1, v10, v11)
-    return interp1(pa, p0, p1, v0, v1), (p0,p1,t0,t1,v00,v01,v10,v11)
+    return interp1(pa, p0, p1, v0, v1)
 
 def roc_interp(pa, temp, weight):
     w = clamp(weight, 550.0, 650.0)
@@ -177,15 +182,11 @@ def roc_interp(pa, temp, weight):
         v11 = tab[p1][t1]
         v0 = interp1(t, t0, t1, v00, v01)
         v1 = interp1(t, t0, t1, v10, v11)
-        return interp1(pa_c, p0, p1, v0, v1), (p0,p1,t0,t1,v00,v01,v10,v11)
+        return interp1(pa_c, p0, p1, v0, v1)
     if w <= 600:
-        v_lo, d_lo = roc_for_w(550)
-        v_hi, d_hi = roc_for_w(600)
-        return interp1(w, 550, 600, v_lo, v_hi), ("550→600", d_lo, d_hi)
+        return interp1(w, 550, 600, roc_for_w(550), roc_for_w(600))
     else:
-        v_lo, d_lo = roc_for_w(600)
-        v_hi, d_hi = roc_for_w(650)
-        return interp1(w, 600, 650, v_lo, v_hi), ("600→650", d_lo, d_hi)
+        return interp1(w, 600, 650, roc_for_w(600), roc_for_w(650))
 
 def wind_head_component(runway_qfu_deg, wind_dir_deg, wind_speed):
     if runway_qfu_deg is None or wind_dir_deg is None:
@@ -293,16 +294,16 @@ with right:
                                                    "paved":paved,"slope_pc":slope_pc,"toda":toda_av,
                                                    "lda":lda_av})
 
-            # PA/DA
+            # PA/DA (do not assume ISA):
             pa_ft = elev + (1013.25 - qnh) * 27
             isa_temp = 15 - 2*(pa_ft/1000)
             da_ft = pa_ft + (120*(temp - isa_temp))
 
-            # Interpolation (also keeping details for the calculations PDF)
-            to_gr, to_dbg = bilinear(pa_ft, temp, TAKEOFF, 'GR')
-            to_50, to50_dbg = bilinear(pa_ft, temp, TAKEOFF, '50ft')
-            ldg_gr, ldg_dbg = bilinear(pa_ft, temp, LANDING, 'GR')
-            ldg_50, l50_dbg = bilinear(pa_ft, temp, LANDING, '50ft')
+            # Interpolation using PA & OAT
+            to_gr = bilinear(pa_ft, temp, TAKEOFF, 'GR')
+            to_50 = bilinear(pa_ft, temp, TAKEOFF, '50ft')
+            ldg_gr = bilinear(pa_ft, temp, LANDING, 'GR')
+            ldg_50 = bilinear(pa_ft, temp, LANDING, '50ft')
 
             hw = wind_head_component(qfu, wind_dir, wind_kt)
             to_gr_corr = to_corrections_takeoff(to_gr, hw, paved=paved, slope_pc=slope_pc)
@@ -316,7 +317,6 @@ with right:
                 'ldg_gr': ldg_gr_corr, 'ldg_50': ldg_50,
                 'toda_av': toda_av, 'lda_av': lda_av,
                 'hw_comp': hw,
-                'dbg': { 'to_gr': to_dbg, 'to_50': to50_dbg, 'ldg_gr': ldg_dbg, 'ldg_50': l50_dbg }
             })
 
     # Summary table
@@ -406,7 +406,7 @@ if st.button("Generate filled PDF"):
         f"Extra fuel possible: {remaining_fuel_l:.1f} L (limited by {limit_label})."
     ))
 
-    # Performance – one block per aerodrome, using PA (not field elevation) and OAT for tables
+    # Performance – human narrative per aerodrome
     calc.ln(2)
     calc.set_font("Arial", "B", 12)
     calc.cell(0, 7, ascii_safe("Performance – method & results"), ln=True)
@@ -415,16 +415,14 @@ if st.button("Generate filled PDF"):
         calc.set_font("Arial", "B", 10)
         calc.cell(0, 6, ascii_safe(f"{r['role']} – {r['icao']} (QFU {r['qfu']:.0f}°)"), ln=True)
         calc.set_font("Arial", size=10)
-        # Step 1: atmospherics
+        # Atmospherics (PA/DA using QNH and OAT)
         calc.multi_cell(0, 5, ascii_safe(
             f"Atmospherics: elevation {r['elev_ft']:.0f} ft, QNH {r['qnh']:.1f} hPa → pressure altitude ≈ {r['pa_ft']:.0f} ft. "
-            f"ISA at PA ≈ {r['isa_temp']:.1f} °C; with OAT {r['temp']:.1f} °C → density altitude ≈ {r['da_ft']:.0f} ft."
+            f"ISA at that PA ≈ {r['isa_temp']:.1f} °C; with OAT {r['temp']:.1f} °C → density altitude ≈ {r['da_ft']:.0f} ft."
         ))
-        # Step 2: table interpolation summary (no raw grid values)
-        calc.multi_cell(0, 5, ascii_safe(
-            "Table method: bilinear interpolation by pressure altitude and OAT from AFM performance tables."
-        ))
-        # Step 3: wind/surface/slope corrections and final figures
+        # Fixed phrase as single line (avoid multicell issues)
+        calc.cell(0, 5, ascii_safe("Table method: bilinear interpolation by pressure altitude and OAT from AFM performance tables."), ln=True)
+        # Corrections & results
         paved_txt = 'paved' if next(a for a in st.session_state.aerodromes if a['icao']==r['icao'])['paved'] else 'grass'
         slope_txt = next(a for a in st.session_state.aerodromes if a['icao']==r['icao'])['slope_pc']
         calc.multi_cell(0, 5, ascii_safe(
@@ -492,7 +490,7 @@ if st.button("Generate filled PDF"):
         pdfrw_set_field(fields, "Textbox14", f"{total_weight:.1f}", wt_color)
         pdfrw_set_field(fields, "Textbox16", f"{cg:.3f}", cg_color)
         pdfrw_set_field(fields, "Textbox17", f"{AC['max_takeoff_weight']:.0f}")
-        # Departure examples (extend as needed)
+        # Departure block (extend similarly for Arrival/Alternate using their field names)
         if perf_rows:
             dep = perf_rows[0]
             pdfrw_set_field(fields, "Textbox22", dep['icao'])
@@ -501,7 +499,7 @@ if st.button("Generate filled PDF"):
             pdfrw_set_field(fields, "Textbox47", f"{int(dep['toda_av'])}/{int(dep['lda_av'])}")
             pdfrw_set_field(fields, "Textbox45", f"{dep['to_50']:.0f}")
             pdfrw_set_field(fields, "Textbox41", f"{dep['ldg_50']:.0f}")
-            # Extra fuel and constraint (if you have free text fields, map them here)
+            # If you added new fields for "extra fuel possible" & reason, set them here too
 
         writer = Wr_pdfrw()
         writer.write(str(out_main_path), reader)
@@ -531,6 +529,7 @@ if st.button("Generate filled PDF"):
     st.success("PDF generated successfully!")
     with open(out_main_path, 'rb') as f:
         st.download_button("Download PDF", f, file_name=out_main_path.name, mime="application/pdf")
+
 
 
 
