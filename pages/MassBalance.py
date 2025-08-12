@@ -13,11 +13,12 @@ from pathlib import Path
 import pytz
 import unicodedata
 from math import cos, sin, radians
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
 # PDF tools
 from pdfrw import PdfReader as Rd_pdfrw, PdfWriter as Wr_pdfrw, PdfDict
 from pypdf import PdfReader as Rd_pypdf, PdfWriter as Wr_pypdf
+from pypdf.generic import NameObject, BooleanObject
 from fpdf import FPDF
 
 # =========================
@@ -205,7 +206,6 @@ def wind_components(runway_qfu_deg, wind_dir_deg, wind_speed):
     diff = ((wind_dir_deg - runway_qfu_deg + 180) % 360) - 180  # [-180,180]
     hw = wind_speed * cos(radians(diff))
     cw = wind_speed * sin(radians(diff))
-    # Bound numerically
     hw = max(-abs(wind_speed), min(abs(wind_speed), hw))
     cw = max(-abs(wind_speed), min(abs(wind_speed), cw))
     return hw, cw
@@ -246,53 +246,41 @@ def load_pdf_any(path: Path):
         except Exception as e:
             raise RuntimeError(f"Could not read the PDF: {e}")
 
-from pdfrw import PdfDict  # keep your existing imports
-
 def iter_fields_pdfrw(reader_pdfrw):
     """Return a flat list of all field dicts (handles Kids). Safe for pdfrw."""
-    # Some files lack an AcroForm or Fields—handle gracefully
     root = getattr(reader_pdfrw, "Root", None)
     if root is None:
         return []
-
     acroform = getattr(root, "AcroForm", None)
     if acroform is None:
         return []
-
     fields = getattr(acroform, "Fields", None)
     if not fields:
         return []
-
     out = []
-
     def _walk(items):
         if not items:
             return
         for f in items:
-            # Only accept PdfDict-like objects
             if not isinstance(f, PdfDict):
                 continue
             out.append(f)
             kids = getattr(f, "Kids", None)
             if kids:
                 _walk(kids)
-
     _walk(fields)
     return out
 
 def pdfrw_set_field(fields_all, candidates, value, color_rgb=None):
-    """Set first field with any matching name; return True if set."""
+    """Set first field that matches any candidate name; return True if set."""
     if not isinstance(candidates, (list, tuple)):
         candidates = [candidates]
 
-    # Helper to read field name robustly
     def get_name(f):
         t = getattr(f, "T", None)
         if t is None:
-            # pdfrw PdfDict supports .get with PdfName; but attribute path is safer
             t = f.get("T") or f.get("/T")
         if isinstance(t, str):
-            # strip parens if present "(Name)"
             return t[1:-1] if (t.startswith("(") and t.endswith(")")) else t
         return t
 
@@ -302,7 +290,6 @@ def pdfrw_set_field(fields_all, candidates, value, color_rgb=None):
             if not fname:
                 continue
             if fname == cand:
-                # Set value and clear appearance so viewers redraw
                 f.update(PdfDict(V=str(value)))
                 f.update(PdfDict(AP=None))
                 if color_rgb:
@@ -388,7 +375,6 @@ with right:
                                                    "paved":paved,"slope_pc":slope_pc,"toda":toda_av,
                                                    "lda":lda_av})
 
-            # Slope guardrail banner
             if abs(slope_pc) > 3.0: slope_warn = True
 
             # PA/DA based on QNH and OAT (not assuming ISA)
@@ -506,8 +492,6 @@ utc_today = datetime.datetime.now(pytz.UTC)
 date_str = st.text_input("Date (DD/MM/YYYY)", value=utc_today.strftime("%d/%m/%Y"))
 
 # Role->field mapping (update here if your template changes)
-# These names correspond to the uploaded template. If any remain blank,
-# use the "Form Field Scanner" (below) and add the real names here.
 ROLE_FIELDS: Dict[str, Dict[str, List[str]]] = {
     "Departure": {
         "airfield": ["DEP_AIRFIELD","Textbox22"],
@@ -530,7 +514,7 @@ ROLE_FIELDS: Dict[str, Dict[str, List[str]]] = {
         "qnh":      ["ARR_QNH","Textbox36"],
         "temp":     ["ARR_TEMP","Textbox34"],
         "wind":     ["ARR_WIND","Textbox35"],
-        "pa":       ["ARR_PA"],           # add actual names if present
+        "pa":       ["ARR_PA"],            # add real names via Scanner if present
         "da":       ["ARR_DA"],
         "toda_lda": ["ARR_TODA_LDA","Textbox43"],  # LDA at least
         "todr":     ["ARR_TODR"],
@@ -538,7 +522,7 @@ ROLE_FIELDS: Dict[str, Dict[str, List[str]]] = {
         "roc":      ["ARR_ROC"],
     },
     "Alternate": {
-        "airfield": ["ALT_AIRFIELD"],     # update with your template's names
+        "airfield": ["ALT_AIRFIELD"],      # fill via Scanner
         "qfu":      ["ALT_QFU"],
         "elev":     ["ALT_ELEV"],
         "qnh":      ["ALT_QNH"],
@@ -555,21 +539,22 @@ ROLE_FIELDS: Dict[str, Dict[str, List[str]]] = {
 
 # Debug tool: scan field names so you can complete ROLE_FIELDS mapping once
 with st.expander("🔍 Form Field Scanner (use to map new template names)"):
-    st.caption("Click to list all field names from the template currently on disk.")
+    st.caption("Lists all field names in the current template.")
     if st.button("Scan form fields"):
         try:
             eng, r = load_pdf_any(PDF_TEMPLATE)
             names = []
-            if eng == "pdfrw" and hasattr(r, 'Root') and '/AcroForm' in r.Root:
+            if eng == "pdfrw" and hasattr(r, 'Root'):
                 for f in iter_fields_pdfrw(r):
-                    t = f.get('/T')
+                    t = getattr(f, "T", None) or f.get("T") or f.get("/T")
+                    if isinstance(t, str):
+                        t = t[1:-1] if (t.startswith("(") and t.endswith(")")) else t
                     if t:
-                        fname = t[1:-1] if isinstance(t, str) and t.startswith('(') and t.endswith(')') else t
-                        names.append(str(fname))
+                        names.append(str(t))
                 names = sorted(set(names))
                 st.code("\n".join(names), language="markdown")
             else:
-                st.info("Open with pdfrw path to list names. If pdfrw fails, ensure your template is a standard AcroForm.")
+                st.info("Could not access fields via pdfrw. Ensure the template is an AcroForm or try another PDF.")
         except Exception as e:
             st.error(str(e))
 
@@ -608,22 +593,15 @@ if st.button("Generate filled PDF"):
     calc.cell(0, 7, printable("Performance - method & results"), ln=True)
     calc.set_font("Arial", size=10)
     for r in perf_rows:
-        # Title
         calc.set_font("Arial", "B", 10)
-        title = printable(f"{r['role']} - {r['icao']} (QFU {r['qfu']:.0f} deg)")
-        calc.multi_cell(W, 6, title)
-
+        calc.multi_cell(W, 6, printable(f"{r['role']} - {r['icao']} (QFU {r['qfu']:.0f} deg)"))
         calc.set_font("Arial", size=10)
-        line1 = printable(f"Atmospherics: elevation {r['elev_ft']:.0f} ft, QNH {r['qnh']:.1f} -> PA ~ {r['pa_ft']:.0f} ft.")
-        calc.multi_cell(W, 5, line1)
-        line2 = printable(f"ISA at PA ~ {r['isa_temp']:.1f} C; with OAT {r['temp']:.1f} C -> DA ~ {r['da_ft']:.0f} ft.")
-        calc.multi_cell(W, 5, line2)
-
+        calc.multi_cell(W, 5, printable(f"Atmospherics: elevation {r['elev_ft']:.0f} ft, QNH {r['qnh']:.1f} -> PA ~ {r['pa_ft']:.0f} ft."))
+        calc.multi_cell(W, 5, printable(f"ISA at PA ~ {r['isa_temp']:.1f} C; with OAT {r['temp']:.1f} C -> DA ~ {r['da_ft']:.0f} ft."))
         calc.multi_cell(W, 5, printable("Method: bilinear interpolation on AFM tables using PA and OAT."))
         calc.multi_cell(W, 5, printable(
             f"Corrections applied: head/tail {'headwind' if r['hw_comp']>=0 else 'tailwind'} {abs(r['hw_comp']):.0f} kt, crosswind {abs(r['cw_comp']):.0f} kt, surface {'paved' if r['paved'] else 'grass'}, slope {r['slope_pc']:.1f}%."
         ))
-
         calc.multi_cell(W, 5, printable(f"Take-off: ground roll ~ {r['to_gr']:.0f} m; over 50 ft ~ {r['to_50']:.0f} m."))
         calc.multi_cell(W, 5, printable(f"Landing: ground roll ~ {r['ldg_gr']:.0f} m; over 50 ft ~ {r['ldg_50']:.0f} m."))
         calc.multi_cell(W, 5, printable(f"Declared distances: TODA {r['toda_av']:.0f} m; LDA {r['lda_av']:.0f} m."))
@@ -643,25 +621,22 @@ if st.button("Generate filled PDF"):
     engine_name, reader = load_pdf_any(PDF_TEMPLATE)
     out_main_path = APP_DIR / f"MB_Performance_Mission_{mission}.pdf"
 
-    engine_name, reader = load_pdf_any(PDF_TEMPLATE)
-
+    # --- guarded field collection to avoid pdfrw crashes
     fields_all = []
     if engine_name == "pdfrw":
         try:
             fields_all = iter_fields_pdfrw(reader)
         except Exception:
             fields_all = []
-    
         if not fields_all:
-            # No fields found or pdfrw failed → fall back to pypdf handling
             engine_name = "pypdf"
 
-
+    if engine_name == "pdfrw" and fields_all:
         # Base fields
         pdfrw_set_field(fields_all, ["Textbox19","REG","Registration"], reg)
         pdfrw_set_field(fields_all, ["Textbox18","DATE","Date"], date_str)
 
-        # Weight & CG with color (green/amber/red)
+        # Weight & CG with color
         wt_color = (30,150,30) if total_weight <= AC['max_takeoff_weight'] else (200,0,0)
         lo, hi = AC['cg_limits']
         margin = 0.05*(hi-lo)
@@ -709,7 +684,7 @@ if st.button("Generate filled PDF"):
             if role in role_to_row:
                 write_role(role, role_to_row[role])
 
-        # Save with pdfrw then re-open with pypdf to append calc page and force NeedAppearances
+        # Save with pdfrw then re-open with pypdf to append calc page + NeedAppearances
         Wr_pdfrw().write(str(out_main_path), reader)
         base = Rd_pypdf(str(out_main_path))
         calc_doc = Rd_pypdf(str(calc_pdf_path))
@@ -718,23 +693,29 @@ if st.button("Generate filled PDF"):
         for p in calc_doc.pages: merger.add_page(p)
         if "/AcroForm" in base.trailer["/Root"]:
             acro = base.trailer["/Root"]["/AcroForm"]
-            acro.update({"/NeedAppearances": True})
-            merger._root_object.update({"/AcroForm": acro})
+            acro.update({NameObject("/NeedAppearances"): BooleanObject(True)})
+            merger._root_object[NameObject("/AcroForm")] = acro
         with open(out_main_path, "wb") as f:
             merger.write(f)
 
     else:
-        # Fallback: pypdf path (fills only simple fields; rely on calculations page for details)
+        # Fallback: pypdf only (fills simple fields; rely on calculations page for details)
         base_r = Rd_pypdf(str(PDF_TEMPLATE))
         merger = Wr_pypdf()
         for p in base_r.pages: merger.add_page(p)
         if "/AcroForm" in base_r.trailer["/Root"]:
-            merger._root_object.update({"/AcroForm": base_r.trailer["/Root"]["/AcroForm"]})
-            merger._root_object["/AcroForm"].update({"/NeedAppearances": True})
-        merger.update_page_form_field_values(base_r.pages[0], {
-            "Textbox19": reg,
-            "Textbox18": date_str,
-        })
+            acro = base_r.trailer["/Root"]["/AcroForm"]
+            acro.update({NameObject("/NeedAppearances"): BooleanObject(True)})
+            merger._root_object[NameObject("/AcroForm")] = acro
+        # basic base fields (page 1)
+        try:
+            merger.update_page_form_field_values(base_r.pages[0], {
+                "Textbox19": reg,
+                "Textbox18": date_str,
+            })
+        except Exception:
+            pass
+        # append calc page
         calc_doc = Rd_pypdf(str(calc_pdf_path))
         for p in calc_doc.pages: merger.add_page(p)
         with open(out_main_path, "wb") as f:
@@ -743,6 +724,5 @@ if st.button("Generate filled PDF"):
     st.success("PDF generated successfully!")
     with open(out_main_path, 'rb') as f:
         st.download_button("Download PDF", f, file_name=out_main_path.name, mime="application/pdf")
-
 
 
