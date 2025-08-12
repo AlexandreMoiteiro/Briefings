@@ -13,12 +13,12 @@ from pathlib import Path
 import pytz
 import unicodedata
 from math import cos, sin, radians
-from typing import List, Dict
+from typing import List, Dict, Tuple
+import csv
 
 # PDF tools
 from pdfrw import PdfReader as Rd_pdfrw, PdfWriter as Wr_pdfrw, PdfDict
 from pypdf import PdfReader as Rd_pypdf, PdfWriter as Wr_pypdf
-from pypdf.generic import NameObject, BooleanObject
 from fpdf import FPDF
 
 # =========================
@@ -67,7 +67,8 @@ st.markdown(
 )
 
 APP_DIR = Path(__file__).parent if "__file__" in globals() else Path(".")
-PDF_TEMPLATE = APP_DIR / "TecnamP2008MBPerformanceSheet_MissionX.pdf"
+PDF_TEMPLATE = APP_DIR / "TecnamP2008MBPerformanceSheet_MissionX_organizado.pdf"
+CSV_MAPPING = APP_DIR / "TecnamP2008MBPerformanceSheet_MissionX_organizado_mapeamento.csv"
 
 # =========================
 # Fixed aircraft data (Tecnam P2008)
@@ -206,6 +207,7 @@ def wind_components(runway_qfu_deg, wind_dir_deg, wind_speed):
     diff = ((wind_dir_deg - runway_qfu_deg + 180) % 360) - 180  # [-180,180]
     hw = wind_speed * cos(radians(diff))
     cw = wind_speed * sin(radians(diff))
+    # Bound numerically
     hw = max(-abs(wind_speed), min(abs(wind_speed), hw))
     cw = max(-abs(wind_speed), min(abs(wind_speed), cw))
     return hw, cw
@@ -247,56 +249,88 @@ def load_pdf_any(path: Path):
             raise RuntimeError(f"Could not read the PDF: {e}")
 
 def iter_fields_pdfrw(reader_pdfrw):
-    """Return a flat list of all field dicts (handles Kids). Safe for pdfrw."""
-    root = getattr(reader_pdfrw, "Root", None)
-    if root is None:
-        return []
-    acroform = getattr(root, "AcroForm", None)
-    if acroform is None:
-        return []
-    fields = getattr(acroform, "Fields", None)
-    if not fields:
-        return []
-    out = []
-    def _walk(items):
-        if not items:
+    """Yield all pdfrw field dicts recursively (handles Kids)."""
+    def _walk(objs):
+        if not objs:
             return
-        for f in items:
-            if not isinstance(f, PdfDict):
-                continue
-            out.append(f)
-            kids = getattr(f, "Kids", None)
+        for f in objs:
+            yield f
+            kids = f.get('/Kids', [])
             if kids:
-                _walk(kids)
-    _walk(fields)
-    return out
+                yield from _walk(kids)
+    acro = getattr(reader_pdfrw, 'Root', {}).get('/AcroForm', None)
+    if not acro:
+        return []
+    return list(_walk(acro.get('/Fields', [])))
 
 def pdfrw_set_field(fields_all, candidates, value, color_rgb=None):
     """Set first field that matches any candidate name; return True if set."""
     if not isinstance(candidates, (list, tuple)):
         candidates = [candidates]
-
-    def get_name(f):
-        t = getattr(f, "T", None)
-        if t is None:
-            t = f.get("T") or f.get("/T")
-        if isinstance(t, str):
-            return t[1:-1] if (t.startswith("(") and t.endswith(")")) else t
-        return t
-
-    for cand in candidates:
+    for name in candidates:
         for f in fields_all:
-            fname = get_name(f)
-            if not fname:
+            t = f.get('/T')
+            if not t:
                 continue
-            if fname == cand:
+            fname = t[1:-1] if isinstance(t, str) and t.startswith('(') and t.endswith(')') else t
+            if fname == name:
                 f.update(PdfDict(V=str(value)))
-                f.update(PdfDict(AP=None))
+                f.update(PdfDict(AP=None))  # drop appearance to force refresh
                 if color_rgb:
                     r, g, b = color_rgb
                     f.update(PdfDict(DA=f"{r/255:.3f} {g/255:.3f} {b/255:.3f} rg /Helv 10 Tf"))
                 return True
     return False
+
+# =========================
+# Mapping loader (CSV → ROLE_FIELDS)
+# =========================
+def load_role_fields_from_csv(csv_path: Path) -> Dict[str, Dict[str, List[str]]]:
+    """
+    CSV schema (flexible):
+    - Required columns: role, key, names
+      where 'names' is a separator list of field names (comma/semicolon/pipe)
+      Example row: Arrival, qfu, Text2|ARR_QFU
+    - Alternatively, multiple name columns: name1, name2, name3...
+    Keys expected (case-insensitive): airfield, qfu, elev, qnh, temp, wind, pa, da, toda_lda, todr, ldr, roc,
+    plus optional fuel keys: f_su_time, f_su_fuel, f_climb_time, f_climb_fuel, f_enr_time, f_enr_fuel,
+    f_desc_time, f_alt_time, f_alt_fuel, f_res_time, f_res_fuel, f_req_ramp, f_extra, f_total
+    """
+    role_fields: Dict[str, Dict[str, List[str]]] = {}
+    if not csv_path.exists():
+        return role_fields
+    with csv_path.open("r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            role = row.get("role") or row.get("ROLE") or row.get("coluna") or ""
+            key  = row.get("key")  or row.get("KEY")  or row.get("campo")  or ""
+            if not role or not key:
+                # try positional fallback
+                continue
+            names: List[str] = []
+            if row.get("names"):
+                raw = row["names"]
+                for sep in ["|",";","/","\\",","]:
+                    if sep in raw:
+                        names = [s.strip() for s in raw.split(sep) if s.strip()]
+                        break
+                if not names and raw.strip():
+                    names = [raw.strip()]
+            else:
+                # collect name1..name9
+                for i in range(1, 10):
+                    v = row.get(f"name{i}") or row.get(f"NAME{i}")
+                    if v and v.strip():
+                        names.append(v.strip())
+            role = role.strip()
+            key = key.strip().lower()
+            if names:
+                role_fields.setdefault(role, {}).setdefault(key, [])
+                # preserve order; avoid dups
+                for n in names:
+                    if n not in role_fields[role][key]:
+                        role_fields[role][key].append(n)
+    return role_fields
 
 # =========================
 # UI – inputs
@@ -482,7 +516,7 @@ st.markdown(f"- **Extra**: {extra_l:.1f} L  ")
 st.markdown(f"- **Total ramp fuel**: **{total_ramp:.1f} L**")
 
 # =========================
-# PDF – Fill template + attach calculations page
+# PDF – MAPPING (CSV) + Fill template + attach calculations page
 # =========================
 st.markdown("### PDF – M&B and Performance Data Sheet")
 reg = st.text_input("Aircraft registration", value="CS-XXX")
@@ -491,70 +525,57 @@ mission = st.text_input("Mission #", value="001")
 utc_today = datetime.datetime.now(pytz.UTC)
 date_str = st.text_input("Date (DD/MM/YYYY)", value=utc_today.strftime("%d/%m/%Y"))
 
-# Role->field mapping (update here if your template changes)
-ROLE_FIELDS: Dict[str, Dict[str, List[str]]] = {
-    "Departure": {
-        "airfield": ["DEP_AIRFIELD","Textbox22"],
-        "qfu":      ["DEP_QFU","Textbox23"],
-        "elev":     ["DEP_ELEV","Textbox53"],
-        "qnh":      ["DEP_QNH","Textbox52"],
-        "temp":     ["DEP_TEMP","Textbox51"],
-        "wind":     ["DEP_WIND","Textbox58"],
-        "pa":       ["DEP_PA","Textbox50"],
-        "da":       ["DEP_DA","Textbox49"],
-        "toda_lda": ["DEP_TODA_LDA","Textbox47"],
-        "todr":     ["DEP_TODR","Textbox45"],
-        "ldr":      ["DEP_LDR","Textbox41"],
-        "roc":      ["DEP_ROC","Textbox39"],
-    },
-    "Arrival": {
-        "airfield": ["ARR_AIRFIELD","Textbox32"],
-        "qfu":      ["ARR_QFU","Text2"],
-        "elev":     ["ARR_ELEV","Textbox33"],
-        "qnh":      ["ARR_QNH","Textbox36"],
-        "temp":     ["ARR_TEMP","Textbox34"],
-        "wind":     ["ARR_WIND","Textbox35"],
-        "pa":       ["ARR_PA"],            # add real names via Scanner if present
-        "da":       ["ARR_DA"],
-        "toda_lda": ["ARR_TODA_LDA","Textbox43"],  # LDA at least
-        "todr":     ["ARR_TODR"],
-        "ldr":      ["ARR_LDR"],
-        "roc":      ["ARR_ROC"],
-    },
-    "Alternate": {
-        "airfield": ["ALT_AIRFIELD"],      # fill via Scanner
-        "qfu":      ["ALT_QFU"],
-        "elev":     ["ALT_ELEV"],
-        "qnh":      ["ALT_QNH"],
-        "temp":     ["ALT_TEMP"],
-        "wind":     ["ALT_WIND"],
-        "pa":       ["ALT_PA"],
-        "da":       ["ALT_DA"],
-        "toda_lda": ["ALT_TODA_LDA"],
-        "todr":     ["ALT_TODR"],
-        "ldr":      ["ALT_LDR"],
-        "roc":      ["ALT_ROC"],
-    },
-}
+# Load CSV mapping (role/key -> [field names])
+ROLE_FIELDS = load_role_fields_from_csv(CSV_MAPPING)
+
+# Provide sensible fallbacks if CSV is absent/incomplete (works with your organized PDF)
+ROLE_FIELDS.setdefault("Departure", {}).update({
+    "airfield": ROLE_FIELDS.get("Departure", {}).get("airfield", ["Textbox22"]),
+    "qfu":      ROLE_FIELDS.get("Departure", {}).get("qfu", ["Textbox23"]),
+    "elev":     ROLE_FIELDS.get("Departure", {}).get("elev", ["Textbox53"]),
+    "qnh":      ROLE_FIELDS.get("Departure", {}).get("qnh", ["Textbox52"]),
+    "temp":     ROLE_FIELDS.get("Departure", {}).get("temp", ["Textbox51"]),
+    "wind":     ROLE_FIELDS.get("Departure", {}).get("wind", ["Textbox58"]),
+    "pa":       ROLE_FIELDS.get("Departure", {}).get("pa", ["Textbox50"]),
+    "da":       ROLE_FIELDS.get("Departure", {}).get("da", ["Textbox49"]),
+    "toda_lda": ROLE_FIELDS.get("Departure", {}).get("toda_lda", ["Textbox47"]),
+    "todr":     ROLE_FIELDS.get("Departure", {}).get("todr", ["Textbox45"]),
+    "ldr":      ROLE_FIELDS.get("Departure", {}).get("ldr", ["Textbox41"]),
+    "roc":      ROLE_FIELDS.get("Departure", {}).get("roc", ["Textbox39"]),
+})
+ROLE_FIELDS.setdefault("Arrival", {}).update({
+    "airfield": ROLE_FIELDS.get("Arrival", {}).get("airfield", ["Textbox32"]),
+    "qfu":      ROLE_FIELDS.get("Arrival", {}).get("qfu", ["Text2"]),
+    "elev":     ROLE_FIELDS.get("Arrival", {}).get("elev", ["Textbox33"]),
+    "qnh":      ROLE_FIELDS.get("Arrival", {}).get("qnh", ["Textbox36"]),
+    "temp":     ROLE_FIELDS.get("Arrival", {}).get("temp", ["Textbox34"]),
+    "wind":     ROLE_FIELDS.get("Arrival", {}).get("wind", ["Textbox35"]),
+    "pa":       ROLE_FIELDS.get("Arrival", {}).get("pa", []),
+    "da":       ROLE_FIELDS.get("Arrival", {}).get("da", []),
+    "toda_lda": ROLE_FIELDS.get("Arrival", {}).get("toda_lda", ["Textbox43"]),  # at least LDA
+    "todr":     ROLE_FIELDS.get("Arrival", {}).get("todr", []),
+    "ldr":      ROLE_FIELDS.get("Arrival", {}).get("ldr", []),
+    "roc":      ROLE_FIELDS.get("Arrival", {}).get("roc", []),
+})
+ROLE_FIELDS.setdefault("Alternate", {})  # keep empty unless CSV defines them
 
 # Debug tool: scan field names so you can complete ROLE_FIELDS mapping once
 with st.expander("🔍 Form Field Scanner (use to map new template names)"):
-    st.caption("Lists all field names in the current template.")
+    st.caption("Click to list all field names from the template currently on disk.")
     if st.button("Scan form fields"):
         try:
             eng, r = load_pdf_any(PDF_TEMPLATE)
             names = []
-            if eng == "pdfrw" and hasattr(r, 'Root'):
+            if eng == "pdfrw" and hasattr(r, 'Root') and '/AcroForm' in r.Root:
                 for f in iter_fields_pdfrw(r):
-                    t = getattr(f, "T", None) or f.get("T") or f.get("/T")
-                    if isinstance(t, str):
-                        t = t[1:-1] if (t.startswith("(") and t.endswith(")")) else t
+                    t = f.get('/T')
                     if t:
-                        names.append(str(t))
+                        fname = t[1:-1] if isinstance(t, str) and t.startswith('(') and t.endswith(')') else t
+                        names.append(str(fname))
                 names = sorted(set(names))
                 st.code("\n".join(names), language="markdown")
             else:
-                st.info("Could not access fields via pdfrw. Ensure the template is an AcroForm or try another PDF.")
+                st.info("Open with pdfrw path to list names. If pdfrw fails, ensure your template is a standard AcroForm.")
         except Exception as e:
             st.error(str(e))
 
@@ -593,15 +614,22 @@ if st.button("Generate filled PDF"):
     calc.cell(0, 7, printable("Performance - method & results"), ln=True)
     calc.set_font("Arial", size=10)
     for r in perf_rows:
+        # Title
         calc.set_font("Arial", "B", 10)
-        calc.multi_cell(W, 6, printable(f"{r['role']} - {r['icao']} (QFU {r['qfu']:.0f} deg)"))
+        title = printable(f"{r['role']} - {r['icao']} (QFU {r['qfu']:.0f} deg)")
+        calc.multi_cell(W, 6, title)
+
         calc.set_font("Arial", size=10)
-        calc.multi_cell(W, 5, printable(f"Atmospherics: elevation {r['elev_ft']:.0f} ft, QNH {r['qnh']:.1f} -> PA ~ {r['pa_ft']:.0f} ft."))
-        calc.multi_cell(W, 5, printable(f"ISA at PA ~ {r['isa_temp']:.1f} C; with OAT {r['temp']:.1f} C -> DA ~ {r['da_ft']:.0f} ft."))
+        line1 = printable(f"Atmospherics: elevation {r['elev_ft']:.0f} ft, QNH {r['qnh']:.1f} -> PA ~ {r['pa_ft']:.0f} ft.")
+        calc.multi_cell(W, 5, line1)
+        line2 = printable(f"ISA at PA ~ {r['isa_temp']:.1f} C; with OAT {r['temp']:.1f} C -> DA ~ {r['da_ft']:.0f} ft.")
+        calc.multi_cell(W, 5, line2)
+
         calc.multi_cell(W, 5, printable("Method: bilinear interpolation on AFM tables using PA and OAT."))
         calc.multi_cell(W, 5, printable(
             f"Corrections applied: head/tail {'headwind' if r['hw_comp']>=0 else 'tailwind'} {abs(r['hw_comp']):.0f} kt, crosswind {abs(r['cw_comp']):.0f} kt, surface {'paved' if r['paved'] else 'grass'}, slope {r['slope_pc']:.1f}%."
         ))
+
         calc.multi_cell(W, 5, printable(f"Take-off: ground roll ~ {r['to_gr']:.0f} m; over 50 ft ~ {r['to_50']:.0f} m."))
         calc.multi_cell(W, 5, printable(f"Landing: ground roll ~ {r['ldg_gr']:.0f} m; over 50 ft ~ {r['ldg_50']:.0f} m."))
         calc.multi_cell(W, 5, printable(f"Declared distances: TODA {r['toda_av']:.0f} m; LDA {r['lda_av']:.0f} m."))
@@ -621,22 +649,16 @@ if st.button("Generate filled PDF"):
     engine_name, reader = load_pdf_any(PDF_TEMPLATE)
     out_main_path = APP_DIR / f"MB_Performance_Mission_{mission}.pdf"
 
-    # --- guarded field collection to avoid pdfrw crashes
-    fields_all = []
-    if engine_name == "pdfrw":
-        try:
-            fields_all = iter_fields_pdfrw(reader)
-        except Exception:
-            fields_all = []
-        if not fields_all:
-            engine_name = "pypdf"
+    def names_for(role: str, key: str) -> List[str]:
+        return ROLE_FIELDS.get(role, {}).get(key, [])
 
-    if engine_name == "pdfrw" and fields_all:
-        # Base fields
+    if engine_name == "pdfrw" and hasattr(reader, 'Root') and '/AcroForm' in reader.Root:
+        fields_all = iter_fields_pdfrw(reader)
+
+        # Base fields (registration/date) + W&B summary
         pdfrw_set_field(fields_all, ["Textbox19","REG","Registration"], reg)
         pdfrw_set_field(fields_all, ["Textbox18","DATE","Date"], date_str)
 
-        # Weight & CG with color
         wt_color = (30,150,30) if total_weight <= AC['max_takeoff_weight'] else (200,0,0)
         lo, hi = AC['cg_limits']
         margin = 0.05*(hi-lo)
@@ -650,33 +672,32 @@ if st.button("Generate filled PDF"):
         pdfrw_set_field(fields_all, ["Textbox16","CG_VALUE"], f"{cg:.3f}", cg_color)
         pdfrw_set_field(fields_all, ["Textbox17","MTOW"], f"{AC['max_takeoff_weight']:.0f}")
 
-        # Extra fuel (if present)
+        # Extra fuel (if present in template)
         pdfrw_set_field(fields_all, ["EXTRA_FUEL","Textbox70"], f"{remaining_fuel_l:.1f} L")
         pdfrw_set_field(fields_all, ["EXTRA_REASON"], f"limited by {limit_label}")
 
-        # Fill per role
+        # Per-role blocks
         role_to_row = {r['role']: r for r in perf_rows}
 
         def write_role(role: str, rr: Dict):
-            names = ROLE_FIELDS.get(role, {})
-            def w(name_list, value):
-                if not name_list:
-                    return False
-                return pdfrw_set_field(fields_all, name_list, value)
-            w(names.get('airfield', []), rr['icao'])
-            w(names.get('qfu', []), f"{rr['qfu']:.0f}°")
-            w(names.get('elev', []), f"{rr['elev_ft']:.0f}")
-            w(names.get('qnh', []), f"{rr['qnh']:.1f}")
-            w(names.get('temp', []), f"{rr['temp']:.1f}")
-            w(names.get('wind', []), f"{'HW' if rr['hw_comp']>=0 else 'TW'} {abs(rr['hw_comp']):.0f} kt")
-            w(names.get('pa', []), f"{rr['pa_ft']:.0f}")
-            w(names.get('da', []), f"{rr['da_ft']:.0f}")
-            w(names.get('toda_lda', []), f"{int(rr['toda_av'])}/{int(rr['lda_av'])}")
-            w(names.get('todr', []), f"{rr['to_50']:.0f}")
-            w(names.get('ldr', []), f"{rr['ldg_50']:.0f}")
+            def w(k: str, value: str):
+                ns = names_for(role, k)
+                if ns: pdfrw_set_field(fields_all, ns, value)
+
+            w("airfield", rr['icao'])
+            w("qfu",      f"{rr['qfu']:.0f}°")
+            w("elev",     f"{rr['elev_ft']:.0f}")
+            w("qnh",      f"{rr['qnh']:.1f}")
+            w("temp",     f"{rr['temp']:.1f}")
+            w("wind",     f"{'HW' if rr['hw_comp']>=0 else 'TW'} {abs(rr['hw_comp']):.0f} kt")
+            w("pa",       f"{rr['pa_ft']:.0f}")
+            w("da",       f"{rr['da_ft']:.0f}")
+            w("toda_lda", f"{int(rr['toda_av'])}/{int(rr['lda_av'])}")
+            w("todr",     f"{rr['to_50']:.0f}")
+            w("ldr",      f"{rr['ldg_50']:.0f}")
             try:
                 roc_val = roc_interp(rr['pa_ft'], rr['temp'], total_weight)
-                w(names.get('roc', []), f"{roc_val:.0f}")
+                w("roc", f"{roc_val:.0f}")
             except Exception:
                 pass
 
@@ -684,7 +705,32 @@ if st.button("Generate filled PDF"):
             if role in role_to_row:
                 write_role(role, role_to_row[role])
 
-        # Save with pdfrw then re-open with pypdf to append calc page + NeedAppearances
+        # Optional fuel planning fields (if mapped in CSV)
+        def wf(key: str, value: str):
+            ns = ROLE_FIELDS.get("Fuel", {}).get(key, [])
+            if ns: pdfrw_set_field(fields_all, ns, value)
+
+        # These strings match your organized sheet style (e.g., "15min", "2h15min", "5L")
+        wf("f_su_time",   f"{su_min}min")
+        wf("f_su_fuel",   f"{time_to_liters(0, su_min):.0f}L")
+        wf("f_climb_time",f"{climb_min}min")
+        wf("f_climb_fuel",f"{time_to_liters(0, climb_min):.0f}L")
+        wf("f_enr_time",  f"{enrt_h}h{enrt_min}min")
+        wf("f_enr_fuel",  f"{time_to_liters(enrt_h, enrt_min):.0f}L")
+        wf("f_desc_time", f"{desc_min}min")
+        # Trip fuel (2+3+4)
+        wf("f_trip_time", f"{enrt_h}h{enrt_min}min")  # optional if your sheet shows a time
+        wf("f_trip_fuel", f"{trip_l:.0f}L")
+        wf("f_cont_fuel", f"{cont_l:.0f}L")
+        wf("f_alt_time",  f"{alt_min}min")
+        wf("f_alt_fuel",  f"{time_to_liters(0, alt_min):.0f}L")
+        wf("f_res_time",  f"{reserve_min}min")
+        wf("f_res_fuel",  f"{time_to_liters(0, reserve_min):.0f}L")
+        wf("f_req_ramp",  f"{req_ramp:.0f}L")
+        wf("f_extra",     f"{time_to_liters(0, extra_min):.0f}L")
+        wf("f_total",     f"{total_ramp:.0f}L")
+
+        # Save with pdfrw then re-open with pypdf to append calc page and force NeedAppearances
         Wr_pdfrw().write(str(out_main_path), reader)
         base = Rd_pypdf(str(out_main_path))
         calc_doc = Rd_pypdf(str(calc_pdf_path))
@@ -693,29 +739,23 @@ if st.button("Generate filled PDF"):
         for p in calc_doc.pages: merger.add_page(p)
         if "/AcroForm" in base.trailer["/Root"]:
             acro = base.trailer["/Root"]["/AcroForm"]
-            acro.update({NameObject("/NeedAppearances"): BooleanObject(True)})
-            merger._root_object[NameObject("/AcroForm")] = acro
+            acro.update({"/NeedAppearances": True})
+            merger._root_object.update({"/AcroForm": acro})
         with open(out_main_path, "wb") as f:
             merger.write(f)
 
     else:
-        # Fallback: pypdf only (fills simple fields; rely on calculations page for details)
+        # Fallback: pypdf path (fills only simple fields; rely on calculations page for details)
         base_r = Rd_pypdf(str(PDF_TEMPLATE))
         merger = Wr_pypdf()
         for p in base_r.pages: merger.add_page(p)
         if "/AcroForm" in base_r.trailer["/Root"]:
-            acro = base_r.trailer["/Root"]["/AcroForm"]
-            acro.update({NameObject("/NeedAppearances"): BooleanObject(True)})
-            merger._root_object[NameObject("/AcroForm")] = acro
-        # basic base fields (page 1)
-        try:
-            merger.update_page_form_field_values(base_r.pages[0], {
-                "Textbox19": reg,
-                "Textbox18": date_str,
-            })
-        except Exception:
-            pass
-        # append calc page
+            merger._root_object.update({"/AcroForm": base_r.trailer["/Root"]["/AcroForm"]})
+            merger._root_object["/AcroForm"].update({"/NeedAppearances": True})
+        merger.update_page_form_field_values(base_r.pages[0], {
+            "Textbox19": reg,
+            "Textbox18": date_str,
+        })
         calc_doc = Rd_pypdf(str(calc_pdf_path))
         for p in calc_doc.pages: merger.add_page(p)
         with open(out_main_path, "wb") as f:
@@ -724,5 +764,4 @@ if st.button("Generate filled PDF"):
     st.success("PDF generated successfully!")
     with open(out_main_path, 'rb') as f:
         st.download_button("Download PDF", f, file_name=out_main_path.name, mime="application/pdf")
-
 
