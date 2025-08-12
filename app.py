@@ -247,66 +247,63 @@ def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
 
 # ---------- GPT wrapper (texto) ----------
 
-def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1600) -> str:
-    """Usa Responses API e faz fallback para Chat Completions. Limpa texto no final."""
-    last_err = ""
-    try:
-        r = client.responses.create(
-            model="gpt-5",
-            input=[
-                {"role":"system","content":[{"type":"input_text","text":prompt_system}]},
-                {"role":"user","content":[{"type":"input_text","text":prompt_user}]},
-            ],
-            max_output_tokens=max_tokens
-        )
-        out = getattr(r, "output_text", None)
-        if out and out.strip():
-            return ascii_safe(out.strip())
-        last_err = "(responses returned empty)"
-    except Exception as e:
-        last_err = f"(responses) {e}"
+# ---------- GPT wrapper (texto) ----------
 
+def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str:
+    """Usa Chat Completions (estável) e limpa texto. Evita a Responses API para reduzir erros."""
+    try:
+        model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+    except Exception:
+        model_name = "gpt-4o-mini"
     try:
         r2 = client.chat.completions.create(
-            model="gpt-5",
+            model=model_name,
             messages=[
                 {"role":"system","content":prompt_system},
                 {"role":"user","content":prompt_user},
             ],
-            max_completion_tokens=max_tokens
+            max_completion_tokens=max_tokens,
+            temperature=0.2
         )
-        content = r2.choices[0].message.content
-        if content and content.strip():
-            return ascii_safe(content.strip())
-        return ascii_safe(f"Falha na interpretacao: {last_err}; fallback chat vazio")
+        content = (r2.choices[0].message.content or "").strip()
+        return ascii_safe(content) if content else ""
     except Exception as e2:
-        return ascii_safe(f"Falha na interpretacao: {last_err}; fallback chat: {e2}")
+        return ascii_safe(f"Analise indisponivel (erro IA: {e2})")
 
 # ---------- Análises (PT) ----------
 
 def analyze_chart_pt(kind: str, img_b64: str) -> str:
+    """Analisa imagem via Chat Completions Vision (image_url:data URI)."""
+    try:
+        model_name = st.secrets.get("OPENAI_MODEL_VISION", "gpt-4o").strip() or "gpt-4o"
+    except Exception:
+        model_name = "gpt-4o"
     sys = (
         "Es meteorologista aeronautico senior. Analisa o chart fornecido em portugues, SEM listas: "
         "Prosa corrida em 3 blocos: 1) Visao geral; 2) Portugal; 3) Alentejo. "
         "Identifica e nomeia simbolos/anotacoes e conclui com impacto operacional. Usa apenas conteudo visivel."
     )
-    user = f"Tipo de chart: {kind}."
+    user_txt = f"Tipo de chart: {kind}."
+    # evitar chamada se nao houver chave
+    if not (st.secrets.get("OPENAI_API_KEY") or "").strip():
+        return "Analise de imagem desativada (OPENAI_API_KEY em falta)."
     try:
-        r = client.responses.create(
-            model="gpt-5",
-            input=[
-                {"role":"system","content":[{"type":"input_text","text":sys}]},
+        r = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role":"system","content":sys},
                 {"role":"user","content":[
-                    {"type":"input_text","text":user},
-                    {"type":"input_image","image_data":img_b64,"mime_type":"image/png"}
+                    {"type":"text","text":user_txt},
+                    {"type":"image_url","image_url":{"url":f"data:image/png;base64,{img_b64}"}}
                 ]},
             ],
-            max_output_tokens=1800
+            max_completion_tokens=700,
+            temperature=0.2
         )
-        out = getattr(r, "output_text", "") or ""
-        return ascii_safe(out.strip()) if out.strip() else "Analise indisponivel."
+        out = (r.choices[0].message.content or "").strip()
+        return ascii_safe(out) if out else "Analise indisponivel."
     except Exception as e:
-        return ascii_safe(f"Nao foi possivel analisar o chart (erro: {e}).")
+        return ascii_safe(f"Analise indisponivel (erro IA: {e})")
 
 def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
     sys = ("Es meteorologista aeronautico senior. Em PT e texto corrido, interpreta METAR e TAF, "
@@ -549,6 +546,7 @@ with col_gamet[0]:
 # ---------- Charts upload ----------
 st.markdown("#### Charts")
 st.caption("Upload SIGWX / SPC / Wind & Temp. Accepts PDF/PNG/JPG/JPEG/GIF.")
+use_ai_for_charts = st.toggle("Analisar charts com IA", value=False, help="Desmarcado = mais rapido")
 uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg","gif"],
                            accept_multiple_files=True, label_visibility="collapsed")
 
@@ -577,7 +575,9 @@ if uploads:
 # ---------- Generate Detailed (PT) ----------
 
 def analyze_notams_text_only(icao: str, notams_raw: List[str]) -> str:
-    return "\n\n".join(notams_raw).strip() or "Sem NOTAMs."
+    return "
+
+".join(notams_raw).strip() or "Sem NOTAMs."
 
 st.markdown("### PDFs")
 col_pdfs = st.columns(2)
@@ -595,7 +595,11 @@ if 'gen_det' in locals() and gen_det:
 
     # SIGMET
     sigmets = fetch_sigmet_lppc_auto()
-    sigmet_text = "\n\n---\n\n".join(sigmets).strip()
+    sigmet_text = "
+
+---
+
+".join(sigmets).strip()
     sigmet_analysis = analyze_sigmet_pt(sigmet_text) if sigmet_text else ""
 
     # GAMET (usar o texto do editor; se vazio, cair para Gist)
@@ -610,14 +614,21 @@ if 'gen_det' in locals() and gen_det:
     if gamet_for_pdf:
         det_pdf.gamet_block(gamet_for_pdf, gamet_analysis)
 
-    # Charts com analise IA (agora realmente gerada)
+    # Charts com analise IA opcional
     for ch in charts:
-        kind = ch["kind"]; title = ch["title"]; subtitle = ch["subtitle"]; img_png = ch["img_png"]
-        try:
-            analysis_txt = analyze_chart_pt(kind, b64_png(img_png))
-        except Exception:
-            analysis_txt = "Analise indisponivel."
+        title, subtitle, img_png, kind = ch["title"], ch["subtitle"], ch["img_png"], ch["kind"]
+        analysis_txt = ""
+        if use_ai_for_charts:
+            try:
+                analysis_txt = analyze_chart_pt(kind, b64_png(img_png))
+            except Exception as _:
+                analysis_txt = "Analise indisponivel."
         det_pdf.chart_block(title, subtitle, img_png, analysis_txt)
+
+    det_name = f"Briefing Detalhado - Missao {mission_no or 'X'}.pdf"
+    det_pdf.output(det_name)
+    with open(det_name, "rb") as f:
+        st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
 
     det_name = f"Briefing Detalhado - Missao {mission_no or 'X'}.pdf"
     det_pdf.output(det_name)
@@ -667,6 +678,7 @@ st.markdown(f"**Weather:** {APP_WEATHER_URL}")
 st.markdown(f"**NOTAMs:** {APP_NOTAMS_URL}")
 st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
 st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
+
 
 
 
