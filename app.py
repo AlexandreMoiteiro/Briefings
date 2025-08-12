@@ -526,27 +526,83 @@ with col_save_n[1]:
 st.divider()
 
 # ---------- Editor de GAMET ----------
+# ===================== GAMET (editar e guardar no Gist) =====================
+import requests, json, datetime as dt
+
+def _gamet_secrets():
+    token = (st.secrets.get("GAMET_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
+    gid   = (st.secrets.get("GAMET_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
+    fn    = (st.secrets.get("GAMET_GIST_FILENAME") or st.secrets.get("GIST_FILENAME") or "").strip()
+    return token, gid, fn
+
+def load_gamet_from_gist() -> dict:
+    token, gid, fn = _gamet_secrets()
+    if not (token and gid and fn):
+        return {"text":"", "updated_utc":None}
+    try:
+        r = requests.get(
+            f"https://api.github.com/gists/{gid}",
+            headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        files = r.json().get("files", {})
+        obj = files.get(fn) or {}
+        content = (obj.get("content") or "").strip()
+        if not content:
+            return {"text":"", "updated_utc":None}
+        try:
+            return json.loads(content)
+        except Exception:
+            return {"text": content, "updated_utc": None}
+    except Exception:
+        return {"text":"", "updated_utc":None}
+
+def save_gamet_to_gist(text: str) -> tuple[bool, str]:
+    token, gid, fn = _gamet_secrets()
+    if not (token and gid and fn):
+        return False, "Faltam segredos do GAMET (TOKEN/ID/FILENAME) em st.secrets."
+    try:
+        payload = {
+            "updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
+            "text": (text or "").strip()
+        }
+        body = {"files": {fn: {"content": json.dumps(payload, ensure_ascii=False, indent=2)}}}
+        r = requests.patch(
+            f"https://api.github.com/gists/{gid}",
+            headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
+            json=body, timeout=12
+        )
+        if r.status_code >= 400:
+            return False, f"GitHub respondeu {r.status_code}: {r.text}"
+        return True, "GAMET guardado no Gist."
+    except Exception as e:
+        return False, f"Erro a gravar GAMET no Gist: {e}"
+
 st.markdown("### GAMET (editar e guardar)")
 _gamet_obj = load_gamet_from_gist()
 _gamet_initial = (_gamet_obj.get("text") or "").strip()
 
 gamet_text = st.text_area(
-    "GAMET — cola aqui o texto completo",
+    "Texto completo do GAMET",
     value=_gamet_initial,
-    placeholder="Ex.:\nLPPC FIR GAMET VALID 12/06Z-12/12Z\n... (texto integral aqui) ...",
-    height=220
+    placeholder="Ex.: LPPC FIR GAMET VALID 12/06Z-12/12Z\n... (texto integral aqui) ...",
+    height=220,
+    key="gamet_editor"
 )
 
-col_gs = st.columns([0.3,0.7])
-with col_gs[0]:
+col_gamet = st.columns([0.3, 0.7])
+with col_gamet[0]:
     if st.button("Guardar GAMET no Gist"):
         ok, msg = save_gamet_to_gist(gamet_text)
         if ok:
-            st.success(msg); st.cache_data.clear()
+            st.success(msg)
+            try: st.cache_data.clear()
+            except Exception: pass
         else:
             st.error(msg)
+# =================== FIM: GAMET (editar e guardar no Gist) ===================
 
-st.divider()
 
 # ---------- Charts upload ----------
 st.markdown("#### Charts")
