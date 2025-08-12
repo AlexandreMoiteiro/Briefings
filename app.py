@@ -349,16 +349,19 @@ class DetailedPDF(FPDF):
     def header(self): pass
     def footer(self): pass
 
-    # agora recebe (ICAO, METAR_RAW, ANALISE)
-    def metar_taf_block(self, analyses: List[Tuple[str, str, str]]):
+    # Agora recebe (ICAO, METAR_RAW, TAF_RAW, ANALISE)
+    def metar_taf_block(self, analyses: List[Tuple[str, str, str, str]]):
         self.add_page(orientation="P")
         draw_header(self, "METAR / TAF — Interpretacao (PT)")
         self.set_font("Helvetica","",12); self.ln(2)
-        for icao, metar_raw, analysis in analyses:
+        for icao, metar_raw, taf_raw, analysis in analyses:
             self.set_font("Helvetica","B",13); self.cell(0,8,ascii_safe(icao), ln=True)
             if metar_raw:
                 self.set_font("Helvetica","B",12); self.cell(0,7,"METAR (RAW):", ln=True)
                 self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(metar_raw)); self.ln(2)
+            if taf_raw:
+                self.set_font("Helvetica","B",12); self.cell(0,7,"TAF (RAW):", ln=True)
+                self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(taf_raw)); self.ln(2)
             self.set_font("Helvetica","B",12); self.cell(0,7,"Interpretacao:", ln=True)
             self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis or "Sem interpretacao.")); self.ln(3)
 
@@ -574,13 +577,13 @@ with col_pdfs[0]:
     gen_det = st.button("Generate Detailed (PT)")
 
 if 'gen_det' in locals() and gen_det:
-    # METAR/TAF (texto corrido) + METAR RAW
-    metar_analyses: List[Tuple[str, str, str]] = []
+    # METAR/TAF (RAW + interpretação)
+    metar_analyses: List[Tuple[str, str, str, str]] = []
     for icao in icaos_metar:
-        metar = fetch_metar_now(icao) or ""
-        taf   = fetch_taf_now(icao) or ""
-        analysis = analyze_metar_taf_pt(icao, metar, taf) if (metar or taf) else "Sem METAR/TAF disponiveis neste momento."
-        metar_analyses.append((icao, metar, analysis))
+        metar_raw = fetch_metar_now(icao) or ""
+        taf_raw   = fetch_taf_now(icao) or ""
+        analysis  = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis neste momento."
+        metar_analyses.append((icao, metar_raw, taf_raw, analysis))
 
     # SIGMET
     sigmets = fetch_sigmet_lppc_auto()
