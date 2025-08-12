@@ -420,10 +420,10 @@ if st.button("Generate filled PDF"):
         calc.multi_cell(0, 5, ascii_safe(
             f"Corrections: wind component {r['hw_comp']:.0f} kt, surface {'paved' if paved_flag else 'grass'}, slope {slope_val:.1f}%."
         ))
-        calc.multi_cell(0, 5, ascii_safe(
-            f"Results: TO ground roll ≈ {r['to_gr']:.0f} m; TO distance over 50 ft ≈ {r['to_50']:.0f} m. "
-            f"Landing ground roll ≈ {r['ldg_gr']:.0f} m; landing over 50 ft ≈ {r['ldg_50']:.0f} m. "
-            f"Declared: TODA {r['toda_av']:.0f} m; LDA {r['lda_av']:.0f} m."
+        calc.multi_cell(0, 5, ascii_safe(f"Results:"))
+        calc.cell(0, 5, ascii_safe(f"  TO ground roll ~ {r['to_gr']:.0f} m; TO distance over 50 ft ~ {r['to_50']:.0f} m"), ln=True)
+        calc.cell(0, 5, ascii_safe(f"  Landing ground roll ~ {r['ldg_gr']:.0f} m; landing over 50 ft ~ {r['ldg_50']:.0f} m"), ln=True)
+        calc.cell(0, 5, ascii_safe(f"  Declared: TODA {r['toda_av']:.0f} m; LDA {r['lda_av']:.0f} m"), ln=True)
         ))
         calc.ln(1)
 
