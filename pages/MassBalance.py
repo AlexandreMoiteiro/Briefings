@@ -1,4 +1,4 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – EN, no emails
+# Streamlit app – Tecnam P2008 (M&B + Performance) – EN
 # Works on GitHub + Streamlit Cloud
 # Requirements (requirements.txt):
 #   streamlit
@@ -12,7 +12,8 @@ import datetime
 from pathlib import Path
 import pytz
 import unicodedata
-from math import cos, radians
+from math import cos, sin, radians
+from typing import List, Dict, Tuple
 
 # PDF tools
 from pdfrw import PdfReader as Rd_pdfrw, PdfWriter as Wr_pdfrw, PdfDict
@@ -28,7 +29,7 @@ def ascii_safe(text):
     return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
 
 def printable(s: str) -> str:
-    """ASCII-only + evita símbolos que podem partir o FPDF multi_cell."""
+    """ASCII-only + avoid symbols that can break FPDF multi_cell."""
     return (
         ascii_safe(str(s))
         .replace("≈", "~")
@@ -56,13 +57,15 @@ st.markdown(
       .ok{color:#1d8533}.warn{color:#d8aa22}.bad{color:#c21c1c}
       .mb-table{border-collapse:collapse;width:100%;font-size:.95rem}
       .mb-table th{border-bottom:2px solid #cbd0d6;text-align:left}
-      .mb-table td{padding:3px 6px;border-bottom:1px dashed #e5e7ec}
+      .mb-table td{padding:4px 6px;border-bottom:1px dashed #e5e7ec;vertical-align:top}
+      .hint{font-size:.85rem;color:#6b7280}
+      .chip{display:inline-block;padding:0 6px;border-radius:10px;background:#f3f4f6;margin-left:6px}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-APP_DIR = Path(__file__).parent
+APP_DIR = Path(__file__).parent if "__file__" in globals() else Path(".")
 PDF_TEMPLATE = APP_DIR / "TecnamP2008MBPerformanceSheet_MissionX.pdf"
 
 # =========================
@@ -195,35 +198,87 @@ def roc_interp(pa, temp, weight):
     else:
         return interp1(w, 600, 650, roc_for_w(600), roc_for_w(650))
 
-def wind_head_component(runway_qfu_deg, wind_dir_deg, wind_speed):
-    if runway_qfu_deg is None or wind_dir_deg is None:
-        return 0.0
-    diff = radians((wind_dir_deg - runway_qfu_deg) % 360)
-    return wind_speed * cos(diff)
+def wind_components(runway_qfu_deg, wind_dir_deg, wind_speed):
+    """Returns (headwind, crosswind). Headwind>0, tailwind<0. Crosswind>0 from right."""
+    if runway_qfu_deg is None or wind_dir_deg is None or wind_speed is None:
+        return 0.0, 0.0
+    diff = ((wind_dir_deg - runway_qfu_deg + 180) % 360) - 180  # [-180,180]
+    hw = wind_speed * cos(radians(diff))
+    cw = wind_speed * sin(radians(diff))
+    # Bound numerically
+    hw = max(-abs(wind_speed), min(abs(wind_speed), hw))
+    cw = max(-abs(wind_speed), min(abs(wind_speed), cw))
+    return hw, cw
 
 def to_corrections_takeoff(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
-    gr = ground_roll
+    gr = float(ground_roll)
     if headwind_kt >= 0:
-        gr = gr - 5.0 * headwind_kt
+        gr -= 5.0 * headwind_kt
     else:
-        gr = gr + 15.0 * abs(headwind_kt)
+        gr += 15.0 * abs(headwind_kt)
     if paved:
         gr *= 0.9
-    if slope_pc:
-        gr *= (1.0 + 0.07 * (slope_pc/1.0))
+    slope_pc = clamp(slope_pc, -5.0, 5.0)  # guard typical use
+    gr *= (1.0 + 0.07 * slope_pc)
     return max(gr, 0.0)
 
 def ldg_corrections(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
-    gr = ground_roll
+    gr = float(ground_roll)
     if headwind_kt >= 0:
-        gr = gr - 4.0 * headwind_kt
+        gr -= 4.0 * headwind_kt
     else:
-        gr = gr + 13.0 * abs(headwind_kt)
+        gr += 13.0 * abs(headwind_kt)
     if paved:
         gr *= 0.9
-    if slope_pc:
-        gr *= (1.0 - 0.03 * (slope_pc/1.0))
+    slope_pc = clamp(slope_pc, -5.0, 5.0)
+    gr *= (1.0 - 0.03 * slope_pc)
     return max(gr, 0.0)
+
+# =========================
+# PDF helpers (robust)
+# =========================
+def load_pdf_any(path: Path):
+    try:
+        return "pdfrw", Rd_pdfrw(str(path))
+    except Exception:
+        try:
+            return "pypdf", Rd_pypdf(str(path))
+        except Exception as e:
+            raise RuntimeError(f"Could not read the PDF: {e}")
+
+def iter_fields_pdfrw(reader_pdfrw):
+    """Yield all pdfrw field dicts recursively (handles Kids)."""
+    def _walk(objs):
+        if not objs:
+            return
+        for f in objs:
+            yield f
+            kids = f.get('/Kids', [])
+            if kids:
+                yield from _walk(kids)
+    acro = getattr(reader_pdfrw, 'Root', {}).get('/AcroForm', None)
+    if not acro:
+        return []
+    return list(_walk(acro.get('/Fields', [])))
+
+def pdfrw_set_field(fields_all, candidates, value, color_rgb=None):
+    """Set first field that matches any candidate name; return True if set."""
+    if not isinstance(candidates, (list, tuple)):
+        candidates = [candidates]
+    for name in candidates:
+        for f in fields_all:
+            t = f.get('/T')
+            if not t:
+                continue
+            fname = t[1:-1] if isinstance(t, str) and t.startswith('(') and t.endswith(')') else t
+            if fname == name:
+                f.update(PdfDict(V=str(value)))
+                f.update(PdfDict(AP=None))  # drop appearance to force refresh
+                if color_rgb:
+                    r, g, b = color_rgb
+                    f.update(PdfDict(DA=f"{r/255:.3f} {g/255:.3f} {b/255:.3f} rg /Helv 10 Tf"))
+                return True
+    return False
 
 # =========================
 # UI – inputs
@@ -270,10 +325,10 @@ with left:
         return 'ok'
 
     st.markdown("#### Summary")
-    st.markdown(f"<div class='mb-summary-row'><div>Extra fuel possible</div><div><b>{remaining_fuel_l:.1f} L</b> (limited by <i>{limit_label}</i>)</div></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='mb-summary-row'><div>Total weight</div><div class='{w_color(total_weight, AC['max_takeoff_weight'])}'><b>{total_weight:.1f} kg</b></div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='mb-summary-row'><div>Extra fuel possible</div><div><b>{remaining_fuel_l:.1f} L</b> <span class='hint'>(limited by <i>{limit_label}</i>)</span></div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='mb-summary-row'><div>Total weight</div><div class='{w_color(total_weight, AC['max_takeoff_weight'])}'><b>{total_weight:.1f} kg</b><span class='chip'>≤ {AC['max_takeoff_weight']:.0f}</span></div></div>", unsafe_allow_html=True)
     st.markdown(f"<div class='mb-summary-row'><div>Total moment</div><div><b>{total_moment:.2f} kg*m</b></div></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='mb-summary-row'><div>CG</div><div class='{cg_color_val(cg, AC['cg_limits'])}'><b>{cg:.3f} m</b></div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='mb-summary-row'><div>CG</div><div class='{cg_color_val(cg, AC['cg_limits'])}'><b>{cg:.3f} m</b><span class='chip'>{AC['cg_limits'][0]:.3f} – {AC['cg_limits'][1]:.3f} m</span></div></div>", unsafe_allow_html=True)
 
 with right:
     st.markdown("### Aerodromes & performance")
@@ -281,6 +336,8 @@ with right:
         st.session_state.aerodromes = AERODROMES_DEFAULT
 
     perf_rows = []
+    slope_warn = False
+
     for i, a in enumerate(st.session_state.aerodromes):
         with st.expander(f"{a['role']} – {a['icao']}", expanded=(i==0)):
             icao = st.text_input("ICAO", value=a['icao'], key=f"icao_{i}")
@@ -300,6 +357,9 @@ with right:
                                                    "paved":paved,"slope_pc":slope_pc,"toda":toda_av,
                                                    "lda":lda_av})
 
+            # Slope guardrail banner
+            if abs(slope_pc) > 3.0: slope_warn = True
+
             # PA/DA based on QNH and OAT (not assuming ISA)
             pa_ft = elev + (1013.25 - qnh) * 27
             isa_temp = 15 - 2*(pa_ft/1000)
@@ -311,7 +371,7 @@ with right:
             ldg_gr = bilinear(pa_ft, temp, LANDING, 'GR')
             ldg_50 = bilinear(pa_ft, temp, LANDING, '50ft')
 
-            hw = wind_head_component(qfu, wind_dir, wind_kt)
+            hw, cw = wind_components(qfu, wind_dir, wind_kt)
             to_gr_corr = to_corrections_takeoff(to_gr, hw, paved=paved, slope_pc=slope_pc)
             ldg_gr_corr = ldg_corrections(ldg_gr, hw, paved=paved, slope_pc=slope_pc)
 
@@ -322,18 +382,47 @@ with right:
                 'to_gr': to_gr_corr, 'to_50': to_50,
                 'ldg_gr': ldg_gr_corr, 'ldg_50': ldg_50,
                 'toda_av': toda_av, 'lda_av': lda_av,
-                'hw_comp': hw,
+                'hw_comp': hw, 'cw_comp': cw,
+                'paved': paved, 'slope_pc': slope_pc,
             })
 
-    # Summary table
+    if slope_warn:
+        st.warning("Runway slope > 3% entered — double-check values; performance corrections can be very large.")
+
+    # Summary table with OK/NOK and margins
+    st.markdown("#### Performance summary")
+    for r in perf_rows:
+        r['tod_ok'] = r['to_50'] <= r['toda_av']
+        r['ldg_ok'] = r['ldg_50'] <= r['lda_av']
+        r['tod_margin'] = r['toda_av'] - r['to_50']
+        r['ldg_margin'] = r['lda_av'] - r['ldg_50']
+
     def fmt(v):
         return f"{v:.0f}" if isinstance(v, (int,float)) else str(v)
 
-    st.markdown("#### Performance summary")
+    def status_cell(ok, margin):
+        cls = 'ok' if ok else 'bad'
+        sign = '+' if margin >= 0 else '−'
+        return f"<span class='{cls}'>{'OK' if ok else 'NOK'} ({sign}{abs(margin):.0f} m)</span>"
+
     st.markdown(
-        "<table class='mb-table'><tr><th>Leg/Aerodrome</th><th>QFU</th><th>PA ft</th><th>DA ft</th><th>TO GR (m)*</th><th>TODR 50ft (m)</th><th>LND GR (m)*</th><th>LDR 50ft (m)</th><th>TODA Avail</th><th>LDA Avail</th></tr>" +
+        "<table class='mb-table'><tr>"
+        "<th>Leg/Aerodrome</th><th>QFU</th><th>PA/DA ft</th>"
+        "<th>TODR 50ft</th><th>TODA</th><th>Takeoff fit</th>"
+        "<th>LDR 50ft</th><th>LDA</th><th>Landing fit</th>"
+        "<th>Wind (H/C)</th>"
+        "</tr>" +
         "".join([
-            f"<tr><td>{r['role']} {r['icao']}</td><td>{fmt(r['qfu'])}</td><td>{fmt(r['pa_ft'])}</td><td>{fmt(r['da_ft'])}</td><td>{fmt(r['to_gr'])}</td><td>{fmt(r['to_50'])}</td><td>{fmt(r['ldg_gr'])}</td><td>{fmt(r['ldg_50'])}</td><td>{fmt(r['toda_av'])}</td><td>{fmt(r['lda_av'])}</td></tr>"
+            f"<tr>"
+            f"<td>{r['role']} {r['icao']}</td>"
+            f"<td>{fmt(r['qfu'])}</td>"
+            f"<td>{fmt(r['pa_ft'])}/{fmt(r['da_ft'])}</td>"
+            f"<td>{fmt(r['to_50'])}</td><td>{fmt(r['toda_av'])}</td>"
+            f"<td>{status_cell(r['tod_ok'], r['tod_margin'])}</td>"
+            f"<td>{fmt(r['ldg_50'])}</td><td>{fmt(r['lda_av'])}</td>"
+            f"<td>{status_cell(r['ldg_ok'], r['ldg_margin'])}</td>"
+            f"<td>{('HW' if r['hw_comp']>=0 else 'TW')} {abs(r['hw_comp']):.0f} / {abs(r.get('cw_comp',0)):.0f} kt</td>"
+            f"</tr>"
             for r in perf_rows
         ]) + "</table>",
         unsafe_allow_html=True
@@ -367,7 +456,6 @@ trip_l = time_to_liters(0, climb_min) + time_to_liters(enrt_h, enrt_min) + time_
 cont_l = 0.05*trip_l
 req_ramp = time_to_liters(0, su_min) + trip_l + cont_l + time_to_liters(0, alt_min) + time_to_liters(0, reserve_min)
 extra_l = time_to_liters(0, extra_min)
-
 total_ramp = req_ramp + extra_l
 
 st.markdown(f"- **Trip fuel**: {trip_l:.1f} L  ")
@@ -386,6 +474,74 @@ mission = st.text_input("Mission #", value="001")
 utc_today = datetime.datetime.now(pytz.UTC)
 date_str = st.text_input("Date (DD/MM/YYYY)", value=utc_today.strftime("%d/%m/%Y"))
 
+# Role->field mapping (update here if your template changes)
+# These names correspond to the uploaded template. If any remain blank,
+# use the "Form Field Scanner" (below) and add the real names here.
+ROLE_FIELDS: Dict[str, Dict[str, List[str]]] = {
+    "Departure": {
+        "airfield": ["DEP_AIRFIELD","Textbox22"],
+        "qfu":      ["DEP_QFU","Textbox23"],
+        "elev":     ["DEP_ELEV","Textbox53"],
+        "qnh":      ["DEP_QNH","Textbox52"],
+        "temp":     ["DEP_TEMP","Textbox51"],
+        "wind":     ["DEP_WIND","Textbox58"],
+        "pa":       ["DEP_PA","Textbox50"],
+        "da":       ["DEP_DA","Textbox49"],
+        "toda_lda": ["DEP_TODA_LDA","Textbox47"],
+        "todr":     ["DEP_TODR","Textbox45"],
+        "ldr":      ["DEP_LDR","Textbox41"],
+        "roc":      ["DEP_ROC","Textbox39"],
+    },
+    "Arrival": {
+        "airfield": ["ARR_AIRFIELD","Textbox32"],
+        "qfu":      ["ARR_QFU","Text2"],
+        "elev":     ["ARR_ELEV","Textbox33"],
+        "qnh":      ["ARR_QNH","Textbox36"],
+        "temp":     ["ARR_TEMP","Textbox34"],
+        "wind":     ["ARR_WIND","Textbox35"],
+        "pa":       ["ARR_PA"],           # add actual names if present
+        "da":       ["ARR_DA"],
+        "toda_lda": ["ARR_TODA_LDA","Textbox43"],  # LDA at least
+        "todr":     ["ARR_TODR"],
+        "ldr":      ["ARR_LDR"],
+        "roc":      ["ARR_ROC"],
+    },
+    "Alternate": {
+        "airfield": ["ALT_AIRFIELD"],     # update with your template's names
+        "qfu":      ["ALT_QFU"],
+        "elev":     ["ALT_ELEV"],
+        "qnh":      ["ALT_QNH"],
+        "temp":     ["ALT_TEMP"],
+        "wind":     ["ALT_WIND"],
+        "pa":       ["ALT_PA"],
+        "da":       ["ALT_DA"],
+        "toda_lda": ["ALT_TODA_LDA"],
+        "todr":     ["ALT_TODR"],
+        "ldr":      ["ALT_LDR"],
+        "roc":      ["ALT_ROC"],
+    },
+}
+
+# Debug tool: scan field names so you can complete ROLE_FIELDS mapping once
+with st.expander("🔍 Form Field Scanner (use to map new template names)"):
+    st.caption("Click to list all field names from the template currently on disk.")
+    if st.button("Scan form fields"):
+        try:
+            eng, r = load_pdf_any(PDF_TEMPLATE)
+            names = []
+            if eng == "pdfrw" and hasattr(r, 'Root') and '/AcroForm' in r.Root:
+                for f in iter_fields_pdfrw(r):
+                    t = f.get('/T')
+                    if t:
+                        fname = t[1:-1] if isinstance(t, str) and t.startswith('(') and t.endswith(')') else t
+                        names.append(str(fname))
+                names = sorted(set(names))
+                st.code("\n".join(names), language="markdown")
+            else:
+                st.info("Open with pdfrw path to list names. If pdfrw fails, ensure your template is a standard AcroForm.")
+        except Exception as e:
+            st.error(str(e))
+
 if st.button("Generate filled PDF"):
     if not PDF_TEMPLATE.exists():
         st.error(f"Template not found: {PDF_TEMPLATE}")
@@ -395,7 +551,7 @@ if st.button("Generate filled PDF"):
     calc_pdf_path = APP_DIR / f"_calc_mission_{mission}.pdf"
     calc = FPDF()
     calc.set_auto_page_break(auto=True, margin=12)
-    calc.set_margins(12, 12, 12)              # margens explícitas
+    calc.set_margins(12, 12, 12)
     calc.add_page()
 
     usable_w = calc.w - calc.l_margin - calc.r_margin
@@ -432,12 +588,9 @@ if st.button("Generate filled PDF"):
         line2 = printable(f"ISA at PA ~ {r['isa_temp']:.1f} C; with OAT {r['temp']:.1f} C -> DA ~ {r['da_ft']:.0f} ft.")
         calc.multi_cell(W, 5, line2)
 
-        paved_flag = next(a for a in st.session_state.aerodromes if a['icao'] == r['icao'])['paved']
-        slope_val  = next(a for a in st.session_state.aerodromes if a['icao'] == r['icao'])['slope_pc']
-
         calc.multi_cell(W, 5, printable("Method: bilinear interpolation on AFM tables using PA and OAT."))
         calc.multi_cell(W, 5, printable(
-            f"Corrections applied: wind component {r['hw_comp']:.0f} kt, surface {'paved' if paved_flag else 'grass'}, slope {slope_val:.1f}%."
+            f"Corrections applied: head/tail {'headwind' if r['hw_comp']>=0 else 'tailwind'} {abs(r['hw_comp']):.0f} kt, crosswind {abs(r['cw_comp']):.0f} kt, surface {'paved' if r['paved'] else 'grass'}, slope {r['slope_pc']:.1f}%."
         ))
 
         calc.multi_cell(W, 5, printable(f"Take-off: ground roll ~ {r['to_gr']:.0f} m; over 50 ft ~ {r['to_50']:.0f} m."))
@@ -455,145 +608,81 @@ if st.button("Generate filled PDF"):
     ))
     calc.output(str(calc_pdf_path))
 
-    # Fill the form (page 1/2)
-    def load_pdf_any(path: Path):
-        try:
-            return "pdfrw", Rd_pdfrw(str(path))
-        except Exception:
-            try:
-                return "pypdf", Rd_pypdf(str(path))
-            except Exception as e:
-                raise RuntimeError(f"Could not read the PDF: {e}")
-
-    engine, reader = load_pdf_any(PDF_TEMPLATE)
-
-    FIELD_BASE = {
-        "Textbox19": reg,       # Registration
-        "Textbox18": date_str,  # Date
-    }
-
+    # Fill the form (prefer pdfrw for rich field writing)
+    engine_name, reader = load_pdf_any(PDF_TEMPLATE)
     out_main_path = APP_DIR / f"MB_Performance_Mission_{mission}.pdf"
 
-    def pdfrw_set_field(fields, candidates, value, color_rgb=None):
-        if not isinstance(candidates, (list, tuple)):
-            candidates = [candidates]
-        for name in candidates:
-            for f in fields:
-                if f.get('/T') and f['/T'][1:-1] == name:
-                    f.update(PdfDict(V=str(value)))
-                    f.update(PdfDict(AP=None))
-                    if color_rgb:
-                        r, g, b = color_rgb
-                        f.update(PdfDict(DA=f"{r/255:.3f} {g/255:.3f} {b/255:.3f} rg /Helv 10 Tf"))
-                    return True
-        return False
-
-    ROLE_FIELDS = {
-        "Departure": {
-            "airfield": ["DEP_AIRFIELD", "Textbox22"],
-            "qfu":      ["DEP_QFU", "Textbox23"],
-            "elev":     ["DEP_ELEV", "Textbox53"],
-            "qnh":      ["DEP_QNH", "Textbox52"],
-            "temp":     ["DEP_TEMP", "Textbox51"],
-            "wind":     ["DEP_WIND", "Textbox58"],
-            "pa":       ["DEP_PA", "Textbox50"],
-            "da":       ["DEP_DA", "Textbox49"],
-            "toda_lda": ["DEP_TODA_LDA", "Textbox47"],
-            "todr":     ["DEP_TODR", "Textbox45"],
-            "ldr":      ["DEP_LDR", "Textbox41"],
-            "roc":      ["DEP_ROC", "Textbox39"],
-        },
-        "Arrival": {
-            "airfield": ["ARR_AIRFIELD", "Textbox22_ARR", "Textbox32"],
-            "qfu":      ["ARR_QFU", "Textbox23_ARR", "Text2"],
-            "elev":     ["ARR_ELEV", "Textbox53_ARR", "Textbox33"],
-            "qnh":      ["ARR_QNH", "Textbox52_ARR", "Textbox36"],
-            "temp":     ["ARR_TEMP", "Textbox51_ARR", "Textbox34"],
-            "wind":     ["ARR_WIND", "Textbox58_ARR", "Textbox35"],
-            "pa":       ["ARR_PA", "Textbox50_ARR"],
-            "da":       ["ARR_DA", "Textbox49_ARR"],
-            "toda_lda": ["ARR_TODA_LDA", "Textbox47_ARR", "Textbox43"],
-            "todr":     ["ARR_TODR", "Textbox45_ARR"],
-            "ldr":      ["ARR_LDR", "Textbox41_ARR"],
-            "roc":      ["ARR_ROC", "Textbox39_ARR"],
-        },
-        "Alternate": {
-            "airfield": ["ALT_AIRFIELD", "Textbox22_ALT"],
-            "qfu":      ["ALT_QFU", "Textbox23_ALT"],
-            "elev":     ["ALT_ELEV", "Textbox53_ALT"],
-            "qnh":      ["ALT_QNH", "Textbox52_ALT"],
-            "temp":     ["ALT_TEMP", "Textbox51_ALT"],
-            "wind":     ["ALT_WIND", "Textbox58_ALT"],
-            "pa":       ["ALT_PA", "Textbox50_ALT"],
-            "da":       ["ALT_DA", "Textbox49_ALT"],
-            "toda_lda": ["ALT_TODA_LDA", "Textbox47_ALT"],
-            "todr":     ["ALT_TODR", "Textbox45_ALT"],
-            "ldr":      ["ALT_LDR", "Textbox41_ALT"],
-            "roc":      ["ALT_ROC", "Textbox39_ALT"],
-        },
-    }
-
-    engine_name = engine
     if engine_name == "pdfrw" and hasattr(reader, 'Root') and '/AcroForm' in reader.Root:
-        fields = reader.Root.AcroForm.Fields
+        fields_all = iter_fields_pdfrw(reader)
+
         # Base fields
-        for k, v in FIELD_BASE.items():
-            pdfrw_set_field(fields, k, v)
+        pdfrw_set_field(fields_all, ["Textbox19","REG","Registration"], reg)
+        pdfrw_set_field(fields_all, ["Textbox18","DATE","Date"], date_str)
+
         # Weight & CG with color (green/amber/red)
         wt_color = (30,150,30) if total_weight <= AC['max_takeoff_weight'] else (200,0,0)
         lo, hi = AC['cg_limits']
+        margin = 0.05*(hi-lo)
         if cg < lo or cg > hi:
             cg_color = (200,0,0)
+        elif (cg<lo+margin or cg>hi-margin):
+            cg_color = (200,150,30)
         else:
-            margin = 0.05*(hi-lo)
-            cg_color = (200,150,30) if (cg<lo+margin or cg>hi-margin) else (30,150,30)
-        pdfrw_set_field(fields, ["Textbox14","TOTAL_WEIGHT"], f"{total_weight:.1f}", wt_color)
-        pdfrw_set_field(fields, ["Textbox16","CG_VALUE"], f"{cg:.3f}", cg_color)
-        pdfrw_set_field(fields, ["Textbox17","MTOW"], f"{AC['max_takeoff_weight']:.0f}")
+            cg_color = (30,150,30)
+        pdfrw_set_field(fields_all, ["Textbox14","TOTAL_WEIGHT"], f"{total_weight:.1f}", wt_color)
+        pdfrw_set_field(fields_all, ["Textbox16","CG_VALUE"], f"{cg:.3f}", cg_color)
+        pdfrw_set_field(fields_all, ["Textbox17","MTOW"], f"{AC['max_takeoff_weight']:.0f}")
 
-        # Extra fuel & reason (if you created fields for it)
-        pdfrw_set_field(fields, ["EXTRA_FUEL","Textbox70"], f"{remaining_fuel_l:.1f} L")
-        pdfrw_set_field(fields, ["EXTRA_REASON"], f"limited by {limit_label}")
+        # Extra fuel (if present)
+        pdfrw_set_field(fields_all, ["EXTRA_FUEL","Textbox70"], f"{remaining_fuel_l:.1f} L")
+        pdfrw_set_field(fields_all, ["EXTRA_REASON"], f"limited by {limit_label}")
 
-        # Fill per role (Departure, Arrival, Alternate)
+        # Fill per role
         role_to_row = {r['role']: r for r in perf_rows}
-        for role, names in ROLE_FIELDS.items():
-            if role not in role_to_row:
-                continue
-            rr = role_to_row[role]
-            pdfrw_set_field(fields, names['airfield'], rr['icao'])
-            pdfrw_set_field(fields, names['qfu'], f"{rr['qfu']:.0f} deg")
-            pdfrw_set_field(fields, names['elev'], f"{rr['elev_ft']:.0f}")
-            pdfrw_set_field(fields, names['qnh'], f"{rr['qnh']:.1f}")
-            pdfrw_set_field(fields, names['temp'], f"{rr['temp']:.1f}")
-            # wind: head/tail component (compact)
-            pdfrw_set_field(fields, names['wind'], f"{rr['hw_comp']:.0f} kt")
-            pdfrw_set_field(fields, names['pa'], f"{rr['pa_ft']:.0f}")
-            pdfrw_set_field(fields, names['da'], f"{rr['da_ft']:.0f}")
-            pdfrw_set_field(fields, names['toda_lda'], f"{int(rr['toda_av'])}/{int(rr['lda_av'])}")
-            pdfrw_set_field(fields, names['todr'], f"{rr['to_50']:.0f}")
-            pdfrw_set_field(fields, names['ldr'], f"{rr['ldg_50']:.0f}")
-            # Optional ROC estimation
+
+        def write_role(role: str, rr: Dict):
+            names = ROLE_FIELDS.get(role, {})
+            def w(name_list, value):
+                if not name_list:
+                    return False
+                return pdfrw_set_field(fields_all, name_list, value)
+            w(names.get('airfield', []), rr['icao'])
+            w(names.get('qfu', []), f"{rr['qfu']:.0f}°")
+            w(names.get('elev', []), f"{rr['elev_ft']:.0f}")
+            w(names.get('qnh', []), f"{rr['qnh']:.1f}")
+            w(names.get('temp', []), f"{rr['temp']:.1f}")
+            w(names.get('wind', []), f"{'HW' if rr['hw_comp']>=0 else 'TW'} {abs(rr['hw_comp']):.0f} kt")
+            w(names.get('pa', []), f"{rr['pa_ft']:.0f}")
+            w(names.get('da', []), f"{rr['da_ft']:.0f}")
+            w(names.get('toda_lda', []), f"{int(rr['toda_av'])}/{int(rr['lda_av'])}")
+            w(names.get('todr', []), f"{rr['to_50']:.0f}")
+            w(names.get('ldr', []), f"{rr['ldg_50']:.0f}")
             try:
                 roc_val = roc_interp(rr['pa_ft'], rr['temp'], total_weight)
-                pdfrw_set_field(fields, names['roc'], f"{roc_val:.0f}")
+                w(names.get('roc', []), f"{roc_val:.0f}")
             except Exception:
                 pass
 
-        writer = Wr_pdfrw()
-        writer.write(str(out_main_path), reader)
+        for role in ["Departure","Arrival","Alternate"]:
+            if role in role_to_row:
+                write_role(role, role_to_row[role])
 
-        # Merge with calculations page
+        # Save with pdfrw then re-open with pypdf to append calc page and force NeedAppearances
+        Wr_pdfrw().write(str(out_main_path), reader)
         base = Rd_pypdf(str(out_main_path))
         calc_doc = Rd_pypdf(str(calc_pdf_path))
         merger = Wr_pypdf()
         for p in base.pages: merger.add_page(p)
         for p in calc_doc.pages: merger.add_page(p)
+        if "/AcroForm" in base.trailer["/Root"]:
+            acro = base.trailer["/Root"]["/AcroForm"]
+            acro.update({"/NeedAppearances": True})
+            merger._root_object.update({"/AcroForm": acro})
         with open(out_main_path, "wb") as f:
             merger.write(f)
 
     else:
-        # Fallback: pypdf only fills base fields; performance blocks require exact names (pdfrw path preferred)
+        # Fallback: pypdf path (fills only simple fields; rely on calculations page for details)
         base_r = Rd_pypdf(str(PDF_TEMPLATE))
         merger = Wr_pypdf()
         for p in base_r.pages: merger.add_page(p)
@@ -612,5 +701,6 @@ if st.button("Generate filled PDF"):
     st.success("PDF generated successfully!")
     with open(out_main_path, 'rb') as f:
         st.download_button("Download PDF", f, file_name=out_main_path.name, mime="application/pdf")
+
 
 
