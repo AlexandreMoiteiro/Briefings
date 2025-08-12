@@ -310,6 +310,7 @@ with right:
 
             perf_rows.append({
                 'role': a['role'], 'icao': icao, 'qfu': qfu,
+                'elev_ft': elev, 'qnh': qnh, 'temp': temp,
                 'pa_ft': pa_ft, 'da_ft': da_ft, 'isa_temp': isa_temp,
                 'to_gr': to_gr_corr, 'to_50': to_50,
                 'ldg_gr': ldg_gr_corr, 'ldg_50': ldg_50,
@@ -385,7 +386,7 @@ if st.button("Generate filled PDF"):
         st.error(f"Template not found: {PDF_TEMPLATE}")
         st.stop()
 
-    # Build detailed calculations page (English, no duplication)
+    # Build detailed calculations page (English, human-readable)
     calc_pdf_path = APP_DIR / f"_calc_mission_{mission}.pdf"
     calc = FPDF()
     calc.set_auto_page_break(auto=True, margin=12)
@@ -393,43 +394,57 @@ if st.button("Generate filled PDF"):
     calc.set_font("Arial", "B", 14)
     calc.cell(0, 8, ascii_safe("Tecnam P2008 – Calculations (summary)"), ln=True)
 
-    # W&B
+    # W&B – concise narrative
     calc.set_font("Arial", "B", 12)
     calc.cell(0, 7, ascii_safe("Weight & balance"), ln=True)
     calc.set_font("Arial", size=10)
-    calc.cell(0, 6, ascii_safe(f"Inputs: EW {ew:.1f} kg | EW moment {ew_moment:.2f} kg·m | Student {student:.1f} kg | Instructor {instructor:.1f} kg | Baggage {baggage:.1f} kg | Fuel {fuel_l:.1f} L (dens 0.72)"), ln=True)
-    calc.cell(0, 6, ascii_safe(f"Moments: empty {m_empty:.2f} | pilot {m_pilot:.2f} | baggage {m_bag:.2f} | fuel {m_fuel:.2f} (kg·m)"), ln=True)
-    calc.cell(0, 6, ascii_safe(f"Totals: weight {total_weight:.1f} kg | moment {total_moment:.2f} kg·m | CG {cg:.3f} m | limits {AC['cg_limits'][0]:.3f} – {AC['cg_limits'][1]:.3f} m"), ln=True)
-    calc.cell(0, 6, ascii_safe(f"Extra fuel possible: {remaining_fuel_l:.1f} L (limited by {limit_label})"), ln=True)
+    calc.multi_cell(0, 5, ascii_safe(
+        f"Empty weight {ew:.0f} kg with moment {ew_moment:.0f} kg·m. "
+        f"Students/instructor {student:.0f}+{instructor:.0f} kg and baggage {baggage:.0f} kg. "
+        f"Fuel entered {fuel_l:.0f} L (≈ {fuel_wt:.0f} kg). "
+        f"Totals: weight {total_weight:.0f} kg, moment {total_moment:.0f} kg·m, CG {cg:.3f} m. "
+        f"Extra fuel possible: {remaining_fuel_l:.1f} L (limited by {limit_label})."
+    ))
 
-    # Performance details per aerodrome, showing PA/DA and interpolation brackets
+    # Performance – one block per aerodrome, using PA (not field elevation) and OAT for tables
     calc.ln(2)
     calc.set_font("Arial", "B", 12)
-    calc.cell(0, 7, ascii_safe("Performance – interpolation details"), ln=True)
+    calc.cell(0, 7, ascii_safe("Performance – method & results"), ln=True)
     calc.set_font("Arial", size=10)
     for r in perf_rows:
         calc.set_font("Arial", "B", 10)
         calc.cell(0, 6, ascii_safe(f"{r['role']} – {r['icao']} (QFU {r['qfu']:.0f}°)"), ln=True)
         calc.set_font("Arial", size=10)
-        calc.cell(0, 5, ascii_safe(f"PA {r['pa_ft']:.0f} ft | ISA temp {r['isa_temp']:.1f} °C | OAT {st.session_state.aerodromes[0]['temp']:.1f} °C | DA {r['da_ft']:.0f} ft"), ln=True)
-        # Interpolation steps
-        def dbgline(name, dbg):
-            p0,p1,t0,t1,v00,v01,v10,v11 = dbg
-            return f"{name}: PA[{p0},{p1}] & Temp[{t0},{t1}] ⇒ values ({v00},{v01}; {v10},{v11})"
-        calc.cell(0, 5, ascii_safe(dbgline("TO GR bilinear", r['dbg']['to_gr'])), ln=True)
-        calc.cell(0, 5, ascii_safe(dbgline("TO 50ft bilinear", r['dbg']['to_50'])), ln=True)
-        calc.cell(0, 5, ascii_safe(dbgline("LND GR bilinear", r['dbg']['ldg_gr'])), ln=True)
-        calc.cell(0, 5, ascii_safe(dbgline("LND 50ft bilinear", r['dbg']['ldg_50'])), ln=True)
-        calc.cell(0, 5, ascii_safe(f"Wind head/tail component: {r['hw_comp']:.0f} kt | Paved: {'yes' if st.session_state.aerodromes[0]['paved'] else 'no'} | Slope: {st.session_state.aerodromes[0]['slope_pc']:.1f}%"), ln=True)
-        calc.cell(0, 5, ascii_safe(f"Results: TO GR* {r['to_gr']:.0f} m | TODR 50ft {r['to_50']:.0f} m | LND GR* {r['ldg_gr']:.0f} m | LDR 50ft {r['ldg_50']:.0f} m | TODA Av {r['toda_av']:.0f} | LDA Av {r['lda_av']:.0f}"), ln=True)
+        # Step 1: atmospherics
+        calc.multi_cell(0, 5, ascii_safe(
+            f"Atmospherics: elevation {r['elev_ft']:.0f} ft, QNH {r['qnh']:.1f} hPa → pressure altitude ≈ {r['pa_ft']:.0f} ft. "
+            f"ISA at PA ≈ {r['isa_temp']:.1f} °C; with OAT {r['temp']:.1f} °C → density altitude ≈ {r['da_ft']:.0f} ft."
+        ))
+        # Step 2: table interpolation summary (no raw grid values)
+        calc.multi_cell(0, 5, ascii_safe(
+            "Table method: bilinear interpolation by pressure altitude and OAT from AFM performance tables."
+        ))
+        # Step 3: wind/surface/slope corrections and final figures
+        paved_txt = 'paved' if next(a for a in st.session_state.aerodromes if a['icao']==r['icao'])['paved'] else 'grass'
+        slope_txt = next(a for a in st.session_state.aerodromes if a['icao']==r['icao'])['slope_pc']
+        calc.multi_cell(0, 5, ascii_safe(
+            f"Corrections applied: wind component {r['hw_comp']:.0f} kt, surface {paved_txt}, slope {slope_txt:.1f}%."
+        ))
+        calc.multi_cell(0, 5, ascii_safe(
+            f"Results: take-off ground roll ≈ {r['to_gr']:.0f} m, take-off distance over 50 ft ≈ {r['to_50']:.0f} m; "
+            f"landing ground roll ≈ {r['ldg_gr']:.0f} m, landing distance over 50 ft ≈ {r['ldg_50']:.0f} m. "
+            f"Declared distances: TODA {r['toda_av']:.0f} m, LDA {r['lda_av']:.0f} m."
+        ))
         calc.ln(1)
 
-    # Fuel planning
+    # Fuel planning – concise
     calc.ln(2)
     calc.set_font("Arial", "B", 12)
     calc.cell(0, 7, ascii_safe("Fuel planning (20 L/h)"), ln=True)
     calc.set_font("Arial", size=10)
-    calc.cell(0, 5, ascii_safe(f"Trip {trip_l:.1f} L | Cont 5% {cont_l:.1f} L | Required ramp {req_ramp:.1f} L | Extra {extra_l:.1f} L | Total ramp {total_ramp:.1f} L"), ln=True)
+    calc.multi_cell(0, 5, ascii_safe(
+        f"Trip {trip_l:.1f} L, contingency 5% {cont_l:.1f} L, required ramp {req_ramp:.1f} L, extra {extra_l:.1f} L, total ramp {total_ramp:.1f} L."
+    ))
 
     calc.output(str(calc_pdf_path))
 
