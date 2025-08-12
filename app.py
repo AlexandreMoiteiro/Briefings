@@ -1,4 +1,5 @@
-# app.py — Briefings com editor de NOTAMs por ICAO (guarda em Gist) e uso no PDF
+# app.py — Briefings com editor de NOTAMs e GAMET (ambos via Gist) + METAR/TAF/SIGMET + PDFs
+
 from typing import Dict, Any, List, Tuple
 import io, os, re, base64, tempfile, unicodedata, json, datetime as dt
 import streamlit as st
@@ -8,13 +9,13 @@ import fitz  # PyMuPDF
 import requests
 from openai import OpenAI
 
-# ---------- External pages ----------
+# ---------- External pages (ajusta se renomeares) ----------
 APP_WEATHER_URL = "https://briefings.streamlit.app/Weather"
 APP_NOTAMS_URL  = "https://briefings.streamlit.app/NOTAMs"
 APP_VFRMAP_URL  = "https://briefings.streamlit.app/VFRMap"
 APP_MNB_URL     = "https://briefings.streamlit.app/MassBalance"
 
-# ---------- Page & styles ----------
+# ---------- Página & estilos ----------
 st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown("""
 <style>
@@ -26,6 +27,7 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
 .section { margin-top: 18px; }
 .small { font-size:.92rem; color:var(--muted); }
 .monos{font-family:ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap}
+hr{border:none;border-top:1px solid var(--line);margin:12px 0}
 </style>
 """, unsafe_allow_html=True)
 
@@ -68,7 +70,7 @@ def ensure_png_bytes(uploaded):
 def b64_png(img_bytes: io.BytesIO) -> str:
     return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
-# ---------- Weather (CheckWX) ----------
+# ---------- METAR/TAF (CheckWX) ----------
 def cw_headers() -> Dict[str,str]:
     key = st.secrets.get("CHECKWX_API_KEY","").strip()
     return {"X-API-Key": key} if key else {}
@@ -119,20 +121,21 @@ def fetch_sigmet_lppc_auto() -> List[str]:
     except Exception: return []
 
 # ---------- GAMET (Gist) ----------
-def _get_gist_secrets():
+def _get_gamet_secrets():
     token = (st.secrets.get("GAMET_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get("GAMET_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
     fn    = (st.secrets.get("GAMET_GIST_FILENAME") or st.secrets.get("GIST_FILENAME") or "").strip()
     return token, gid, fn
 
 def gamet_gist_config_ok() -> bool:
-    token, gid, fn = _get_gist_secrets()
+    token, gid, fn = _get_gamet_secrets()
     return all([token, gid, fn])
 
+@st.cache_data(ttl=90)
 def load_gamet_from_gist() -> Dict[str,Any]:
     if not gamet_gist_config_ok(): return {"text":"", "updated_utc":None}
     try:
-        token, gid, fn = _get_gist_secrets()
+        token, gid, fn = _get_gamet_secrets()
         r = requests.get(f"https://api.github.com/gists/{gid}",
                          headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
                          timeout=12)
@@ -148,6 +151,28 @@ def load_gamet_from_gist() -> Dict[str,Any]:
             return {"text": content, "updated_utc": None}
     except Exception:
         return {"text":"", "updated_utc":None}
+
+def save_gamet_to_gist(text: str) -> tuple[bool, str]:
+    """Guarda o GAMET no Gist no formato {"updated_utc":"...", "text":"..."}."""
+    token, gid, fn = _get_gamet_secrets()
+    if not all([token, gid, fn]):
+        return False, "Faltam segredos do GAMET (TOKEN/ID/FILENAME)."
+    try:
+        payload = {
+            "updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
+            "text": (text or "").strip()
+        }
+        body = {"files": {fn: {"content": json.dumps(payload, ensure_ascii=False, indent=2)}}}
+        r = requests.patch(
+            f"https://api.github.com/gists/{gid}",
+            headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
+            json=body, timeout=12
+        )
+        if r.status_code >= 400:
+            return False, f"GitHub respondeu {r.status_code}: {r.text}"
+        return True, "GAMET guardado no Gist."
+    except Exception as e:
+        return False, f"Erro a gravar GAMET no Gist: {e}"
 
 # ---------- NOTAMs (Gist) ----------
 def notam_gist_config_ok() -> bool:
@@ -199,11 +224,7 @@ def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
             "map": {k: [s for s in v if str(s).strip()] for k, v in new_map.items()}
         }
         body = {
-            "files": {
-                fn: {
-                    "content": json.dumps(payload, ensure_ascii=False, indent=2)
-                }
-            }
+            "files": { fn: { "content": json.dumps(payload, ensure_ascii=False, indent=2) } }
         }
         r = requests.patch(
             f"https://api.github.com/gists/{gid}",
@@ -242,7 +263,7 @@ def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1200) -> st
                 {"role":"system","content":prompt_system},
                 {"role":"user","content":prompt_user},
             ],
-            max_completion_tokens=max_tokens
+            max_completion_tokens=max_tokens  # <- correto no fallback
         )
         content = r2.choices[0].message.content
         if content and content.strip():
@@ -251,28 +272,12 @@ def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1200) -> st
     except Exception as e2:
         return ascii_safe(f"Falha na interpretacao: {last_err}; fallback chat: {e2}")
 
-# ---------- Analyses (PT) ----------
-def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
-    sys = ("Es meteorologista aeronautico senior. Em PT e texto corrido, interpreta METAR e TAF, "
-           "explicando codigos e impacto operacional para voo. Usa apenas o texto fornecido.")
-    user = f"Aerodromo {icao}\nMETAR:\n{metar}\n\nTAF:\n{taf}"
-    return gpt_text(sys, user, max_tokens=1200)
-
-def analyze_sigmet_pt(sigmet_text: str) -> str:
-    sys = ("Es meteorologista aeronautico senior. Em PT e prosa corrida, interpreta o SIGMET LPPC: "
-           "fenomeno, area, niveis/FL, validade/horas, movimento/intensidade, e impacto operacional.")
-    return gpt_text(sys, sigmet_text, max_tokens=900)
-
-def analyze_gamet_pt(gamet_text: str) -> str:
-    sys = ("Es meteorologista aeronautico senior. Em PT e texto corrido, explica o GAMET LPPC: "
-           "fenomenos, niveis, areas e impacto operacional. Usa apenas o texto fornecido.")
-    return gpt_text(sys, gamet_text, max_tokens=1200)
-
+# ---------- Análises (PT) ----------
 def analyze_chart_pt(kind: str, img_b64: str) -> str:
     sys = (
         "Es meteorologista aeronautico senior. Analisa o chart fornecido em portugues, SEM listas: "
         "Prosa corrida em 3 blocos: 1) Visao geral; 2) Portugal; 3) Alentejo. "
-        "Identifica e nomeia simbolos; conclui com impacto operacional. Usa apenas conteudo visivel."
+        "Identifica e nomeia simbolos/anotacoes e conclui com impacto operacional. Usa apenas conteudo visivel."
     )
     user = f"Tipo de chart: {kind}."
     try:
@@ -291,8 +296,24 @@ def analyze_chart_pt(kind: str, img_b64: str) -> str:
     except Exception as e:
         return ascii_safe(f"Nao foi possivel analisar o chart (erro: {e}).")
 
+def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
+    sys = ("Es meteorologista aeronautico senior. Em PT e texto corrido, interpreta METAR e TAF, "
+           "explicando codigos e impacto operacional para voo. Usa apenas o texto fornecido.")
+    user = f"Aerodromo {icao}\nMETAR:\n{metar}\n\nTAF:\n{taf}"
+    return gpt_text(sys, user, max_tokens=1200)
+
+def analyze_sigmet_pt(sigmet_text: str) -> str:
+    sys = ("Es meteorologista aeronautico senior. Em PT e prosa corrida, interpreta o SIGMET LPPC: "
+           "fenomeno, area, niveis/FL, validade/horas, movimento/intensidade, e impacto operacional.")
+    return gpt_text(sys, sigmet_text, max_tokens=900)
+
+def analyze_gamet_pt(gamet_text: str) -> str:
+    sys = ("Es meteorologista aeronautico senior. Em PT e texto corrido, explica o GAMET LPPC: "
+           "fenomenos, niveis, areas e impacto operacional. Usa apenas o texto fornecido.")
+    return gpt_text(sys, gamet_text, max_tokens=1200)
+
 # ---------- PDF helpers ----------
-PASTEL = (90,127,179)
+PASTEL = (90,127,179)  # azul suave
 
 def draw_header(pdf: FPDF, text: str):
     pdf.set_draw_color(229,231,235); pdf.set_line_width(0.3)
@@ -329,10 +350,11 @@ class DetailedPDF(FPDF):
             self.cell(0,8,ascii_safe(f"Piloto: {pilot}   Aeronave: {aircraft}   Callsign: {callsign}   Matricula: {reg}"), ln=True, align="C")
         if date_str or time_utc:
             self.cell(0,8,ascii_safe(f"Data: {date_str}   UTC: {time_utc}"), ln=True, align="C")
+        # texto explicativo + links
         self.ln(6); self.set_font("Helvetica","I",12)
         self.set_text_color(*PASTEL)
-        self.cell(0,7,ascii_safe("METAR/TAF/GAMET: ")+APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
-        self.cell(0,7,ascii_safe("NOTAMs: ")+APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
+        self.cell(0,7,ascii_safe("METAR/TAF/GAMET (Weather): ")+APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
+        self.cell(0,7,ascii_safe("NOTAMs (pagina dedicada): ")+APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
         self.set_text_color(0,0,0)
 
     def metar_taf_block(self, analyses: List[Tuple[str,str]]):
@@ -359,13 +381,14 @@ class DetailedPDF(FPDF):
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
 
     def notams_block(self, parsed: List[Tuple[str,str,List[str]]]):
+        # Secção textual
         self.add_page(orientation="P"); draw_header(self,"NOTAMs — Texto")
         for icao, analysis, _ in parsed:
             self.set_font("Helvetica","B",12); self.cell(0,8,ascii_safe(icao), ln=True)
-            self.set_font("Helvetica","",12); 
+            self.set_font("Helvetica","",12)
             self.multi_cell(0,7,ascii_safe(analysis if analysis else "Sem NOTAMs.")); 
             self.ln(2)
-
+        # Apêndice RAW
         self.add_page(orientation="P"); draw_header(self,"NOTAMs — RAW (Apendice)")
         self.set_font("Helvetica","",12); self.ln(2)
         for icao, _, arr in parsed:
@@ -404,8 +427,8 @@ class FinalBriefPDF(FPDF):
             self.cell(0,8,ascii_safe(f"Date: {date_str}   UTC: {time_utc}"), ln=True, align="C")
         self.ln(6); self.set_font("Helvetica","I",12)
         self.set_text_color(*PASTEL)
-        self.cell(0,7,ascii_safe("METAR/TAF/GAMET: ")+APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
-        self.cell(0,7,ascii_safe("NOTAMs: ")+APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
+        self.cell(0,7,ascii_safe("Weather page: ")+APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
+        self.cell(0,7,ascii_safe("NOTAMs page: ")+APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
         self.set_text_color(0,0,0)
 
     def flightplan_image(self, title, img_png):
@@ -418,7 +441,7 @@ class FinalBriefPDF(FPDF):
             if subtitle: self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
             place_image_full(self, img_png)
 
-# ---------- UI: header & quick links ----------
+# ---------- UI: header & links ----------
 st.markdown('<div class="app-title">Briefings</div>', unsafe_allow_html=True)
 links = st.columns(4)
 with links[0]:
@@ -456,13 +479,10 @@ with c2:
     icaos_notam = parse_icaos(icaos_notam_str)
 
 # ---------- Editor de NOTAMs (por ICAO) ----------
-st.markdown("### Editar NOTAMs (estes textos ficam guardados e vao aparecer na pagina NOTAMs)")
-saved_obj = load_notams_from_gist()
-existing_map: Dict[str, List[str]] = (saved_obj.get("map") or {}) if isinstance(saved_obj, dict) else {}
-if saved_obj.get("updated_utc"):
-    st.caption(f"Última atualização no Gist (UTC): {saved_obj['updated_utc']}")
+st.markdown("### NOTAMs (editar e guardar)")
+saved_notams = load_notams_from_gist()
+existing_map: Dict[str, List[str]] = (saved_notams.get("map") or {}) if isinstance(saved_notams, dict) else {}
 
-# um editor por ICAO — cola os NOTAMs tal como queres que apareçam; separa NOTAMs por linha em branco
 def parse_block_to_list(text: str) -> List[str]:
     if not text.strip():
         return []
@@ -470,41 +490,59 @@ def parse_block_to_list(text: str) -> List[str]:
     return [p.strip() for p in parts if p.strip()]
 
 edit_cols = st.columns(3)
-editors: Dict[str, str] = {}
+editors_notam: Dict[str, str] = {}
 for i, icao in enumerate(icaos_notam):
     with edit_cols[i % 3]:
         initial_text = ""
         if existing_map.get(icao):
-            # junta NOTAMs existentes com linha em branco entre eles
             initial_text = "\n\n".join(existing_map.get(icao, []))
-        editors[icao] = st.text_area(
+        editors_notam[icao] = st.text_area(
             f"{icao} — NOTAMs",
             value=initial_text,
             placeholder=("Ex.: AERODROME BEACON ONLY FLASH-GREEN LIGHT OPERATIVE.\n"
                          "FROM: 29th Jul 2025 15:10 TO: 29th Sep 2025 18:18 EST\n\n"
                          "Outro NOTAM aqui..."),
-            key=f"ed_{icao}",
+            key=f"ed_notam_{icao}",
             height=160
         )
 
-st.caption("Dica: separa NOTAMs com uma linha em branco. Ao guardar, cada bloco vira uma entrada.")
-
-col_save = st.columns([0.4,0.3,0.3])
-with col_save[0]:
-    overwrite_all = st.checkbox("Substituir TODOS os aeródromos do Gist por estes", value=False,
-                                help="Se desligado, só atualiza os ICAOs listados; os restantes ficam como estão.")
-with col_save[1]:
+col_save_n = st.columns([0.4,0.3,0.3])
+with col_save_n[0]:
+    overwrite_all_n = st.checkbox("Substituir TODOS os aerodromos do Gist (NOTAMs)", value=False)
+with col_save_n[1]:
     if st.button("Guardar NOTAMs no Gist"):
-        # constrói novo mapa
         new_map: Dict[str, List[str]] = {}
-        if not overwrite_all:
-            new_map.update(existing_map)  # mantém restantes
+        if not overwrite_all_n:
+            new_map.update(existing_map)
         for icao in icaos_notam:
-            new_map[icao] = parse_block_to_list(editors.get(icao,""))
+            new_map[icao] = parse_block_to_list(editors_notam.get(icao,""))
         ok, msg = save_notams_to_gist(new_map)
         if ok:
             st.success(msg)
             st.cache_data.clear()
+        else:
+            st.error(msg)
+
+st.divider()
+
+# ---------- Editor de GAMET ----------
+st.markdown("### GAMET (editar e guardar)")
+_gamet_obj = load_gamet_from_gist()
+_gamet_initial = (_gamet_obj.get("text") or "").strip()
+
+gamet_text = st.text_area(
+    "GAMET — cola aqui o texto completo",
+    value=_gamet_initial,
+    placeholder="Ex.:\nLPPC FIR GAMET VALID 12/06Z-12/12Z\n... (texto integral aqui) ...",
+    height=220
+)
+
+col_gs = st.columns([0.3,0.7])
+with col_gs[0]:
+    if st.button("Guardar GAMET no Gist"):
+        ok, msg = save_gamet_to_gist(gamet_text)
+        if ok:
+            st.success(msg); st.cache_data.clear()
         else:
             st.error(msg)
 
@@ -535,15 +573,13 @@ if uploads:
             subtitle = st.text_input("Subtitle (optional)", value="", key=f"subtitle_{idx}")
         charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png})
 
-# ---------- METAR/TAF/GAMET/SIGMET análises para PDF ----------
+# ---------- Generate Detailed (PT) ----------
 def analyze_notams_text_only(icao: str, notams_raw: List[str]) -> str:
-    # Sem interpretação “AI” — devolve o texto exatamente como guardado
     return "\n\n".join(notams_raw).strip() or "Sem NOTAMs."
 
-# ---------- Generate Detailed (PT) ----------
 gen_det = st.button("Generate Detailed (PT)")
 if gen_det:
-    # METAR/TAF (texto corrido com explicação)
+    # METAR/TAF (texto corrido)
     metar_analyses: List[Tuple[str,str]] = []
     for icao in icaos_metar:
         metar = fetch_metar_now(icao) or ""
@@ -556,17 +592,18 @@ if gen_det:
     sigmet_text = "\n\n---\n\n".join(sigmets).strip()
     sigmet_analysis = analyze_sigmet_pt(sigmet_text) if sigmet_text else ""
 
-    # GAMET (Gist)
-    gamet_saved = load_gamet_from_gist()
-    gamet_text = (gamet_saved.get("text","") or "").strip()
-    gamet_analysis = analyze_gamet_pt(gamet_text) if gamet_text else ""
+    # GAMET (usar o texto do editor; se vazio, cair para Gist)
+    gamet_for_pdf = (gamet_text or _gamet_initial or "").strip()
+    gamet_analysis = analyze_gamet_pt(gamet_for_pdf) if gamet_for_pdf else ""
 
-    # NOTAMs (Gist)
-    latest = load_notams_from_gist()
-    notam_map = latest.get("map") if isinstance(latest, dict) else {}
+    # NOTAMs para PDF: usar editores locais (se preenchidos) por cima do Gist
+    current_map = {**(existing_map or {})}
+    for icao in icaos_notam:
+        edited = parse_block_to_list(editors_notam.get(icao,""))
+        if edited: current_map[icao] = edited
     notam_parsed: List[Tuple[str,str,List[str]]] = []
     for icao in icaos_notam:
-        arr = list((notam_map or {}).get(icao, []))
+        arr = list((current_map or {}).get(icao, []))
         analysis = analyze_notams_text_only(icao, arr)
         notam_parsed.append((icao, analysis, arr))
 
@@ -576,12 +613,11 @@ if gen_det:
     det_pdf.metar_taf_block(metar_analyses)
     if sigmet_text:
         det_pdf.sigmet_block(sigmet_text, sigmet_analysis)
-    if gamet_text:
-        det_pdf.gamet_block(gamet_text, gamet_analysis)
+    if gamet_for_pdf:
+        det_pdf.gamet_block(gamet_for_pdf, gamet_analysis)
     det_pdf.notams_block(notam_parsed)
 
     for ch in charts:
-        # Se quiseres análise AI aos charts, reativa a função analyze_chart_pt acima.
         analysis_txt = "—"
         det_pdf.chart_block(ch["title"], ch["subtitle"], ch["img_png"], analysis_txt)
 
@@ -604,6 +640,34 @@ st.markdown("#### M&B / Performance PDF (from external app)")
 mb_upload = st.file_uploader("Upload M&B/Performance PDF to embed", type=["pdf"], accept_multiple_files=False)
 
 # ---------- Generate Final Briefing (EN) ----------
+class FinalBriefPDF(FPDF):
+    def header(self): pass
+    def footer(self): pass
+    def cover(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc):
+        self.add_page(orientation="L"); self.set_xy(0,36)
+        self.set_font("Helvetica","B",28); self.cell(0,14,"Briefing", ln=True, align="C")
+        self.ln(2); self.set_font("Helvetica","",13)
+        self.cell(0,8,ascii_safe(f"Mission: {mission_no}"), ln=True, align="C")
+        if pilot or aircraft or callsign or reg:
+            self.cell(0,8,ascii_safe(f"Pilot: {pilot}   Aircraft: {aircraft}   Callsign: {callsign}   Reg: {reg}"), ln=True, align="C")
+        if date_str or time_utc:
+            self.cell(0,8,ascii_safe(f"Date: {date_str}   UTC: {time_utc}"), ln=True, align="C")
+        self.ln(6); self.set_font("Helvetica","I",12)
+        self.set_text_color(*PASTEL)
+        self.cell(0,7,ascii_safe("Weather page: ")+APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
+        self.cell(0,7,ascii_safe("NOTAMs page: ")+APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
+        self.set_text_color(0,0,0)
+
+    def flightplan_image(self, title, img_png):
+        self.add_page(orientation="L"); draw_header(self, ascii_safe(title))
+        place_image_full(self, img_png)
+
+    def charts_only(self, charts: List[Tuple[str,str,io.BytesIO]]):
+        for (title, subtitle, img_png) in charts:
+            self.add_page(orientation="L"); draw_header(self, ascii_safe(title))
+            if subtitle: self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
+            place_image_full(self, img_png)
+
 gen_final = st.button("Generate Final Briefing (EN)")
 if gen_final:
     fb = FinalBriefPDF()
@@ -616,7 +680,6 @@ if gen_final:
     if fp_img_png is not None:
         fb.flightplan_image("Flight Plan", fp_img_png)
 
-    # charts apenas como imagens
     if 'charts' in locals():
         fb.charts_only([(c["title"], c["subtitle"], c["img_png"]) for c in charts])
 
@@ -624,6 +687,12 @@ if gen_final:
     fb.output(final_name)
     with open(final_name, "rb") as f:
         st.download_button("Download Final Briefing (EN)", data=f.read(), file_name=final_name, mime="application/pdf", use_container_width=True)
+
+st.divider()
+st.markdown(f"**Weather:** {APP_WEATHER_URL}")
+st.markdown(f"**NOTAMs:** {APP_NOTAMS_URL}")
+st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
+st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
 
 
 
