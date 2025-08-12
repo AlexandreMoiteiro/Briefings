@@ -1,10 +1,8 @@
 # Streamlit app – Tecnam P2008 (M&B + Performance) – EN
-# PYPDF-ONLY (robust on Streamlit Cloud)
-# Requirements:
+# Works on GitHub + Streamlit Cloud
+# Requirements (requirements.txt):
 #   streamlit
 #   pytz
-#   pypdf>=4.2.0
-#   fpdf
 
 import streamlit as st
 import datetime
@@ -13,20 +11,18 @@ import pytz
 import unicodedata
 from math import cos, sin, radians
 from typing import List, Dict
-import csv
-
-from pypdf import PdfReader as Rd_pypdf, PdfWriter as Wr_pypdf
-from fpdf import FPDF
 
 # =========================
 # Helpers & style
 # =========================
+
 def ascii_safe(text):
     if not isinstance(text, str):
         return str(text)
     return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
 
 def printable(s: str) -> str:
+    """ASCII-only + avoid symbols that can break FPDF multi_cell (kept just for clean text)."""
     return (
         ascii_safe(str(s))
         .replace("≈", "~")
@@ -35,7 +31,7 @@ def printable(s: str) -> str:
         .replace("—", "-")
         .replace("→", "->")
         .replace("’", "'")
-        .replace("·", "*")
+        .replace("·", "*")   # 'kg·m' -> 'kg*m'
     )
 
 st.set_page_config(
@@ -49,6 +45,7 @@ st.markdown(
     <style>
       .block-container { max-width: 1120px !important; }
       .mb-header{font-size:1.3rem;font-weight:800;text-transform:uppercase;border-bottom:1px solid #e5e7ec;padding-bottom:6px;margin-bottom:8px}
+      .section-title{font-weight:700;margin:14px 0 6px 0}
       .mb-summary-row{display:flex;justify-content:space-between;margin:4px 0}
       .ok{color:#1d8533}.warn{color:#d8aa22}.bad{color:#c21c1c}
       .mb-table{border-collapse:collapse;width:100%;font-size:.95rem}
@@ -60,10 +57,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-APP_DIR = Path(__file__).parent if "__file__" in globals() else Path(".")
-PDF_TEMPLATE = APP_DIR / "TecnamP2008MBPerformanceSheet_MissionX_organizado.pdf"
-CSV_MAPPING = APP_DIR / "TecnamP2008MBPerformanceSheet_MissionX_organizado_mapeamento.csv"
 
 # =========================
 # Fixed aircraft data (Tecnam P2008)
@@ -137,10 +130,13 @@ VY = {650:{0:70,2000:69,4000:68,6000:67,8000:65,10000:64,12000:63,14000:62},
 # =========================
 # Interpolation & corrections
 # =========================
-def clamp(v, lo, hi): return max(lo, min(hi, v))
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
 def interp1(x, x0, x1, y0, y1):
-    if x1 == x0: return y0
+    if x1 == x0:
+        return y0
     t = (x - x0) / (x1 - x0)
     return y0 + t * (y1 - y0)
 
@@ -151,11 +147,16 @@ def bilinear(pa, temp, table, key):
     p1 = min([p for p in pas if p >= pa])
     temps = [-25, 0, 25, 50]
     t = clamp(temp, temps[0], temps[-1])
-    if t <= 0: t0, t1 = -25, 0
-    elif t <= 25: t0, t1 = 0, 25
-    else: t0, t1 = 25, 50
-    v00 = table[p0][key][t0]; v01 = table[p0][key][t1]
-    v10 = table[p1][key][t0]; v11 = table[p1][key][t1]
+    if t <= 0:
+        t0, t1 = -25, 0
+    elif t <= 25:
+        t0, t1 = 0, 25
+    else:
+        t0, t1 = 25, 50
+    v00 = table[p0][key][t0]
+    v01 = table[p0][key][t1]
+    v10 = table[p1][key][t0]
+    v11 = table[p1][key][t1]
     v0 = interp1(t, t0, t1, v00, v01)
     v1 = interp1(t, t0, t1, v10, v11)
     return interp1(pa, p0, p1, v0, v1)
@@ -170,16 +171,23 @@ def roc_interp(pa, temp, weight):
         p1 = min([p for p in pas if p >= pa_c])
         temps = [-25, 0, 25, 50]
         t = clamp(temp, temps[0], temps[-1])
-        if t <= 0: t0, t1 = -25, 0
-        elif t <= 25: t0, t1 = 0, 25
-        else: t0, t1 = 25, 50
-        v00 = tab[p0][t0]; v01 = tab[p0][t1]
-        v10 = tab[p1][t0]; v11 = tab[p1][t1]
+        if t <= 0:
+            t0, t1 = -25, 0
+        elif t <= 25:
+            t0, t1 = 0, 25
+        else:
+            t0, t1 = 25, 50
+        v00 = tab[p0][t0]
+        v01 = tab[p0][t1]
+        v10 = tab[p1][t0]
+        v11 = tab[p1][t1]
         v0 = interp1(t, t0, t1, v00, v01)
         v1 = interp1(t, t0, t1, v10, v11)
         return interp1(pa_c, p0, p1, v0, v1)
-    if w <= 600: return interp1(w, 550, 600, roc_for_w(550), roc_for_w(600))
-    else:        return interp1(w, 600, 650, roc_for_w(600), roc_for_w(650))
+    if w <= 600:
+        return interp1(w, 550, 600, roc_for_w(550), roc_for_w(600))
+    else:
+        return interp1(w, 600, 650, roc_for_w(600), roc_for_w(650))
 
 def wind_components(runway_qfu_deg, wind_dir_deg, wind_speed):
     """Returns (headwind, crosswind). Headwind>0, tailwind<0. Crosswind>0 from right."""
@@ -194,121 +202,32 @@ def wind_components(runway_qfu_deg, wind_dir_deg, wind_speed):
 
 def to_corrections_takeoff(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     gr = float(ground_roll)
-    gr = gr - 5.0*headwind_kt if headwind_kt >= 0 else gr + 15.0*abs(headwind_kt)
-    if paved: gr *= 0.9
-    slope_pc = clamp(slope_pc, -5.0, 5.0)
+    if headwind_kt >= 0:
+        gr -= 5.0 * headwind_kt
+    else:
+        gr += 15.0 * abs(headwind_kt)
+    if paved:
+        gr *= 0.9
+    slope_pc = clamp(slope_pc, -5.0, 5.0)  # guard typical use
     gr *= (1.0 + 0.07 * slope_pc)
     return max(gr, 0.0)
 
 def ldg_corrections(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     gr = float(ground_roll)
-    gr = gr - 4.0*headwind_kt if headwind_kt >= 0 else gr + 13.0*abs(headwind_kt)
-    if paved: gr *= 0.9
+    if headwind_kt >= 0:
+        gr -= 4.0 * headwind_kt
+    else:
+        gr += 13.0 * abs(headwind_kt)
+    if paved:
+        gr *= 0.9
     slope_pc = clamp(slope_pc, -5.0, 5.0)
     gr *= (1.0 - 0.03 * slope_pc)
     return max(gr, 0.0)
 
 # =========================
-# PDF helpers (pypdf only)
-# =========================
-from pypdf import PdfReader as Rd_pypdf, PdfWriter as Wr_pypdf
-from pypdf.generic import NameObject, BooleanObject, DictionaryObject, TextStringObject
-
-def _stringify_field_name(t):
-    # t is a TextStringObject like "(Textbox19)" or "Textbox19"
-    s = str(t)
-    if s.startswith("(") and s.endswith(")"):
-        s = s[1:-1]
-    return s
-
-def pypdf_write_fields(template_path: Path, out_path: Path, field_values: dict, extra_pages: list[Path] = None):
-    """
-    Robust, pypdf-only filler:
-    - Copies pages
-    - Creates fresh /AcroForm with NeedAppearances=True
-    - Fills values by walking page /Annots (Subtype /Widget) and writing /V
-    - Appends extra PDFs (e.g., calculations page)
-    """
-    base_r = Rd_pypdf(str(template_path))
-    w = Wr_pypdf()
-
-    # 1) Copy template pages
-    for p in base_r.pages:
-        w.add_page(p)
-
-    # 2) Fresh /AcroForm (no cross-object copying) + NeedAppearances
-    w._root_object[NameObject("/AcroForm")] = DictionaryObject()
-    w._root_object["/AcroForm"][NameObject("/NeedAppearances")] = BooleanObject(True)
-
-    # 3) Fill widgets by /Annots directly (avoid update_page_form_field_values)
-    for page in w.pages:
-        if "/Annots" not in page:
-            continue
-        for annot_ref in list(page["/Annots"]):
-            annot = annot_ref.get_object()
-            if annot.get("/Subtype") != NameObject("/Widget"):
-                continue
-            t = annot.get("/T")
-            if not t:
-                continue
-            fname = _stringify_field_name(t)
-            if fname in field_values:
-                annot[NameObject("/V")] = TextStringObject(str(field_values[fname]))
-                # Drop appearance so NeedAppearances can rebuild in viewer
-                if "/AP" in annot:
-                    del annot["/AP"]
-
-    # 4) Append extra pages (e.g., FPDF calc page)
-    for x in (extra_pages or []):
-        xr = Rd_pypdf(str(x))
-        for p in xr.pages:
-            w.add_page(p)
-
-    # 5) Write out
-    with open(out_path, "wb") as f:
-        w.write(f)
-
-# =========================
-# Mapping loader (CSV → ROLE_FIELDS)
-# =========================
-def load_role_fields_from_csv(csv_path: Path) -> Dict[str, Dict[str, List[str]]]:
-    role_fields: Dict[str, Dict[str, List[str]]] = {}
-    if not csv_path.exists():
-        return role_fields
-    with csv_path.open("r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            role = (row.get("role") or row.get("ROLE") or row.get("coluna") or "").strip()
-            key  = (row.get("key")  or row.get("KEY")  or row.get("campo")  or "").strip().lower()
-            if not role or not key: 
-                continue
-            names: List[str] = []
-            raw = (row.get("names") or "").strip()
-            if raw:
-                for sep in ["|",";","/","\\",","]:
-                    if sep in raw:
-                        names = [s.strip() for s in raw.split(sep) if s.strip()]
-                        break
-                if not names:
-                    names = [raw]
-            else:
-                for i in range(1, 10):
-                    v = row.get(f"name{i}") or row.get(f"NAME{i}")
-                    if v and v.strip():
-                        names.append(v.strip())
-            if names:
-                role_fields.setdefault(role, {}).setdefault(key, [])
-                for n in names:
-                    if n not in role_fields[role][key]:
-                        role_fields[role][key].append(n)
-    return role_fields
-
-def csv_names(role_fields: dict, role: str, key: str) -> List[str]:
-    return role_fields.get(role, {}).get(key, [])
-
-# =========================
 # UI – inputs
 # =========================
+
 st.markdown('<div class="mb-header">Tecnam P2008 – Mass & Balance & Performance</div>', unsafe_allow_html=True)
 
 left, _, right = st.columns([0.42,0.02,0.56], gap="large")
@@ -317,6 +236,7 @@ with left:
     st.markdown("### Weight & balance (inputs)")
     ew = st.number_input("Empty weight (kg)", min_value=0.0, value=0.0, step=1.0)
     ew_moment = st.number_input("Empty weight moment (kg*m)", min_value=0.0, value=0.0, step=0.1)
+    ew_arm = (ew_moment/ew) if ew>0 else 0.0
     student = st.number_input("Student weight (kg)", min_value=0.0, value=0.0, step=1.0)
     instructor = st.number_input("Instructor weight (kg)", min_value=0.0, value=0.0, step=1.0)
     baggage = st.number_input("Baggage (kg)", min_value=0.0, value=0.0, step=1.0)
@@ -384,10 +304,12 @@ with right:
 
             if abs(slope_pc) > 3.0: slope_warn = True
 
+            # PA/DA based on QNH and OAT (not assuming ISA)
             pa_ft = elev + (1013.25 - qnh) * 27
             isa_temp = 15 - 2*(pa_ft/1000)
             da_ft = pa_ft + (120*(temp - isa_temp))
 
+            # Interpolation using PA and OAT
             to_gr = bilinear(pa_ft, temp, TAKEOFF, 'GR')
             to_50 = bilinear(pa_ft, temp, TAKEOFF, '50ft')
             ldg_gr = bilinear(pa_ft, temp, LANDING, 'GR')
@@ -411,41 +333,47 @@ with right:
     if slope_warn:
         st.warning("Runway slope > 3% entered — double-check values; performance corrections can be very large.")
 
-    st.markdown("#### Performance summary")
-    for r in perf_rows:
-        r['tod_ok'] = r['to_50'] <= r['toda_av']
-        r['ldg_ok'] = r['ldg_50'] <= r['lda_av']
-        r['tod_margin'] = r['toda_av'] - r['to_50']
-        r['ldg_margin'] = r['lda_av'] - r['ldg_50']
+# =========================
+# FULL-WIDTH Performance summary (moved OUTSIDE the right column)
+# =========================
 
-    def fmt(v): return f"{v:.0f}" if isinstance(v, (int,float)) else str(v)
-    def status_cell(ok, margin):
-        cls = 'ok' if ok else 'bad'
-        sign = '+' if margin >= 0 else '−'
-        return f"<span class='{cls}'>{'OK' if ok else 'NOK'} ({sign}{abs(margin):.0f} m)</span>"
+st.markdown("### Performance summary")
+for r in perf_rows:
+    r['tod_ok'] = r['to_50'] <= r['toda_av']
+    r['ldg_ok'] = r['ldg_50'] <= r['lda_av']
+    r['tod_margin'] = r['toda_av'] - r['to_50']
+    r['ldg_margin'] = r['lda_av'] - r['ldg_50']
 
-    st.markdown(
-        "<table class='mb-table'><tr>"
-        "<th>Leg/Aerodrome</th><th>QFU</th><th>PA/DA ft</th>"
-        "<th>TODR 50ft</th><th>TODA</th><th>Takeoff fit</th>"
-        "<th>LDR 50ft</th><th>LDA</th><th>Landing fit</th>"
-        "<th>Wind (H/C)</th>"
-        "</tr>" +
-        "".join([
-            f"<tr>"
-            f"<td>{r['role']} {r['icao']}</td>"
-            f"<td>{fmt(r['qfu'])}</td>"
-            f"<td>{fmt(r['pa_ft'])}/{fmt(r['da_ft'])}</td>"
-            f"<td>{fmt(r['to_50'])}</td><td>{fmt(r['toda_av'])}</td>"
-            f"<td>{status_cell(r['tod_ok'], r['tod_margin'])}</td>"
-            f"<td>{fmt(r['ldg_50'])}</td><td>{fmt(r['lda_av'])}</td>"
-            f"<td>{status_cell(r['ldg_ok'], r['ldg_margin'])}</td>"
-            f"<td>{('HW' if r['hw_comp']>=0 else 'TW')} {abs(r['hw_comp']):.0f} / {abs(r.get('cw_comp',0)):.0f} kt</td>"
-            f"</tr>"
-            for r in perf_rows
-        ]) + "</table>",
-        unsafe_allow_html=True
-    )
+def fmt(v):
+    return f"{v:.0f}" if isinstance(v, (int,float)) else str(v)
+
+def status_cell(ok, margin):
+    cls = 'ok' if ok else 'bad'
+    sign = '+' if margin >= 0 else '−'
+    return f"<span class='{cls}'>{'OK' if ok else 'NOK'} ({sign}{abs(margin):.0f} m)</span>"
+
+st.markdown(
+    "<table class='mb-table'><tr>"
+    "<th>Leg/Aerodrome</th><th>QFU</th><th>PA/DA ft</th>"
+    "<th>TODR 50ft</th><th>TODA</th><th>Takeoff fit</th>"
+    "<th>LDR 50ft</th><th>LDA</th><th>Landing fit</th>"
+    "<th>Wind (H/C)</th>"
+    "</tr>" +
+    "".join([
+        f"<tr>"
+        f"<td>{r['role']} {r['icao']}</td>"
+        f"<td>{fmt(r['qfu'])}</td>"
+        f"<td>{fmt(r['pa_ft'])}/{fmt(r['da_ft'])}</td>"
+        f"<td>{fmt(r['to_50'])}</td><td>{fmt(r['toda_av'])}</td>"
+        f"<td>{status_cell(r['tod_ok'], r['tod_margin'])}</td>"
+        f"<td>{fmt(r['ldg_50'])}</td><td>{fmt(r['lda_av'])}</td>"
+        f"<td>{status_cell(r['ldg_ok'], r['ldg_margin'])}</td>"
+        f"<td>{('HW' if r['hw_comp']>=0 else 'TW')} {abs(r['hw_comp']):.0f} / {abs(r.get('cw_comp',0)):.0f} kt</td>"
+        f"</tr>"
+        for r in perf_rows
+    ]) + "</table>",
+    unsafe_allow_html=True
+)
 
 # =========================
 # Fuel planning (20 L/h default)
@@ -454,7 +382,9 @@ RATE_LPH = 20.0
 st.markdown("### Fuel planning (assume 20 L/h by default)")
 
 c1, c2, c3, c4 = st.columns([0.25,0.25,0.25,0.25])
-def time_to_liters(h=0, m=0, rate=RATE_LPH): return rate * (h + m/60.0)
+
+def time_to_liters(h=0, m=0, rate=RATE_LPH):
+    return rate * (h + m/60.0)
 
 with c1:
     su_min = st.number_input("Start-up & taxi (min)", min_value=0, value=15, step=1)
@@ -481,197 +411,5 @@ st.markdown(f"- **Required ramp fuel** (1+5+6+7+8): **{req_ramp:.1f} L**  ")
 st.markdown(f"- **Extra**: {extra_l:.1f} L  ")
 st.markdown(f"- **Total ramp fuel**: **{total_ramp:.1f} L**")
 
-# =========================
-# PDF – build values, fill, append calc page
-# =========================
-st.markdown("### PDF – M&B and Performance Data Sheet")
-reg = st.text_input("Aircraft registration", value="CS-XXX")
-mission = st.text_input("Mission #", value="001")
-utc_today = datetime.datetime.now(pytz.UTC)
-date_str = st.text_input("Date (DD/MM/YYYY)", value=utc_today.strftime("%d/%m/%Y"))
-
-ROLE_FIELDS = load_role_fields_from_csv(CSV_MAPPING)
-
-# sensible fallbacks for your organized template (used if CSV missing/partial)
-ROLE_FIELDS.setdefault("Departure", {}).update({
-    "airfield": ROLE_FIELDS.get("Departure", {}).get("airfield", ["Textbox22"]),
-    "qfu":      ROLE_FIELDS.get("Departure", {}).get("qfu", ["Textbox23"]),
-    "elev":     ROLE_FIELDS.get("Departure", {}).get("elev", ["Textbox53"]),
-    "qnh":      ROLE_FIELDS.get("Departure", {}).get("qnh", ["Textbox52"]),
-    "temp":     ROLE_FIELDS.get("Departure", {}).get("temp", ["Textbox51"]),
-    "wind":     ROLE_FIELDS.get("Departure", {}).get("wind", ["Textbox58"]),
-    "pa":       ROLE_FIELDS.get("Departure", {}).get("pa", ["Textbox50"]),
-    "da":       ROLE_FIELDS.get("Departure", {}).get("da", ["Textbox49"]),
-    "toda_lda": ROLE_FIELDS.get("Departure", {}).get("toda_lda", ["Textbox47"]),
-    "todr":     ROLE_FIELDS.get("Departure", {}).get("todr", ["Textbox45"]),
-    "ldr":      ROLE_FIELDS.get("Departure", {}).get("ldr", ["Textbox41"]),
-    "roc":      ROLE_FIELDS.get("Departure", {}).get("roc", ["Textbox39"]),
-})
-ROLE_FIELDS.setdefault("Arrival", {}).update({
-    "airfield": ROLE_FIELDS.get("Arrival", {}).get("airfield", ["Textbox32"]),
-    "qfu":      ROLE_FIELDS.get("Arrival", {}).get("qfu", ["Text2"]),
-    "elev":     ROLE_FIELDS.get("Arrival", {}).get("elev", ["Textbox33"]),
-    "qnh":      ROLE_FIELDS.get("Arrival", {}).get("qnh", ["Textbox36"]),
-    "temp":     ROLE_FIELDS.get("Arrival", {}).get("temp", ["Textbox34"]),
-    "wind":     ROLE_FIELDS.get("Arrival", {}).get("wind", ["Textbox35"]),
-    "pa":       ROLE_FIELDS.get("Arrival", {}).get("pa", []),
-    "da":       ROLE_FIELDS.get("Arrival", {}).get("da", []),
-    "toda_lda": ROLE_FIELDS.get("Arrival", {}).get("toda_lda", ["Textbox43"]),
-    "todr":     ROLE_FIELDS.get("Arrival", {}).get("todr", []),
-    "ldr":      ROLE_FIELDS.get("Arrival", {}).get("ldr", []),
-    "roc":      ROLE_FIELDS.get("Arrival", {}).get("roc", []),
-})
-ROLE_FIELDS.setdefault("Fuel", {}).update({
-    "f_su_time": ROLE_FIELDS.get("Fuel", {}).get("f_su_time", ["Textbox59"]),
-    "f_su_fuel": ROLE_FIELDS.get("Fuel", {}).get("f_su_fuel", ["Textbox60"]),
-    "f_enr_time":ROLE_FIELDS.get("Fuel", {}).get("f_enr_time", ["Textbox63"]),
-    "f_enr_fuel":ROLE_FIELDS.get("Fuel", {}).get("f_enr_fuel", ["Textbox61"]),
-    "f_res_time":ROLE_FIELDS.get("Fuel", {}).get("f_res_time", ["Textbox64"]),
-    "f_res_fuel":ROLE_FIELDS.get("Fuel", {}).get("f_res_fuel", ["Textbox65"]),
-    "f_alt_time":ROLE_FIELDS.get("Fuel", {}).get("f_alt_time", ["Textbox67"]),
-    "f_alt_fuel":ROLE_FIELDS.get("Fuel", {}).get("f_alt_fuel", ["Textbox68"]),
-    "f_total":   ROLE_FIELDS.get("Fuel", {}).get("f_total", ["Textbox66"]),
-    "f_trip_fuel":ROLE_FIELDS.get("Fuel", {}).get("f_trip_fuel", ["Textbox62"]),
-    "f_cont_fuel":ROLE_FIELDS.get("Fuel", {}).get("f_cont_fuel", ["Textbox70"]),
-    "f_req_ramp":ROLE_FIELDS.get("Fuel", {}).get("f_req_ramp", ["Textbox69"]),
-})
-
-def build_field_values_for_pdf(ROLE_FIELDS: dict, reg: str, date_str: str,
-                               perf_rows: list[dict], total_weight: float,
-                               cg: float, AC: dict,
-                               fuel_strings: dict, remaining_fuel_l: float, limit_label: str) -> dict:
-    fv = {}
-    def put(names: List[str], value: str):
-        for n in names:
-            fv[n] = value
-
-    # base / header
-    put(["Textbox19","REG","Registration"], reg)
-    put(["Textbox18","DATE","Date"], date_str)
-    put(["Textbox14","TOTAL_WEIGHT"], f"{total_weight:.1f}")
-    put(["Textbox16","CG_VALUE"], f"{cg:.3f}")
-    put(["Textbox17","MTOW"], f"{AC['max_takeoff_weight']:.0f}")
-    put(["EXTRA_FUEL","Textbox70"], f"{remaining_fuel_l:.1f} L")
-    put(["EXTRA_REASON"], f"limited by {limit_label}")
-
-    # role blocks
-    role_to_row = {r['role']: r for r in perf_rows}
-    for role in ["Departure","Arrival","Alternate"]:
-        rr = role_to_row.get(role)
-        if not rr:
-            continue
-        def P(key, val):
-            names = csv_names(ROLE_FIELDS, role, key)
-            if names:
-                put(names, val)
-
-        P("airfield", rr['icao'])
-        P("qfu",      f"{rr['qfu']:.0f}°")
-        P("elev",     f"{rr['elev_ft']:.0f}")
-        P("qnh",      f"{rr['qnh']:.1f}")
-        P("temp",     f"{rr['temp']:.1f}")
-        P("wind",     f"{'HW' if rr['hw_comp']>=0 else 'TW'} {abs(rr['hw_comp']):.0f} kt")
-        P("pa",       f"{rr['pa_ft']:.0f}")
-        P("da",       f"{rr['da_ft']:.0f}")
-        P("toda_lda", f"{int(rr['toda_av'])}/{int(rr['lda_av'])}")
-        P("todr",     f"{rr['to_50']:.0f}")
-        P("ldr",      f"{rr['ldg_50']:.0f}")
-        try:
-            roc_val = roc_interp(rr['pa_ft'], rr['temp'], total_weight)
-            P("roc", f"{roc_val:.0f}")
-        except Exception:
-            pass
-
-    # fuel cells
-    def PF(key, val):
-        names = csv_names(ROLE_FIELDS, "Fuel", key)
-        if names: put(names, val)
-
-    for k, v in fuel_strings.items():
-        PF(k, v)
-
-    return fv
-
-# Fuel strings for template
-fuel_strings = {
-    "f_su_time":   f"{su_min}min",
-    "f_su_fuel":   f"{(RATE_LPH*(su_min/60.0)):.0f}L",
-    "f_enr_time":  f"{enrt_h}h{enrt_min}min",
-    "f_enr_fuel":  f"{(RATE_LPH*(enrt_h+enrt_min/60.0)):.0f}L",
-    "f_res_time":  f"{reserve_min}min",
-    "f_res_fuel":  f"{(RATE_LPH*(reserve_min/60.0)):.0f}L",
-    "f_alt_time":  f"{alt_min}min",
-    "f_alt_fuel":  f"{(RATE_LPH*(alt_min/60.0)):.0f}L",
-    "f_total":     f"{total_ramp:.0f}L",
-    "f_trip_fuel": f"{trip_l:.0f}L",
-    "f_cont_fuel": f"{cont_l:.0f}L",
-    "f_req_ramp":  f"{req_ramp:.0f}L",
-}
-
-if st.button("Generate filled PDF"):
-    if not PDF_TEMPLATE.exists():
-        st.error(f"Template not found: {PDF_TEMPLATE}")
-        st.stop()
-
-    # calculations page
-    calc_pdf_path = APP_DIR / f"_calc_mission_{mission}.pdf"
-    calc = FPDF()
-    calc.set_auto_page_break(auto=True, margin=12)
-    calc.set_margins(12, 12, 12)
-    calc.add_page()
-    W = calc.w - calc.l_margin - calc.r_margin
-
-    calc.set_font("Arial", "B", 14)
-    calc.cell(0, 8, printable("Tecnam P2008 - Calculations (summary)"), ln=True)
-
-    calc.set_font("Arial", "B", 12)
-    calc.cell(0, 7, printable("Weight & balance"), ln=True)
-    calc.set_font("Arial", size=10)
-    calc.multi_cell(W, 5, printable(
-        f"Empty weight {ew:.0f} kg (moment {ew_moment:.0f} kg*m). "
-        f"Student/Instructor {student:.0f}/{instructor:.0f} kg; baggage {baggage:.0f} kg. "
-        f"Fuel {fuel_l:.0f} L (~ {fuel_wt:.0f} kg). Total weight {total_weight:.0f} kg, moment {total_moment:.0f} kg*m; CG {cg:.3f} m. "
-        f"Extra fuel possible: {remaining_fuel_l:.1f} L (limited by {limit_label})."
-    ))
-
-    calc.ln(2)
-    calc.set_font("Arial", "B", 12)
-    calc.cell(0, 7, printable("Performance - method & results"), ln=True)
-    calc.set_font("Arial", size=10)
-    for r in perf_rows:
-        calc.set_font("Arial", "B", 10)
-        calc.multi_cell(W, 6, printable(f"{r['role']} - {r['icao']} (QFU {r['qfu']:.0f} deg)"))
-        calc.set_font("Arial", size=10)
-        calc.multi_cell(W, 5, printable(f"Atmospherics: elevation {r['elev_ft']:.0f} ft, QNH {r['qnh']:.1f} -> PA ~ {r['pa_ft']:.0f} ft."))
-        calc.multi_cell(W, 5, printable(f"ISA at PA ~ {r['isa_temp']:.1f} C; with OAT {r['temp']:.1f} C -> DA ~ {r['da_ft']:.0f} ft."))
-        calc.multi_cell(W, 5, printable("Method: bilinear interpolation on AFM tables using PA and OAT."))
-        calc.multi_cell(W, 5, printable(
-            f"Corrections applied: head/tail {'headwind' if r['hw_comp']>=0 else 'tailwind'} {abs(r['hw_comp']):.0f} kt, crosswind {abs(r['cw_comp']):.0f} kt, surface {'paved' if r['paved'] else 'grass'}, slope {r['slope_pc']:.1f}%."
-        ))
-        calc.multi_cell(W, 5, printable(f"Take-off: ground roll ~ {r['to_gr']:.0f} m; over 50 ft ~ {r['to_50']:.0f} m."))
-        calc.multi_cell(W, 5, printable(f"Landing: ground roll ~ {r['ldg_gr']:.0f} m; over 50 ft ~ {r['ldg_50']:.0f} m."))
-        calc.multi_cell(W, 5, printable(f"Declared distances: TODA {r['toda_av']:.0f} m; LDA {r['lda_av']:.0f} m."))
-        calc.ln(1)
-
-    calc.ln(2)
-    calc.set_font("Arial", "B", 12)
-    calc.cell(0, 7, printable("Fuel planning (20 L/h)"), ln=True)
-    calc.set_font("Arial", size=10)
-    calc.multi_cell(W, 5, printable(
-        f"Trip {trip_l:.1f} L; contingency 5% {cont_l:.1f} L; required ramp {req_ramp:.1f} L; extra {extra_l:.1f} L; total ramp {total_ramp:.1f} L."
-    ))
-    calc.output(str(calc_pdf_path))
-
-    # field values for the template
-    field_values = build_field_values_for_pdf(
-        ROLE_FIELDS, reg, date_str, perf_rows, total_weight, cg, AC, fuel_strings, remaining_fuel_l, limit_label
-    )
-
-    out_main_path = APP_DIR / f"MB_Performance_Mission_{mission}.pdf"
-    pypdf_write_fields(PDF_TEMPLATE, out_main_path, field_values, extra_pages=[calc_pdf_path])
-
-    st.success("PDF generated successfully!")
-    with open(out_main_path, 'rb') as f:
-        st.download_button("Download PDF", f, file_name=out_main_path.name, mime="application/pdf")
 
 
