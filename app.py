@@ -240,7 +240,7 @@ def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
 
 # ---------- GPT wrapper (texto) ----------
 def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str:
-    """Usa Chat Completions (estável) e limpa texto. Evita a Responses API para reduzir erros."""
+    """Usa Chat Completions e limpa texto."""
     try:
         model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
     except Exception:
@@ -349,13 +349,18 @@ class DetailedPDF(FPDF):
     def header(self): pass
     def footer(self): pass
 
-    def metar_taf_block(self, analyses: List[Tuple[str,str]]):
+    # agora recebe (ICAO, METAR_RAW, ANALISE)
+    def metar_taf_block(self, analyses: List[Tuple[str, str, str]]):
         self.add_page(orientation="P")
-        draw_header(self,"METAR / TAF — Interpretacao (PT)")
+        draw_header(self, "METAR / TAF — Interpretacao (PT)")
         self.set_font("Helvetica","",12); self.ln(2)
-        for icao, text in analyses:
+        for icao, metar_raw, analysis in analyses:
             self.set_font("Helvetica","B",13); self.cell(0,8,ascii_safe(icao), ln=True)
-            self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(text)); self.ln(2)
+            if metar_raw:
+                self.set_font("Helvetica","B",12); self.cell(0,7,"METAR (RAW):", ln=True)
+                self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(metar_raw)); self.ln(2)
+            self.set_font("Helvetica","B",12); self.cell(0,7,"Interpretacao:", ln=True)
+            self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis or "Sem interpretacao.")); self.ln(3)
 
     def sigmet_block(self, sigmet_text: str, analysis_pt: str):
         if not sigmet_text.strip(): return
@@ -533,7 +538,7 @@ with col_gamet[0]:
 # ---------- Charts upload ----------
 st.markdown("#### Charts")
 st.caption("Upload SIGWX / SPC / Wind & Temp. Accepts PDF/PNG/JPG/JPEG/GIF.")
-use_ai_for_charts = st.toggle("Analisar charts com IA", value=False, help="Desmarcado = mais rapido")
+use_ai_for_charts = st.toggle("Analisar charts com IA", value=True, help="Marcado por omissao")
 uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg","gif"],
                            accept_multiple_files=True, label_visibility="collapsed")
 
@@ -569,13 +574,13 @@ with col_pdfs[0]:
     gen_det = st.button("Generate Detailed (PT)")
 
 if 'gen_det' in locals() and gen_det:
-    # METAR/TAF (texto corrido)
-    metar_analyses: List[Tuple[str,str]] = []
+    # METAR/TAF (texto corrido) + METAR RAW
+    metar_analyses: List[Tuple[str, str, str]] = []
     for icao in icaos_metar:
         metar = fetch_metar_now(icao) or ""
         taf   = fetch_taf_now(icao) or ""
-        txt = analyze_metar_taf_pt(icao, metar, taf) if (metar or taf) else "Sem METAR/TAF disponiveis neste momento."
-        metar_analyses.append((icao, txt))
+        analysis = analyze_metar_taf_pt(icao, metar, taf) if (metar or taf) else "Sem METAR/TAF disponiveis neste momento."
+        metar_analyses.append((icao, metar, analysis))
 
     # SIGMET
     sigmets = fetch_sigmet_lppc_auto()
@@ -594,7 +599,7 @@ if 'gen_det' in locals() and gen_det:
     if gamet_for_pdf:
         det_pdf.gamet_block(gamet_for_pdf, gamet_analysis)
 
-    # Charts com analise IA opcional
+    # Charts com analise IA (por omissão ON)
     for ch in charts:
         title, subtitle, img_png, kind = ch["title"], ch["subtitle"], ch["img_png"], ch["kind"]
         analysis_txt = ""
@@ -653,6 +658,7 @@ st.markdown(f"**Weather:** {APP_WEATHER_URL}")
 st.markdown(f"**NOTAMs:** {APP_NOTAMS_URL}")
 st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
 st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
+
 
 
 
