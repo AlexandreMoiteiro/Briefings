@@ -1,5 +1,3 @@
-# app.py — Briefings com editor de NOTAMs e GAMET (ambos via Gist) + METAR/TAF/SIGMET + PDFs
-
 from typing import Dict, Any, List, Tuple
 import io, os, re, base64, tempfile, unicodedata, json, datetime as dt
 import streamlit as st
@@ -34,6 +32,7 @@ hr{border:none;border-top:1px solid var(--line);margin:12px 0}
 # ---------- OpenAI client ----------
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
+# ---------- Utils ----------
 def ascii_safe(text: str) -> str:
     if text is None: return ""
     t = unicodedata.normalize("NFKD", str(text)).encode("ascii","ignore").decode("ascii")
@@ -72,7 +71,7 @@ def b64_png(img_bytes: io.BytesIO) -> str:
 
 # ---------- METAR/TAF (CheckWX) ----------
 def cw_headers() -> Dict[str,str]:
-    key = st.secrets.get("CHECKWX_API_KEY","").strip()
+    key = st.secrets.get("CHECKWX_API_KEY","\n").strip()
     return {"X-API-Key": key} if key else {}
 
 def fetch_metar_now(icao: str) -> str:
@@ -86,7 +85,8 @@ def fetch_metar_now(icao: str) -> str:
         if isinstance(data[0], dict):
             return data[0].get("raw") or data[0].get("raw_text","") or ""
         return str(data[0])
-    except Exception: return ""
+    except Exception:
+        return ""
 
 def fetch_taf_now(icao: str) -> str:
     """TAF via CheckWX (RAW)."""
@@ -99,7 +99,8 @@ def fetch_taf_now(icao: str) -> str:
         if isinstance(data[0], dict):
             return data[0].get("raw") or data[0].get("raw_text","") or ""
         return str(data[0])
-    except Exception: return ""
+    except Exception:
+        return ""
 
 # ---------- SIGMET LPPC (AWC) ----------
 def fetch_sigmet_lppc_auto() -> List[str]:
@@ -118,24 +119,21 @@ def fetch_sigmet_lppc_auto() -> List[str]:
             if fir == "LPPC" or " LPPC " in f" {raw} " or "FIR LPPC" in raw or " LPPC FIR" in raw:
                 out.append(raw)
         return out
-    except Exception: return []
+    except Exception:
+        return []
 
-# ---------- GAMET (Gist) ----------
-def _get_gamet_secrets():
-    token = (st.secrets.get("GAMET_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-    gid   = (st.secrets.get("GAMET_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
-    fn    = (st.secrets.get("GAMET_GIST_FILENAME") or st.secrets.get("GIST_FILENAME") or "").strip()
+# ---------- Gist helpers (GAMET + NOTAM) ----------
+def _get_gist(secrets_prefix: str, fallback_prefix: str = "GIST"):
+    token = (st.secrets.get(f"{secrets_prefix}_GIST_TOKEN") or st.secrets.get(f"{fallback_prefix}_TOKEN") or "").strip()
+    gid   = (st.secrets.get(f"{secrets_prefix}_GIST_ID")    or st.secrets.get(f"{fallback_prefix}_ID")    or "").strip()
+    fn    = (st.secrets.get(f"{secrets_prefix}_GIST_FILENAME") or st.secrets.get(f"{fallback_prefix}_FILENAME") or "").strip()
     return token, gid, fn
-
-def gamet_gist_config_ok() -> bool:
-    token, gid, fn = _get_gamet_secrets()
-    return all([token, gid, fn])
 
 @st.cache_data(ttl=90)
 def load_gamet_from_gist() -> Dict[str,Any]:
-    if not gamet_gist_config_ok(): return {"text":"", "updated_utc":None}
+    token, gid, fn = _get_gist("GAMET")
+    if not all([token, gid, fn]): return {"text":"", "updated_utc":None}
     try:
-        token, gid, fn = _get_gamet_secrets()
         r = requests.get(f"https://api.github.com/gists/{gid}",
                          headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
                          timeout=12)
@@ -153,8 +151,7 @@ def load_gamet_from_gist() -> Dict[str,Any]:
         return {"text":"", "updated_utc":None}
 
 def save_gamet_to_gist(text: str) -> tuple[bool, str]:
-    """Guarda o GAMET no Gist no formato {"updated_utc":"...", "text":"..."}."""
-    token, gid, fn = _get_gamet_secrets()
+    token, gid, fn = _get_gist("GAMET")
     if not all([token, gid, fn]):
         return False, "Faltam segredos do GAMET (TOKEN/ID/FILENAME)."
     try:
@@ -174,21 +171,14 @@ def save_gamet_to_gist(text: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Erro a gravar GAMET no Gist: {e}"
 
-# ---------- NOTAMs (Gist) ----------
-def notam_gist_config_ok() -> bool:
-    token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-    gid   = (st.secrets.get("NOTAM_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
-    fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
-    return bool(token and gid and fn)
-
 @st.cache_data(ttl=90)
 def load_notams_from_gist() -> Dict[str, Any]:
-    if not notam_gist_config_ok():
+    token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
+    gid   = (st.secrets.get("NOTAM_GIST_ID") or st.secrets.get("GIST_ID") or "").strip()
+    fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
+    if not (token and gid and fn):
         return {"map": {}, "updated_utc": None}
     try:
-        token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-        gid   = (st.secrets.get("NOTAM_GIST_ID") or st.secrets.get("GIST_ID") or "").strip()
-        fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
         r = requests.get(
             f"https://api.github.com/gists/{gid}",
             headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
@@ -212,8 +202,7 @@ def load_notams_from_gist() -> Dict[str, Any]:
         return {"map": {}, "updated_utc": None}
 
 def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
-    """Escreve no Gist o JSON {"updated_utc": "...", "map": {...}}."""
-    if not notam_gist_config_ok():
+    if not (st.secrets.get("NOTAM_GIST_TOKEN") and st.secrets.get("NOTAM_GIST_ID") and st.secrets.get("NOTAM_GIST_FILENAME")):
         return False, "Segredos NOTAM_GIST_* em falta."
     try:
         token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
@@ -237,8 +226,8 @@ def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Erro a gravar no Gist: {e}"
 
-# ---------- GPT wrapper (texto) ----------
-def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1200) -> str:
+# ---------- GPT wrappers ----------
+def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1400) -> str:
     last_err = ""
     try:
         r = client.responses.create(
@@ -263,7 +252,7 @@ def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 1200) -> st
                 {"role":"system","content":prompt_system},
                 {"role":"user","content":prompt_user},
             ],
-            max_completion_tokens=max_tokens  # <- correto no fallback
+            max_completion_tokens=max_tokens
         )
         content = r2.choices[0].message.content
         if content and content.strip():
@@ -292,7 +281,8 @@ def analyze_chart_pt(kind: str, img_b64: str) -> str:
             ],
             max_output_tokens=1600
         )
-        return ascii_safe((r.output_text or "").strip())
+        out = getattr(r, "output_text", "") or ""
+        return ascii_safe(out.strip()) or "Sem observacoes especificas para este chart."
     except Exception as e:
         return ascii_safe(f"Nao foi possivel analisar o chart (erro: {e}).")
 
@@ -329,33 +319,21 @@ def place_image_full(pdf: FPDF, png_bytes: io.BytesIO, max_h_pad: int=58):
         img.save(tmp, format="PNG"); path = tmp.name
     pdf.image(path, x=x, y=y, w=w, h=h); os.remove(path); pdf.ln(h+10)
 
-def pdf_embed_first_page(pdf: FPDF, pdf_bytes: bytes, title: str):
+def pdf_embed_pages(pdf: FPDF, pdf_bytes: bytes, title: str, max_pages: int = 2, orientation: str = "P"):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = doc.load_page(0)
-    png = page.get_pixmap(dpi=300).tobytes("png")
-    img = Image.open(io.BytesIO(png)).convert("RGB")
-    bio = io.BytesIO(); img.save(bio, format="PNG"); bio.seek(0)
-    pdf.add_page(orientation="L"); draw_header(pdf, ascii_safe(title))
-    place_image_full(pdf, bio)
+    for i in range(min(max_pages, doc.page_count)):
+        page = doc.load_page(i)
+        png = page.get_pixmap(dpi=300).tobytes("png")
+        img = Image.open(io.BytesIO(png)).convert("RGB")
+        bio = io.BytesIO(); img.save(bio, format="PNG"); bio.seek(0)
+        pdf.add_page(orientation=orientation)
+        draw_header(pdf, ascii_safe(f"{title} — Pagina {i+1}" if doc.page_count>1 else title))
+        place_image_full(pdf, bio, max_h_pad=58)
 
 class DetailedPDF(FPDF):
+    # Sem cover page (requisito)
     def header(self): pass
     def footer(self): pass
-    def cover(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc):
-        self.add_page(orientation="L"); self.set_xy(0,36)
-        self.set_font("Helvetica","B",28); self.cell(0,14,"Briefing Detalhado (PT)", ln=True, align="C")
-        self.ln(2); self.set_font("Helvetica","",13)
-        self.cell(0,8,ascii_safe(f"Missao: {mission_no}"), ln=True, align="C")
-        if pilot or aircraft or callsign or reg:
-            self.cell(0,8,ascii_safe(f"Piloto: {pilot}   Aeronave: {aircraft}   Callsign: {callsign}   Matricula: {reg}"), ln=True, align="C")
-        if date_str or time_utc:
-            self.cell(0,8,ascii_safe(f"Data: {date_str}   UTC: {time_utc}"), ln=True, align="C")
-        # texto explicativo + links
-        self.ln(6); self.set_font("Helvetica","I",12)
-        self.set_text_color(*PASTEL)
-        self.cell(0,7,ascii_safe("METAR/TAF/GAMET (Weather): ")+APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
-        self.cell(0,7,ascii_safe("NOTAMs (pagina dedicada): ")+APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
-        self.set_text_color(0,0,0)
 
     def metar_taf_block(self, analyses: List[Tuple[str,str]]):
         self.add_page(orientation="P"); draw_header(self,"METAR / TAF — Interpretacao (PT)")
@@ -380,42 +358,20 @@ class DetailedPDF(FPDF):
         self.set_font("Helvetica","B",12); self.cell(0,8,"Interpretacao:", ln=True)
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
 
-    def notams_block(self, parsed: List[Tuple[str,str,List[str]]]):
-        # Secção textual
-        self.add_page(orientation="P"); draw_header(self,"NOTAMs — Texto")
-        for icao, analysis, _ in parsed:
-            self.set_font("Helvetica","B",12); self.cell(0,8,ascii_safe(icao), ln=True)
-            self.set_font("Helvetica","",12)
-            self.multi_cell(0,7,ascii_safe(analysis if analysis else "Sem NOTAMs.")); 
-            self.ln(2)
-        # Apêndice RAW
-        self.add_page(orientation="P"); draw_header(self,"NOTAMs — RAW (Apendice)")
-        self.set_font("Helvetica","",12); self.ln(2)
-        for icao, _, arr in parsed:
-            self.set_font("Helvetica","B",12); self.cell(0,8,ascii_safe(icao), ln=True)
-            self.set_font("Helvetica","",12)
-            if arr:
-                for n in arr:
-                    self.multi_cell(0,7,ascii_safe(n)); self.ln(1)
-            else:
-                self.multi_cell(0,7,ascii_safe("Sem entradas."))
-            self.ln(2)
-
-    def chart_block(self, title, subtitle, img_png, analysis_pt):
-        self.add_page(orientation="L"); draw_header(self,ascii_safe(title))
-        if subtitle: self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
-        max_w = self.w - 22; max_h = (self.h // 2) - 18
-        img = Image.open(img_png); iw, ih = img.size
-        r = min(max_w/iw, max_h/ih); w, h = int(iw*r), int(ih*r)
-        x = (self.w - w)//2; y = self.get_y() + 6
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            img.save(tmp, format="PNG"); path = tmp.name
-        self.image(path, x=x, y=y, w=w, h=h); os.remove(path); self.ln(h+12)
-        self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
+    def chart_block(self, title: str, subtitle: str, img_png: io.BytesIO, analysis_pt: str):
+        self.add_page(orientation="P"); draw_header(self, ascii_safe(title))
+        if subtitle:
+            self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
+        self.set_font("Helvetica","",12)
+        # Imagem
+        place_image_full(self, img_png, max_h_pad=100)
+        # Analise
+        self.multi_cell(0,7,ascii_safe(analysis_pt))
 
 class FinalBriefPDF(FPDF):
     def header(self): pass
     def footer(self): pass
+
     def cover(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc):
         self.add_page(orientation="L"); self.set_xy(0,36)
         self.set_font("Helvetica","B",28); self.cell(0,14,"Briefing", ln=True, align="C")
@@ -431,14 +387,16 @@ class FinalBriefPDF(FPDF):
         self.cell(0,7,ascii_safe("NOTAMs page: ")+APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
         self.set_text_color(0,0,0)
 
-    def flightplan_image(self, title, img_png):
-        self.add_page(orientation="L"); draw_header(self, ascii_safe(title))
+    def flightplan_image(self, title: str, img_png: io.BytesIO):
+        # ORIENTACAO VERTICAL (requisito)
+        self.add_page(orientation="P"); draw_header(self, ascii_safe(title))
         place_image_full(self, img_png)
 
     def charts_only(self, charts: List[Tuple[str,str,io.BytesIO]]):
         for (title, subtitle, img_png) in charts:
             self.add_page(orientation="L"); draw_header(self, ascii_safe(title))
-            if subtitle: self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
+            if subtitle:
+                self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
             place_image_full(self, img_png)
 
 # ---------- UI: header & links ----------
@@ -526,59 +484,6 @@ with col_save_n[1]:
 st.divider()
 
 # ---------- Editor de GAMET ----------
-# ===================== GAMET (editar e guardar no Gist) =====================
-import requests, json, datetime as dt
-
-def _gamet_secrets():
-    token = (st.secrets.get("GAMET_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-    gid   = (st.secrets.get("GAMET_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
-    fn    = (st.secrets.get("GAMET_GIST_FILENAME") or st.secrets.get("GIST_FILENAME") or "").strip()
-    return token, gid, fn
-
-def load_gamet_from_gist() -> dict:
-    token, gid, fn = _gamet_secrets()
-    if not (token and gid and fn):
-        return {"text":"", "updated_utc":None}
-    try:
-        r = requests.get(
-            f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
-            timeout=10,
-        )
-        r.raise_for_status()
-        files = r.json().get("files", {})
-        obj = files.get(fn) or {}
-        content = (obj.get("content") or "").strip()
-        if not content:
-            return {"text":"", "updated_utc":None}
-        try:
-            return json.loads(content)
-        except Exception:
-            return {"text": content, "updated_utc": None}
-    except Exception:
-        return {"text":"", "updated_utc":None}
-
-def save_gamet_to_gist(text: str) -> tuple[bool, str]:
-    token, gid, fn = _gamet_secrets()
-    if not (token and gid and fn):
-        return False, "Faltam segredos do GAMET (TOKEN/ID/FILENAME) em st.secrets."
-    try:
-        payload = {
-            "updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
-            "text": (text or "").strip()
-        }
-        body = {"files": {fn: {"content": json.dumps(payload, ensure_ascii=False, indent=2)}}}
-        r = requests.patch(
-            f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
-            json=body, timeout=12
-        )
-        if r.status_code >= 400:
-            return False, f"GitHub respondeu {r.status_code}: {r.text}"
-        return True, "GAMET guardado no Gist."
-    except Exception as e:
-        return False, f"Erro a gravar GAMET no Gist: {e}"
-
 st.markdown("### GAMET (editar e guardar)")
 _gamet_obj = load_gamet_from_gist()
 _gamet_initial = (_gamet_obj.get("text") or "").strip()
@@ -601,8 +506,6 @@ with col_gamet[0]:
             except Exception: pass
         else:
             st.error(msg)
-# =================== FIM: GAMET (editar e guardar no Gist) ===================
-
 
 # ---------- Charts upload ----------
 st.markdown("#### Charts")
@@ -621,10 +524,13 @@ if uploads:
             elif "wind" in name or "temp" in name: guess = 2
             kind = st.selectbox(f"Chart type #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"], index=guess, key=f"kind_{idx}")
         with c2r:
-            title = st.text_input("Title", value=("Significant Weather Chart (SIGWX)" if kind=="SIGWX" else
-                                                  "Surface Pressure Chart (SPC)" if kind=="SPC" else
-                                                  "Wind and Temperature Chart" if kind=="Wind & Temp" else
-                                                  "Weather Chart"), key=f"title_{idx}")
+            default_title = (
+                "Significant Weather Chart (SIGWX)" if kind=="SIGWX" else
+                "Surface Pressure Chart (SPC)" if kind=="SPC" else
+                "Wind and Temperature Chart" if kind=="Wind & Temp" else
+                "Weather Chart"
+            )
+            title = st.text_input("Title", value=default_title, key=f"title_{idx}")
         with c3r:
             subtitle = st.text_input("Subtitle (optional)", value="", key=f"subtitle_{idx}")
         charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png})
@@ -633,8 +539,7 @@ if uploads:
 def analyze_notams_text_only(icao: str, notams_raw: List[str]) -> str:
     return "\n\n".join(notams_raw).strip() or "Sem NOTAMs."
 
-gen_det = st.button("Generate Detailed (PT)")
-if gen_det:
+if st.button("Generate Detailed (PT)"):
     # METAR/TAF (texto corrido)
     metar_analyses: List[Tuple[str,str]] = []
     for icao in icaos_metar:
@@ -652,29 +557,21 @@ if gen_det:
     gamet_for_pdf = (gamet_text or _gamet_initial or "").strip()
     gamet_analysis = analyze_gamet_pt(gamet_for_pdf) if gamet_for_pdf else ""
 
-    # NOTAMs para PDF: usar editores locais (se preenchidos) por cima do Gist
-    current_map = {**(existing_map or {})}
-    for icao in icaos_notam:
-        edited = parse_block_to_list(editors_notam.get(icao,""))
-        if edited: current_map[icao] = edited
-    notam_parsed: List[Tuple[str,str,List[str]]] = []
-    for icao in icaos_notam:
-        arr = list((current_map or {}).get(icao, []))
-        analysis = analyze_notams_text_only(icao, arr)
-        notam_parsed.append((icao, analysis, arr))
-
-    # Build PDF
+    # Build PDF DETALHADO (SEM cover e SEM NOTAMs — requisito)
     det_pdf = DetailedPDF()
-    det_pdf.cover(mission_no, pilot, aircraft_type, callsign, registration, str(flight_date), time_utc)
     det_pdf.metar_taf_block(metar_analyses)
     if sigmet_text:
         det_pdf.sigmet_block(sigmet_text, sigmet_analysis)
     if gamet_for_pdf:
         det_pdf.gamet_block(gamet_for_pdf, gamet_analysis)
-    det_pdf.notams_block(notam_parsed)
 
+    # Charts com analise por IA (agora gerada corretamente)
     for ch in charts:
-        analysis_txt = "—"
+        try:
+            img_b64 = b64_png(ch["img_png"])  # usar base64 real
+            analysis_txt = analyze_chart_pt(ch["kind"], img_b64)
+        except Exception:
+            analysis_txt = "Sem analise automatica disponivel para este chart."
         det_pdf.chart_block(ch["title"], ch["subtitle"], ch["img_png"], analysis_txt)
 
     det_name = f"Briefing Detalhado - Missao {mission_no or 'X'}.pdf"
@@ -689,54 +586,34 @@ st.markdown("#### Flight Plan (optional image/PDF/GIF)")
 fp_upload = st.file_uploader("Upload your flight plan (PDF/PNG/JPG/JPEG/GIF)", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=False)
 fp_img_png: io.BytesIO | None = None
 if fp_upload:
-    fp_img_png = ensure_png_bytes(fp_upload)
-    st.success("Flight plan will be included in the final briefing.")
+    # Forcar orientacao vertical na insercao depois
+    if fp_upload.type == "application/pdf":
+        # Converter apenas a primeira pagina para imagem (mantemos vertical na pagina do PDF de saida)
+        img = load_first_pdf_page(fp_upload.read(), dpi=300)
+        fp_img_png = to_png_bytes(img)
+    else:
+        fp_img_png = ensure_png_bytes(fp_upload)
+    st.success("Flight plan will be included in the final briefing (vertical).")
 
 st.markdown("#### M&B / Performance PDF (from external app)")
-mb_upload = st.file_uploader("Upload M&B/Performance PDF to embed", type=["pdf"], accept_multiple_files=False)
+mb_upload = st.file_uploader("Upload M&B/Performance PDF to embed (suporta 2 paginas)", type=["pdf"], accept_multiple_files=False)
 
 # ---------- Generate Final Briefing (EN) ----------
-class FinalBriefPDF(FPDF):
-    def header(self): pass
-    def footer(self): pass
-    def cover(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc):
-        self.add_page(orientation="L"); self.set_xy(0,36)
-        self.set_font("Helvetica","B",28); self.cell(0,14,"Briefing", ln=True, align="C")
-        self.ln(2); self.set_font("Helvetica","",13)
-        self.cell(0,8,ascii_safe(f"Mission: {mission_no}"), ln=True, align="C")
-        if pilot or aircraft or callsign or reg:
-            self.cell(0,8,ascii_safe(f"Pilot: {pilot}   Aircraft: {aircraft}   Callsign: {callsign}   Reg: {reg}"), ln=True, align="C")
-        if date_str or time_utc:
-            self.cell(0,8,ascii_safe(f"Date: {date_str}   UTC: {time_utc}"), ln=True, align="C")
-        self.ln(6); self.set_font("Helvetica","I",12)
-        self.set_text_color(*PASTEL)
-        self.cell(0,7,ascii_safe("Weather page: ")+APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
-        self.cell(0,7,ascii_safe("NOTAMs page: ")+APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
-        self.set_text_color(0,0,0)
-
-    def flightplan_image(self, title, img_png):
-        self.add_page(orientation="L"); draw_header(self, ascii_safe(title))
-        place_image_full(self, img_png)
-
-    def charts_only(self, charts: List[Tuple[str,str,io.BytesIO]]):
-        for (title, subtitle, img_png) in charts:
-            self.add_page(orientation="L"); draw_header(self, ascii_safe(title))
-            if subtitle: self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
-            place_image_full(self, img_png)
-
-gen_final = st.button("Generate Final Briefing (EN)")
-if gen_final:
+if st.button("Generate Final Briefing (EN)"):
     fb = FinalBriefPDF()
     fb.cover(mission_no, pilot, aircraft_type, callsign, registration, str(flight_date), time_utc)
 
+    # M&B: aceitar ate 2 paginas e colocar VERTICAL (requisito)
     if mb_upload is not None:
         mb_bytes = mb_upload.read()
-        pdf_embed_first_page(fb, mb_bytes, "Mass & Balance / Performance")
+        pdf_embed_pages(fb, mb_bytes, "Mass & Balance / Performance", max_pages=2, orientation="P")
 
+    # Flight plan: forcar pagina VERTICAL (requisito)
     if fp_img_png is not None:
         fb.flightplan_image("Flight Plan", fp_img_png)
 
-    if 'charts' in locals():
+    # Charts (mantem-se em landscape para ocupar melhor)
+    if charts:
         fb.charts_only([(c["title"], c["subtitle"], c["img_png"]) for c in charts])
 
     final_name = f"Briefing - Missao {mission_no or 'X'}.pdf"
