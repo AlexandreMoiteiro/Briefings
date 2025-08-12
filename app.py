@@ -35,7 +35,6 @@ hr{border:none;border-top:1px solid var(--line);margin:12px 0}
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
 # ---------- Utils ----------
-
 def ascii_safe(text: str) -> str:
     if text is None: return ""
     t = unicodedata.normalize("NFKD", str(text)).encode("ascii","ignore").decode("ascii")
@@ -43,13 +42,11 @@ def ascii_safe(text: str) -> str:
              .replace("\u2014","-").replace("\uFEFF",""))
 
 # ---------- ICAO parser ----------
-
 def parse_icaos(s: str) -> List[str]:
     tokens = re.split(r"[,\s]+", (s or "").strip(), flags=re.UNICODE)
     return [t.upper() for t in tokens if t]
 
 # ---------- Image helpers ----------
-
 def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 300):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf"); page = doc.load_page(0)
     png = page.get_pixmap(dpi=dpi).tobytes("png")
@@ -75,7 +72,6 @@ def b64_png(img_bytes: io.BytesIO) -> str:
     return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
 
 # ---------- METAR/TAF (CheckWX) ----------
-
 def cw_headers() -> Dict[str,str]:
     key = st.secrets.get("CHECKWX_API_KEY","\n").strip()
     return {"X-API-Key": key} if key else {}
@@ -107,7 +103,6 @@ def fetch_taf_now(icao: str) -> str:
     except Exception: return ""
 
 # ---------- SIGMET LPPC (AWC) ----------
-
 def fetch_sigmet_lppc_auto() -> List[str]:
     try:
         r = requests.get("https://aviationweather.gov/api/data/isigmet",
@@ -127,7 +122,6 @@ def fetch_sigmet_lppc_auto() -> List[str]:
     except Exception: return []
 
 # ---------- Gist helpers: GAMET & NOTAMs ----------
-
 def _get_gamet_secrets():
     token = (st.secrets.get("GAMET_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get("GAMET_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
@@ -160,7 +154,7 @@ def load_gamet_from_gist() -> Dict[str,Any]:
         return {"text":"", "updated_utc":None}
 
 def save_gamet_to_gist(text: str) -> tuple[bool, str]:
-    """Guarda o GAMET no Gist no formato {"updated_utc":"...", "text":"..."}."""
+    """Guarda o GAMET no Gist no formato {"updated_utc":"...", "text":"..."}. """
     token, gid, fn = _get_gamet_secrets()
     if not all([token, gid, fn]):
         return False, "Faltam segredos do GAMET (TOKEN/ID/FILENAME)."
@@ -182,7 +176,6 @@ def save_gamet_to_gist(text: str) -> tuple[bool, str]:
         return False, f"Erro a gravar GAMET no Gist: {e}"
 
 # NOTAMs (apenas editor/Gist; **NÃO** entram no PDF detalhado)
-
 def notam_gist_config_ok() -> bool:
     token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get("NOTAM_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
@@ -246,9 +239,6 @@ def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
         return False, f"Erro a gravar no Gist: {e}"
 
 # ---------- GPT wrapper (texto) ----------
-
-# ---------- GPT wrapper (texto) ----------
-
 def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str:
     """Usa Chat Completions (estável) e limpa texto. Evita a Responses API para reduzir erros."""
     try:
@@ -262,7 +252,7 @@ def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str
                 {"role":"system","content":prompt_system},
                 {"role":"user","content":prompt_user},
             ],
-            max_completion_tokens=max_tokens,
+            max_tokens=max_tokens,
             temperature=0.2
         )
         content = (r2.choices[0].message.content or "").strip()
@@ -271,7 +261,6 @@ def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str
         return ascii_safe(f"Analise indisponivel (erro IA: {e2})")
 
 # ---------- Análises (PT) ----------
-
 def analyze_chart_pt(kind: str, img_b64: str) -> str:
     """Analisa imagem via Chat Completions Vision (image_url:data URI)."""
     try:
@@ -284,7 +273,6 @@ def analyze_chart_pt(kind: str, img_b64: str) -> str:
         "Identifica e nomeia simbolos/anotacoes e conclui com impacto operacional. Usa apenas conteudo visivel."
     )
     user_txt = f"Tipo de chart: {kind}."
-    # evitar chamada se nao houver chave
     if not (st.secrets.get("OPENAI_API_KEY") or "").strip():
         return "Analise de imagem desativada (OPENAI_API_KEY em falta)."
     try:
@@ -297,7 +285,7 @@ def analyze_chart_pt(kind: str, img_b64: str) -> str:
                     {"type":"image_url","image_url":{"url":f"data:image/png;base64,{img_b64}"}}
                 ]},
             ],
-            max_completion_tokens=700,
+            max_tokens=700,
             temperature=0.2
         )
         out = (r.choices[0].message.content or "").strip()
@@ -356,7 +344,6 @@ def pdf_embed_pdf_pages(pdf: FPDF, pdf_bytes: bytes, title: str, orientation: st
         place_image_full(pdf, bio, max_h_pad=58)
 
 # ---------- PDF classes ----------
-
 class DetailedPDF(FPDF):
     # **Sem cover page** neste PDF
     def header(self): pass
@@ -387,8 +374,8 @@ class DetailedPDF(FPDF):
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
 
     def chart_block(self, title: str, subtitle: str, img_png: io.BytesIO, analysis_pt: str):
-        # Mantem o titulo EXACTO passado pela UI
-        self.add_page(orientation="P")  # charts no detalhado: vertical para consistencia
+        # Mantém o título EXACTO passado pela UI
+        self.add_page(orientation="P")  # charts no detalhado: vertical para consistência
         draw_header(self, ascii_safe(title))
         if subtitle:
             self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
@@ -400,7 +387,7 @@ class DetailedPDF(FPDF):
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             img.save(tmp, format="PNG"); path = tmp.name
         self.image(path, x=x, y=y, w=w, h=h); os.remove(path); self.ln(h+12)
-        # analise
+        # análise
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt or " "))
 
 class FinalBriefPDF(FPDF):
@@ -573,11 +560,8 @@ if uploads:
         charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png})
 
 # ---------- Generate Detailed (PT) ----------
-
 def analyze_notams_text_only(icao: str, notams_raw: List[str]) -> str:
-    return "
-
-".join(notams_raw).strip() or "Sem NOTAMs."
+    return "\n\n".join(notams_raw).strip() or "Sem NOTAMs."
 
 st.markdown("### PDFs")
 col_pdfs = st.columns(2)
@@ -595,11 +579,7 @@ if 'gen_det' in locals() and gen_det:
 
     # SIGMET
     sigmets = fetch_sigmet_lppc_auto()
-    sigmet_text = "
-
----
-
-".join(sigmets).strip()
+    sigmet_text = "\n\n---\n\n".join(sigmets).strip()
     sigmet_analysis = analyze_sigmet_pt(sigmet_text) if sigmet_text else ""
 
     # GAMET (usar o texto do editor; se vazio, cair para Gist)
@@ -621,14 +601,9 @@ if 'gen_det' in locals() and gen_det:
         if use_ai_for_charts:
             try:
                 analysis_txt = analyze_chart_pt(kind, b64_png(img_png))
-            except Exception as _:
+            except Exception:
                 analysis_txt = "Analise indisponivel."
         det_pdf.chart_block(title, subtitle, img_png, analysis_txt)
-
-    det_name = f"Briefing Detalhado - Missao {mission_no or 'X'}.pdf"
-    det_pdf.output(det_name)
-    with open(det_name, "rb") as f:
-        st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
 
     det_name = f"Briefing Detalhado - Missao {mission_no or 'X'}.pdf"
     det_pdf.output(det_name)
@@ -665,7 +640,7 @@ if 'gen_final' in locals() and gen_final:
         fb.flightplan_image_portrait("Flight Plan", fp_img_png)
 
     if 'charts' in locals():
-        # charts extras (se quiseres manter em landscape no briefing final)
+        # charts extras (no briefing final ficam em landscape)
         fb.charts_only([(c["title"], c["subtitle"], c["img_png"]) for c in charts])
 
     final_name = f"Briefing - Missao {mission_no or 'X'}.pdf"
@@ -678,7 +653,6 @@ st.markdown(f"**Weather:** {APP_WEATHER_URL}")
 st.markdown(f"**NOTAMs:** {APP_NOTAMS_URL}")
 st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
 st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
-
 
 
 
