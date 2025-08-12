@@ -37,6 +37,7 @@ def printable(s: str) -> str:
         .replace("—", "-")
         .replace("→", "->")
         .replace("’", "'")
+        .replace("·", "*")   # 'kg·m' -> 'kg*m'
     )
 
 st.set_page_config(
@@ -234,7 +235,7 @@ left, _, right = st.columns([0.42,0.02,0.56], gap="large")
 with left:
     st.markdown("### Weight & balance (inputs)")
     ew = st.number_input("Empty weight (kg)", min_value=0.0, value=0.0, step=1.0)
-    ew_moment = st.number_input("Empty weight moment (kg·m)", min_value=0.0, value=0.0, step=0.1)
+    ew_moment = st.number_input("Empty weight moment (kg*m)", min_value=0.0, value=0.0, step=0.1)
     ew_arm = (ew_moment/ew) if ew>0 else 0.0
     student = st.number_input("Student weight (kg)", min_value=0.0, value=0.0, step=1.0)
     instructor = st.number_input("Instructor weight (kg)", min_value=0.0, value=0.0, step=1.0)
@@ -271,7 +272,7 @@ with left:
     st.markdown("#### Summary")
     st.markdown(f"<div class='mb-summary-row'><div>Extra fuel possible</div><div><b>{remaining_fuel_l:.1f} L</b> (limited by <i>{limit_label}</i>)</div></div>", unsafe_allow_html=True)
     st.markdown(f"<div class='mb-summary-row'><div>Total weight</div><div class='{w_color(total_weight, AC['max_takeoff_weight'])}'><b>{total_weight:.1f} kg</b></div></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='mb-summary-row'><div>Total moment</div><div><b>{total_moment:.2f} kg·m</b></div></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='mb-summary-row'><div>Total moment</div><div><b>{total_moment:.2f} kg*m</b></div></div>", unsafe_allow_html=True)
     st.markdown(f"<div class='mb-summary-row'><div>CG</div><div class='{cg_color_val(cg, AC['cg_limits'])}'><b>{cg:.3f} m</b></div></div>", unsafe_allow_html=True)
 
 with right:
@@ -394,7 +395,12 @@ if st.button("Generate filled PDF"):
     calc_pdf_path = APP_DIR / f"_calc_mission_{mission}.pdf"
     calc = FPDF()
     calc.set_auto_page_break(auto=True, margin=12)
+    calc.set_margins(12, 12, 12)              # margens explícitas
     calc.add_page()
+
+    usable_w = calc.w - calc.l_margin - calc.r_margin
+    W = usable_w
+
     calc.set_font("Arial", "B", 14)
     calc.cell(0, 8, printable("Tecnam P2008 - Calculations (summary)"), ln=True)
 
@@ -402,10 +408,10 @@ if st.button("Generate filled PDF"):
     calc.set_font("Arial", "B", 12)
     calc.cell(0, 7, printable("Weight & balance"), ln=True)
     calc.set_font("Arial", size=10)
-    calc.multi_cell(0, 5, printable(
-        f"Empty weight {ew:.0f} kg (moment {ew_moment:.0f} kg·m). "
+    calc.multi_cell(W, 5, printable(
+        f"Empty weight {ew:.0f} kg (moment {ew_moment:.0f} kg*m). "
         f"Student/Instructor {student:.0f}/{instructor:.0f} kg; baggage {baggage:.0f} kg. "
-        f"Fuel {fuel_l:.0f} L (~ {fuel_wt:.0f} kg). Total weight {total_weight:.0f} kg, moment {total_moment:.0f} kg·m; CG {cg:.3f} m. "
+        f"Fuel {fuel_l:.0f} L (~ {fuel_wt:.0f} kg). Total weight {total_weight:.0f} kg, moment {total_moment:.0f} kg*m; CG {cg:.3f} m. "
         f"Extra fuel possible: {remaining_fuel_l:.1f} L (limited by {limit_label})."
     ))
 
@@ -418,25 +424,25 @@ if st.button("Generate filled PDF"):
         # Title
         calc.set_font("Arial", "B", 10)
         title = printable(f"{r['role']} - {r['icao']} (QFU {r['qfu']:.0f} deg)")
-        calc.cell(0, 6, title, ln=True)
+        calc.multi_cell(W, 6, title)
 
         calc.set_font("Arial", size=10)
         line1 = printable(f"Atmospherics: elevation {r['elev_ft']:.0f} ft, QNH {r['qnh']:.1f} -> PA ~ {r['pa_ft']:.0f} ft.")
-        calc.multi_cell(0, 5, line1)
+        calc.multi_cell(W, 5, line1)
         line2 = printable(f"ISA at PA ~ {r['isa_temp']:.1f} C; with OAT {r['temp']:.1f} C -> DA ~ {r['da_ft']:.0f} ft.")
-        calc.multi_cell(0, 5, line2)
+        calc.multi_cell(W, 5, line2)
 
         paved_flag = next(a for a in st.session_state.aerodromes if a['icao'] == r['icao'])['paved']
         slope_val  = next(a for a in st.session_state.aerodromes if a['icao'] == r['icao'])['slope_pc']
 
-        calc.multi_cell(0, 5, printable("Method: bilinear interpolation on AFM tables using PA and OAT."))
-        calc.multi_cell(0, 5, printable(
+        calc.multi_cell(W, 5, printable("Method: bilinear interpolation on AFM tables using PA and OAT."))
+        calc.multi_cell(W, 5, printable(
             f"Corrections applied: wind component {r['hw_comp']:.0f} kt, surface {'paved' if paved_flag else 'grass'}, slope {slope_val:.1f}%."
         ))
 
-        calc.multi_cell(0, 5, printable(f"Take-off: ground roll ~ {r['to_gr']:.0f} m; over 50 ft ~ {r['to_50']:.0f} m."))
-        calc.multi_cell(0, 5, printable(f"Landing: ground roll ~ {r['ldg_gr']:.0f} m; over 50 ft ~ {r['ldg_50']:.0f} m."))
-        calc.multi_cell(0, 5, printable(f"Declared distances: TODA {r['toda_av']:.0f} m; LDA {r['lda_av']:.0f} m."))
+        calc.multi_cell(W, 5, printable(f"Take-off: ground roll ~ {r['to_gr']:.0f} m; over 50 ft ~ {r['to_50']:.0f} m."))
+        calc.multi_cell(W, 5, printable(f"Landing: ground roll ~ {r['ldg_gr']:.0f} m; over 50 ft ~ {r['ldg_50']:.0f} m."))
+        calc.multi_cell(W, 5, printable(f"Declared distances: TODA {r['toda_av']:.0f} m; LDA {r['lda_av']:.0f} m."))
         calc.ln(1)
 
     # Fuel planning – concise
@@ -444,7 +450,7 @@ if st.button("Generate filled PDF"):
     calc.set_font("Arial", "B", 12)
     calc.cell(0, 7, printable("Fuel planning (20 L/h)"), ln=True)
     calc.set_font("Arial", size=10)
-    calc.multi_cell(0, 5, printable(
+    calc.multi_cell(W, 5, printable(
         f"Trip {trip_l:.1f} L; contingency 5% {cont_l:.1f} L; required ramp {req_ramp:.1f} L; extra {extra_l:.1f} L; total ramp {total_ramp:.1f} L."
     ))
     calc.output(str(calc_pdf_path))
@@ -533,7 +539,7 @@ if st.button("Generate filled PDF"):
         # Base fields
         for k, v in FIELD_BASE.items():
             pdfrw_set_field(fields, k, v)
-        # Weight & CG with color
+        # Weight & CG with color (green/amber/red)
         wt_color = (30,150,30) if total_weight <= AC['max_takeoff_weight'] else (200,0,0)
         lo, hi = AC['cg_limits']
         if cg < lo or cg > hi:
@@ -560,7 +566,7 @@ if st.button("Generate filled PDF"):
             pdfrw_set_field(fields, names['elev'], f"{rr['elev_ft']:.0f}")
             pdfrw_set_field(fields, names['qnh'], f"{rr['qnh']:.1f}")
             pdfrw_set_field(fields, names['temp'], f"{rr['temp']:.1f}")
-            # wind: write head/tail component as a compact summary
+            # wind: head/tail component (compact)
             pdfrw_set_field(fields, names['wind'], f"{rr['hw_comp']:.0f} kt")
             pdfrw_set_field(fields, names['pa'], f"{rr['pa_ft']:.0f}")
             pdfrw_set_field(fields, names['da'], f"{rr['da_ft']:.0f}")
@@ -606,4 +612,5 @@ if st.button("Generate filled PDF"):
     st.success("PDF generated successfully!")
     with open(out_main_path, 'rb') as f:
         st.download_button("Download PDF", f, file_name=out_main_path.name, mime="application/pdf")
+
 
