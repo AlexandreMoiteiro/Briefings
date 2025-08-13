@@ -1,8 +1,6 @@
 # Streamlit app – Tecnam P2008 (M&B + Performance) – EN
 # Requirements:
-#   streamlit
-#   pytz
-#   pypdf
+#   streamlit, pytz, pypdf, reportlab, pdfplumber
 
 import streamlit as st
 import datetime
@@ -10,10 +8,14 @@ from pathlib import Path
 import pytz
 import unicodedata
 from math import cos, sin, radians
-from typing import Dict
-from pypdf import PdfReader, PdfWriter
-from pypdf.generic import NameObject, BooleanObject
+from typing import Dict, Tuple
 import io
+
+# PDF libs
+from pypdf import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+import pdfplumber
 
 # =========================
 # Helpers & style
@@ -264,6 +266,7 @@ with left:
     st.markdown(f"<div class='mb-summary-row'><div>Total moment</div><div><b>{total_moment:.2f} kg*m</b></div></div>", unsafe_allow_html=True)
     st.markdown(f"<div class='mb-summary-row'><div>CG</div><div class='{cg_color_val(cg, AC['cg_limits'])}'><b>{cg:.3f} m</b><span class='chip'>{AC['cg_limits'][0]:.3f} – {AC['cg_limits'][1]:.3f} m</span></div></div>", unsafe_allow_html=True)
 
+    # Tabela M&B completa
     st.markdown("#### Mass & Balance table")
     rows = [
         ("Empty weight", ew, ew_arm, m_empty),
@@ -337,7 +340,7 @@ with right:
                 'ldg_gr': ldg_gr_corr, 'ldg_50': ldg_50,
                 'toda_av': toda_av, 'lda_av': lda_av,
                 'hw_comp': hw, 'cw_comp': cw,
-                'wind_dir': wind_dir, 'wind_kt': wind_kt,   # <- guardados p/ PDF
+                'wind_dir': wind_dir, 'wind_kt': wind_kt,
                 'paved': paved, 'slope_pc': slope_pc,
                 'roc': roc_val, 'vy': vy_val,
             })
@@ -425,24 +428,29 @@ st.markdown(f"- **Extra**: {extra_l:.1f} L  ")
 st.markdown(f"- **Total ramp fuel**: **{total_ramp:.1f} L**")
 
 # =========================
-# PDF export (usa pdf do repo)
+# PDF export (overlay sem fields)
 # =========================
 
-st.markdown("### PDF export (Tecnam P2008 – M&B and Performance Data Sheet)")
+st.markdown("### PDF export (overlay on template without fields)")
 
 def find_pdf_template() -> Path | None:
-    name = "TecnamP2008MBPerformanceSheet_MissionX_organizado.pdf"
-    p = Path(name)
-    if p.exists(): return p
-    for cand in Path(".").rglob(name):
-        return cand
+    names = [
+        "RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf",   # novo (sem fields)
+        "TecnamP2008MBPerformanceSheet_MissionX_organizado.pdf",  # antigo
+    ]
+    for name in names:
+        p = Path(name)
+        if p.exists(): return p
+    for cand in Path(".").rglob("*.pdf"):
+        if any(k in cand.name for k in names):
+            return cand
     return None
 
 pdf_path = find_pdf_template()
 if not pdf_path:
-    st.error("PDF template não encontrado no repo. Coloca 'TecnamP2008MBPerformanceSheet_MissionX_organizado.pdf' na raiz do projeto.")
+    st.error("Template PDF não encontrado no repo.")
 else:
-    st.info(f"Template: {pdf_path}")
+    st.info(f"Template: {pdf_path.name}")
 
 if perf_rows:
     leg_labels = [f"{r['role']} – {r['icao']}" for r in perf_rows]
@@ -453,94 +461,201 @@ else:
 reg_input = st.text_input("Aircraft registration", value="")
 date_str = st.text_input("Date (dd/mm/yyyy)", value=datetime.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%d/%m/%Y"))
 
-def build_pdf_field_map(selected_row: dict) -> Dict[str, str]:
-    trip_min = climb_min + enrt_h*60 + enrt_min + desc_min
-    total_min = su_min + trip_min + alt_min + reserve_min + extra_min
-    # valores de vento com defaults (evita KeyError)
-    _wdir = int(selected_row.get('wind_dir', 0))
-    _wkt  = int(selected_row.get('wind_kt', 0))
-    fields = {
-        # --- M&B
-        "Textbox1": f"{ew:.1f}",
-        "Textbox6": f"{m_empty:.2f}",
-        "Textbox2": f"{fuel_wt:.1f}",
-        "Textbox7": f"{m_fuel:.2f}",
-        "Textbox3": f"{pilot:.1f}",
-        "Textbox8": f"{m_pilot:.2f}",
-        "Textbox4": f"{baggage:.1f}",
-        "Textbox9": f"{m_bag:.2f}",
-        "Textbox14": f"{total_weight:.2f}",
-        "Textbox10": f"{total_moment:.2f}",
-        "Textbox16": f"{cg:.3f}",
-        "Textbox17": f"{AC['max_takeoff_weight']:.2f}",
-        "Textbox5": f"{AC['cg_limits'][0]:.3f}",
-        # --- Header
-        "Textbox19": reg_input or "",
-        "Textbox18": date_str,
-        # --- Airfield
-        "Textbox22": selected_row['icao'],
-        "Textbox23": f"{int(round(selected_row['qfu'])):03d}º/{(int(round(selected_row['qfu']))+180)%360:03d}º",
-        "Textbox53": f"{selected_row['elev_ft']:.0f}",
-        "Textbox52": f"{selected_row['qnh']:.0f}",
-        "Textbox51": f"{selected_row['temp']:.0f}",
-        "Textbox58": f"{_wdir:03d}º/{_wkt}",
-        "Textbox50": f"{selected_row['pa_ft']:.0f}",
-        "Textbox49": f"{selected_row['da_ft']:.0f}",
-        # --- Performance (mantemos só ROC no PDF)
-        "Textbox47": f"{selected_row['toda_av']:.0f}/{selected_row['lda_av']:.0f}",
-        "Textbox45": f"{selected_row['to_50']:.0f}",
-        "Textbox41": f"{selected_row['ldg_50']:.0f}",
-        "Textbox39": f"{selected_row.get('roc',0):.0f}",
-        # --- Fuel Planning
-        "Textbox59": fmt_hm(su_min),
-        "Textbox60": f"{(20.0*(su_min/60.0)):.0f}L",
-        "Textbox67": fmt_hm(alt_min),
-        "Textbox68": f"{(20.0*(alt_min/60.0)):.0f}L",
-        "Textbox64": fmt_hm(desc_min),
-        "Textbox65": f"{(20.0*(desc_min/60.0)):.0f}L",
-        "Textbox63": fmt_hm(enrt_h*60 + enrt_min),
-        "Textbox70": f"{(20.0*(enrt_h + enrt_min/60.0)):.0f}L",
-        "Textbox62": fmt_hm(trip_min),
-        "Textbox61": f"{trip_l:.0f}L",
-        "Textbox69": fmt_hm(total_min),
-        "Textbox66": f"{total_ramp:.0f}L",
-    }
-    return fields
+# ---------- overlay helpers (pdfplumber anchors -> reportlab draw) ----------
+def _search(page, text):
+    res = page.search(text) or []
+    return res[0] if res else None
 
-def fill_pdf_from_path(path: Path, fields: Dict[str, str]) -> bytes:
-    reader = PdfReader(str(path))
-    writer = PdfWriter()
-    for page in reader.pages:
-        writer.add_page(page)
-    if "/AcroForm" in reader.trailer["/Root"]:
-        writer._root_object.update({NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]})
-        try:
-            writer._root_object["/AcroForm"].update({NameObject("/NeedAppearances"): BooleanObject(True)})
-        except Exception:
-            pass
-    for page in writer.pages:
-        writer.update_page_form_field_values(page, fields)
+def _draw_at(c: canvas.Canvas, page_h: float, x: float, y_top: float, txt: str, size: int = 10, bold: bool=False):
+    c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+    # pdfplumber's 'top' is distance from top; reportlab's origin is bottom-left
+    y = page_h - y_top - 2
+    c.drawString(x, y, printable(txt))
+
+def build_overlay_bytes(template: Path, values_page1: Dict[str, str], values_page2: Dict[str, str]) -> bytes:
+    with pdfplumber.open(str(template)) as pdf:
+        bio = io.BytesIO()
+        c = canvas.Canvas(bio, pagesize=A4)
+
+        # -------- Page 1 (M&B sheet) --------
+        page1 = pdf.pages[0]
+        w1, h1 = float(page1.width), float(page1.height)
+        c.setPageSize((w1, h1))
+
+        # infer column x from headers
+        x_weight = (_search(page1, "Weight (kg)") or {"x0": w1*0.55})["x0"] + 0
+        x_arm    = (_search(page1, "Arm (m)") or {"x0": w1*0.70})["x0"] + 0
+        x_moment = (_search(page1, "Moment") or {"x0": w1*0.82})["x0"] + 0
+
+        # rows (anchor at label)
+        anchors1 = {
+            "EmptyWeight": _search(page1, "EmptyWeight"),
+            "Fuel": _search(page1, "Fuel"),
+            "Pilot&Passenger": _search(page1, "Pilot&Passenger"),
+            "Baggage": _search(page1, "Baggage"),
+            "Total MOMENT": _search(page1, "Total MOMENT"),
+            "Total WEIGHT": _search(page1, "Total WEIGHT"),
+            "Distance": _search(page1, "Distance"),
+        }
+
+        # M&B rows
+        for key in ("EmptyWeight","Fuel","Pilot&Passenger","Baggage"):
+            a = anchors1.get(key)
+            if not a: continue
+            ytop = a["top"]
+            _draw_at(c, h1, x_weight, ytop, values_page1[f"{key}_W"])
+            _draw_at(c, h1, x_arm,    ytop, values_page1[f"{key}_A"])
+            _draw_at(c, h1, x_moment, ytop, values_page1[f"{key}_M"])
+
+        # Totals
+        if anchors1["Total WEIGHT"]:
+            _draw_at(c, h1, x_weight, anchors1["Total WEIGHT"]["top"], values_page1["TOTAL_W"], bold=True)
+        if anchors1["Total MOMENT"]:
+            _draw_at(c, h1, x_moment, anchors1["Total MOMENT"]["top"], values_page1["TOTAL_M"], bold=True)
+        if anchors1["Distance"]:
+            _draw_at(c, h1, x_arm, anchors1["Distance"]["top"], values_page1["CG_M"], bold=True)
+
+        c.showPage()
+
+        # -------- Page 2 (perf + fuel) --------
+        page2 = pdf.pages[1]
+        w2, h2 = float(page2.width), float(page2.height)
+        c.setPageSize((w2, h2))
+
+        def place(label: str, text: str, dx: float = 6, size: int = 10, bold: bool=False):
+            a = _search(page2, label)
+            if not a: return
+            _draw_at(c, h2, a["x1"] + dx, a["top"], text, size=size, bold=bold)
+
+        # Header
+        place("Date:", values_page2.get("date",""))
+        place("Aircraft Reg.:", values_page2.get("reg",""))
+
+        # Airfield block
+        place("Airfield:", values_page2["airfield"])
+        place("RWY QFU:", values_page2["qfu"])
+        place("Elevation (ft):", values_page2["elev"])
+        place("QNH (hPa):", values_page2["qnh"])
+        place("Temperature (ºC):", values_page2["temp"])
+        place("Wind (º / kts):", values_page2["wind"])
+        place("Pressure Alt. (ft):", values_page2["pa"])
+        place("Density Alt. (ft):", values_page2["da"])
+
+        # Performance block
+        place("TODA (m)", values_page2["toda"])
+        place("TODR (m)", values_page2["todr"])
+        place("LDA (m)",  values_page2["lda"])
+        place("LDR (m)",  values_page2["ldr"])
+        place("ROC (ft/min)", values_page2["roc"])
+
+        # Fuel planning
+        place("(1) Start-up and Taxi:", values_page2["f1_t"])
+        place("(2) Climb:", values_page2["f2_t"])
+        place("(3) Enroute:", values_page2["f3_t"])
+        place("(4) Descent:", values_page2["f4_t"])
+        place("(5) Trip Fuel", values_page2["f5_t"])
+        place("(6) Contingency 5% ( 5 )", values_page2["f6_t"])
+        place("(7) Alternate:", values_page2["f7_t"])
+        place("(8) Reserve 45 min.:", values_page2["f8_t"])
+        place("(9) Required Ramp Fuel", values_page2["f9_t"], bold=True)
+        place("(10) Extra", values_page2["f10_t"])
+        place("(11) Total Ramp Fuel", values_page2["f11_t"], bold=True)
+
+        # Fuel amounts – desenhamos à direita das durações (mesma linha, com um espaçamento)
+        place("(1) Start-up and Taxi:", values_page2["f1_l"], dx=180)
+        place("(2) Climb:", values_page2["f2_l"], dx=180)
+        place("(3) Enroute:", values_page2["f3_l"], dx=180)
+        place("(4) Descent:", values_page2["f4_l"], dx=180)
+        place("(5) Trip Fuel", values_page2["f5_l"], dx=180)
+        place("(6) Contingency 5% ( 5 )", values_page2["f6_l"], dx=180)
+        place("(7) Alternate:", values_page2["f7_l"], dx=180)
+        place("(8) Reserve 45 min.:", values_page2["f8_l"], dx=180)
+        place("(9) Required Ramp Fuel", values_page2["f9_l"], dx=180, bold=True)
+        place("(10) Extra", values_page2["f10_l"], dx=180)
+        place("(11) Total Ramp Fuel", values_page2["f11_l"], dx=180, bold=True)
+
+        c.showPage()
+        c.save()
+        return bio.getvalue()
+
+def merge_overlay(template: Path, overlay_bytes: bytes) -> bytes:
+    base = PdfReader(str(template))
+    ov   = PdfReader(io.BytesIO(overlay_bytes))
+    out = PdfWriter()
+    for i, page in enumerate(base.pages):
+        out_page = page
+        if i < len(ov.pages):
+            out_page.merge_page(ov.pages[i])
+        out.add_page(out_page)
     bio = io.BytesIO()
-    writer.write(bio)
+    out.write(bio)
     return bio.getvalue()
 
+def build_page_values(selected: Dict) -> Tuple[Dict[str,str], Dict[str,str]]:
+    # Page 1 – M&B rows
+    page1 = {
+        "EmptyWeight_W": f"{ew:.1f}",   "EmptyWeight_A": f"{ew_arm:.3f}",   "EmptyWeight_M": f"{m_empty:.2f}",
+        "Fuel_W": f"{fuel_wt:.1f}",     "Fuel_A": f"{AC['fuel_arm']:.3f}",  "Fuel_M": f"{m_fuel:.2f}",
+        "Pilot&Passenger_W": f"{(student+instructor):.1f}", "Pilot&Passenger_A": f"{AC['pilot_arm']:.3f}", "Pilot&Passenger_M": f"{m_pilot:.2f}",
+        "Baggage_W": f"{baggage:.1f}",  "Baggage_A": f"{AC['baggage_arm']:.3f}", "Baggage_M": f"{m_bag:.2f}",
+        "TOTAL_W": f"{total_weight:.2f}",
+        "TOTAL_M": f"{total_moment:.2f}",
+        "CG_M": f"{cg:.3f}",
+    }
+
+    # Fuel times/amounts
+    def f_l(mins): return f"{(RATE_LPH*(mins/60.0)):.0f} L"
+    trip_min = climb_min + enrt_h*60 + enrt_min + desc_min
+    total_min = su_min + trip_min + alt_min + reserve_min + extra_min
+    cont_l = 0.05*(RATE_LPH*(trip_min/60.0))
+    req_ramp = RATE_LPH*(su_min/60.0) + RATE_LPH*(trip_min/60.0) + cont_l + RATE_LPH*(alt_min/60.0) + RATE_LPH*(reserve_min/60.0)
+    total_ramp_l = req_ramp + RATE_LPH*(extra_min/60.0)
+
+    page2 = {
+        "date": date_str, "reg": reg_input,
+        "airfield": selected['icao'],
+        "qfu": f"{int(round(selected['qfu'])):03d}º/{(int(round(selected['qfu']))+180)%360:03d}º",
+        "elev": f"{selected['elev_ft']:.0f}",
+        "qnh": f"{selected['qnh']:.0f}",
+        "temp": f"{selected['temp']:.0f}",
+        "wind": f"{int(selected.get('wind_dir',0)):03d}º/{int(selected.get('wind_kt',0))}",
+        "pa": f"{selected['pa_ft']:.0f}",
+        "da": f"{selected['da_ft']:.0f}",
+        "toda": f"{selected['toda_av']:.0f}",
+        "todr": f"{selected['to_50']:.0f}",
+        "lda": f"{selected['lda_av']:.0f}",
+        "ldr": f"{selected['ldg_50']:.0f}",
+        "roc": f"{selected.get('roc',0):.0f}",
+        # Fuel times (left)
+        "f1_t": fmt_hm(su_min), "f2_t": fmt_hm(climb_min), "f3_t": fmt_hm(enrt_h*60+enrt_min),
+        "f4_t": fmt_hm(desc_min), "f5_t": fmt_hm(trip_min), "f6_t": fmt_hm(int(0)),  # 5% não tem "tempo"
+        "f7_t": fmt_hm(alt_min), "f8_t": fmt_hm(reserve_min), "f9_t": fmt_hm(su_min+trip_min+alt_min+reserve_min), "f10_t": fmt_hm(extra_min),
+        "f11_t": fmt_hm(total_min),
+        # Fuel amounts (right)
+        "f1_l": f_l(su_min), "f2_l": f"{(RATE_LPH*(climb_min/60.0)):.0f} L",
+        "f3_l": f"{(RATE_LPH*(enrt_h+enrt_min/60.0)):.0f} L",
+        "f4_l": f_l(desc_min), "f5_l": f"{(RATE_LPH*(trip_min/60.0)):.0f} L",
+        "f6_l": f"{cont_l:.0f} L",
+        "f7_l": f_l(alt_min), "f8_l": f_l(reserve_min),
+        "f9_l": f"{req_ramp:.0f} L",
+        "f10_l": f_l(extra_min),
+        "f11_l": f"{total_ramp_l:.0f} L",
+    }
+    return page1, page2
+
 btn_disabled = (leg_idx is None or pdf_path is None)
-if st.button("Generate filled PDF", disabled=btn_disabled):
+if st.button("Generate filled PDF (overlay)", disabled=btn_disabled):
     try:
         selected = perf_rows[leg_idx]
-        pdf_bytes = fill_pdf_from_path(pdf_path, build_pdf_field_map(selected))
+        p1, p2 = build_page_values(selected)
+        overlay = build_overlay_bytes(pdf_path, p1, p2)
+        final_pdf = merge_overlay(pdf_path, overlay)
         st.download_button(
             "Download PDF",
-            data=pdf_bytes,
+            data=final_pdf,
             file_name=f"P2008_MB_Perf_{selected['role']}_{selected['icao']}.pdf",
             mime="application/pdf"
         )
-        st.success("PDF gerado. Revê antes do voo.")
+        st.success("PDF gerado com overlay. Confere antes do voo.")
     except Exception as e:
         st.error(f"Não foi possível gerar o PDF: {e}")
-
-
-
-
-
-
