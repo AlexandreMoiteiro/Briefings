@@ -1,6 +1,5 @@
 # Streamlit app – Tecnam P2008 (M&B + Performance) – EN
-# Works on GitHub + Streamlit Cloud
-# Requirements (requirements.txt):
+# Requirements:
 #   streamlit
 #   pytz
 #   pypdf
@@ -12,8 +11,6 @@ import pytz
 import unicodedata
 from math import cos, sin, radians
 from typing import Dict
-
-# PDF form filling
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, BooleanObject
 import io
@@ -85,7 +82,7 @@ AC = {
 }
 
 # =========================
-# Aerodrome defaults (editable in UI)
+# Aerodrome defaults
 # =========================
 AERODROMES_DEFAULT = [
     {"role":"Departure","icao":"LPSO","elev_ft":390.0,"qfu":30.0,"toda":1800.0,"lda":1800.0,
@@ -97,7 +94,7 @@ AERODROMES_DEFAULT = [
 ]
 
 # =========================
-# Performance tables – distances m; ROC ft/min
+# Performance tables – distances m; ROC ft/min; Vy kt
 # =========================
 TAKEOFF = {
     0:     {"GR":{-25:144, 0:182, 25:224, 50:272, "ISA":207}, "50ft":{-25:304,0:379,25:463,50:557,"ISA":428}},
@@ -130,6 +127,9 @@ ROC = {
     600:{0:{-25:1067,0:913,25:776,50:652,"ISA":829},2000:{-25:950,0:799,25:664,50:542,"ISA":737},4000:{-25:833,0:685,25:552,50:433,"ISA":646},6000:{-25:717,0:571,25:441,50:324,"ISA":555},8000:{-25:602,0:458,25:330,50:215,"ISA":463},10000:{-25:486,0:345,25:220,50:106,"ISA":372},12000:{-25:371,0:233,25:110,50:-2,"ISA":280},14000:{-25:257,0:121,25:0,50:-109,"ISA":189}},
     550:{0:{-25:1201,0:1038,25:892,50:760,"ISA":948},2000:{-25:1077,0:916,25:773,50:644,"ISA":851},4000:{-25:953,0:795,25:654,50:527,"ISA":754},6000:{-25:830,0:675,25:536,50:411,"ISA":657},8000:{-25:707,0:555,25:419,50:296,"ISA":560},10000:{-25:584,0:435,25:301,50:181,"ISA":462},12000:{-25:462,0:315,25:184,50:66,"ISA":365},14000:{-25:341,0:196,25:68,50:-48,"ISA":268}},
 }
+VY = {650:{0:70,2000:69,4000:68,6000:67,8000:65,10000:64,12000:63,14000:62},
+      600:{0:70,2000:68,4000:67,6000:66,8000:65,10000:64,12000:63,14000:62},
+      550:{0:69,2000:68,4000:67,6000:66,8000:65,10000:64,12000:63,14000:61}}
 
 # =========================
 # Interpolation & corrections
@@ -147,16 +147,12 @@ def interp1(x, x0, x1, y0, y1):
 def bilinear(pa, temp, table, key):
     pas = sorted(table.keys())
     pa = clamp(pa, pas[0], pas[-1])
-    p0 = max([p for p in pas if p <= pa])
-    p1 = min([p for p in pas if p >= pa])
+    p0 = max([p for p in pas if p <= pa]); p1 = min([p for p in pas if p >= pa])
     temps = [-25, 0, 25, 50]
     t = clamp(temp, temps[0], temps[-1])
-    if t <= 0:
-        t0, t1 = -25, 0
-    elif t <= 25:
-        t0, t1 = 0, 25
-    else:
-        t0, t1 = 25, 50
+    if t <= 0: t0, t1 = -25, 0
+    elif t <= 25: t0, t1 = 0, 25
+    else: t0, t1 = 25, 50
     v00 = table[p0][key][t0]; v01 = table[p0][key][t1]
     v10 = table[p1][key][t0]; v11 = table[p1][key][t1]
     v0 = interp1(t, t0, t1, v00, v01)
@@ -169,8 +165,7 @@ def roc_interp(pa, temp, weight):
         tab = ROC[int(w_)]
         pas = sorted(tab.keys())
         pa_c = clamp(pa, pas[0], pas[-1])
-        p0 = max([p for p in pas if p <= pa_c])
-        p1 = min([p for p in pas if p >= pa_c])
+        p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
         temps = [-25, 0, 25, 50]
         t = clamp(temp, temps[0], temps[-1])
         if t <= 0: t0, t1 = -25, 0
@@ -181,9 +176,16 @@ def roc_interp(pa, temp, weight):
         v0 = interp1(t, t0, t1, v00, v01)
         v1 = interp1(t, t0, t1, v10, v11)
         return interp1(pa_c, p0, p1, v0, v1)
-    return (interp1(w, 550, 600, roc_for_w(550), roc_for_w(600))
-            if w <= 600 else
-            interp1(w, 600, 650, roc_for_w(600), roc_for_w(650)))
+    return interp1(w, 550, 600, roc_for_w(550), roc_for_w(600)) if w <= 600 else \
+           interp1(w, 600, 650, roc_for_w(600), roc_for_w(650))
+
+def vy_interp(pa, weight):
+    w_choice = 550 if weight <= 575 else (600 if weight <= 625 else 650)
+    table = VY[w_choice]
+    pas = sorted(table.keys())
+    pa_c = clamp(pa, pas[0], pas[-1])
+    p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
+    return interp1(pa_c, p0, p1, table[p0], table[p1])
 
 def wind_components(runway_qfu_deg, wind_dir_deg, wind_speed):
     if runway_qfu_deg is None or wind_dir_deg is None or wind_speed is None:
@@ -262,7 +264,6 @@ with left:
     st.markdown(f"<div class='mb-summary-row'><div>Total moment</div><div><b>{total_moment:.2f} kg*m</b></div></div>", unsafe_allow_html=True)
     st.markdown(f"<div class='mb-summary-row'><div>CG</div><div class='{cg_color_val(cg, AC['cg_limits'])}'><b>{cg:.3f} m</b><span class='chip'>{AC['cg_limits'][0]:.3f} – {AC['cg_limits'][1]:.3f} m</span></div></div>", unsafe_allow_html=True)
 
-    # Tabela M&B completa
     st.markdown("#### Mass & Balance table")
     rows = [
         ("Empty weight", ew, ew_arm, m_empty),
@@ -302,19 +303,19 @@ with right:
             toda_av = st.number_input("TODA available (m)", min_value=0.0, value=float(a['toda']), step=1.0, key=f"toda_{i}")
             lda_av = st.number_input("LDA available (m)", min_value=0.0, value=float(a['lda']), step=1.0, key=f"lda_{i}")
 
-            st.session_state.aerodromes[i].update({"icao":icao,"qfu":qfu,"elev_ft":elev,"qnh":qnh,
-                                                   "temp":temp,"wind_dir":wind_dir,"wind_kt":wind_kt,
-                                                   "paved":paved,"slope_pc":slope_pc,"toda":toda_av,
-                                                   "lda":lda_av})
+            st.session_state.aerodromes[i].update(
+                {"icao":icao,"qfu":qfu,"elev_ft":elev,"qnh":qnh,"temp":temp,
+                 "wind_dir":wind_dir,"wind_kt":wind_kt,"paved":paved,"slope_pc":slope_pc,
+                 "toda":toda_av,"lda":lda_av})
 
             if abs(slope_pc) > 3.0: slope_warn = True
 
-            # PA/DA
+            # PA / DA
             pa_ft = elev + (1013.25 - qnh) * 27
             isa_temp = 15 - 2*(pa_ft/1000)
             da_ft = pa_ft + (120*(temp - isa_temp))
 
-            # Tabela + correções
+            # Base + correções
             to_gr = bilinear(pa_ft, temp, TAKEOFF, 'GR')
             to_50 = bilinear(pa_ft, temp, TAKEOFF, '50ft')
             ldg_gr = bilinear(pa_ft, temp, LANDING, 'GR')
@@ -324,8 +325,9 @@ with right:
             to_gr_corr = to_corrections_takeoff(to_gr, hw, paved=paved, slope_pc=slope_pc)
             ldg_gr_corr = ldg_corrections(ldg_gr, hw, paved=paved, slope_pc=slope_pc)
 
-            # ROC (sem Vy)
+            # ROC + Vy
             roc_val = roc_interp(pa_ft, temp, total_weight) if total_weight>0 else 0.0
+            vy_val = vy_interp(pa_ft, total_weight) if total_weight>0 else 0.0
 
             perf_rows.append({
                 'role': a['role'], 'icao': icao, 'qfu': qfu,
@@ -335,8 +337,9 @@ with right:
                 'ldg_gr': ldg_gr_corr, 'ldg_50': ldg_50,
                 'toda_av': toda_av, 'lda_av': lda_av,
                 'hw_comp': hw, 'cw_comp': cw,
+                'wind_dir': wind_dir, 'wind_kt': wind_kt,   # <- guardados p/ PDF
                 'paved': paved, 'slope_pc': slope_pc,
-                'roc': roc_val,
+                'roc': roc_val, 'vy': vy_val,
             })
 
     if slope_warn:
@@ -366,7 +369,7 @@ st.markdown(
     "<th>Leg/Aerodrome</th><th>QFU</th><th>PA/DA ft</th>"
     "<th>TODR 50ft</th><th>TODA</th><th>Takeoff fit</th>"
     "<th>LDR 50ft</th><th>LDA</th><th>Landing fit</th>"
-    "<th>Wind (H/C)</th><th>ROC (ft/min)</th>"
+    "<th>Wind (H/C)</th><th>ROC (ft/min)</th><th>Vy (kt)</th>"
     "</tr>" +
     "".join([
         f"<tr>"
@@ -378,7 +381,7 @@ st.markdown(
         f"<td>{fmt(r['ldg_50'])}</td><td>{fmt(r['lda_av'])}</td>"
         f"<td>{status_cell(r['ldg_ok'], r['ldg_margin'])}</td>"
         f"<td>{('HW' if r['hw_comp']>=0 else 'TW')} {abs(r['hw_comp']):.0f} / {abs(r.get('cw_comp',0)):.0f} kt</td>"
-        f"<td>{fmt(r.get('roc',0))}</td>"
+        f"<td>{fmt(r.get('roc',0))}</td><td>{fmt(r.get('vy',0))}</td>"
         f"</tr>"
         for r in perf_rows
     ]) + "</table>",
@@ -422,7 +425,7 @@ st.markdown(f"- **Extra**: {extra_l:.1f} L  ")
 st.markdown(f"- **Total ramp fuel**: **{total_ramp:.1f} L**")
 
 # =========================
-# PDF export (usa arquivo do repo; sem upload)
+# PDF export (usa pdf do repo)
 # =========================
 
 st.markdown("### PDF export (Tecnam P2008 – M&B and Performance Data Sheet)")
@@ -430,9 +433,7 @@ st.markdown("### PDF export (Tecnam P2008 – M&B and Performance Data Sheet)")
 def find_pdf_template() -> Path | None:
     name = "TecnamP2008MBPerformanceSheet_MissionX_organizado.pdf"
     p = Path(name)
-    if p.exists():
-        return p
-    # fallback: tenta encontrar noutros diretórios do repo
+    if p.exists(): return p
     for cand in Path(".").rglob(name):
         return cand
     return None
@@ -443,7 +444,6 @@ if not pdf_path:
 else:
     st.info(f"Template: {pdf_path}")
 
-# escolher leg para export
 if perf_rows:
     leg_labels = [f"{r['role']} – {r['icao']}" for r in perf_rows]
     leg_idx = st.selectbox("Leg to export", options=list(range(len(perf_rows))), format_func=lambda i: leg_labels[i])
@@ -456,6 +456,9 @@ date_str = st.text_input("Date (dd/mm/yyyy)", value=datetime.datetime.now(pytz.t
 def build_pdf_field_map(selected_row: dict) -> Dict[str, str]:
     trip_min = climb_min + enrt_h*60 + enrt_min + desc_min
     total_min = su_min + trip_min + alt_min + reserve_min + extra_min
+    # valores de vento com defaults (evita KeyError)
+    _wdir = int(selected_row.get('wind_dir', 0))
+    _wkt  = int(selected_row.get('wind_kt', 0))
     fields = {
         # --- M&B
         "Textbox1": f"{ew:.1f}",
@@ -471,19 +474,19 @@ def build_pdf_field_map(selected_row: dict) -> Dict[str, str]:
         "Textbox16": f"{cg:.3f}",
         "Textbox17": f"{AC['max_takeoff_weight']:.2f}",
         "Textbox5": f"{AC['cg_limits'][0]:.3f}",
-        # --- Cabeçalho
+        # --- Header
         "Textbox19": reg_input or "",
         "Textbox18": date_str,
-        # --- Airfield data
+        # --- Airfield
         "Textbox22": selected_row['icao'],
         "Textbox23": f"{int(round(selected_row['qfu'])):03d}º/{(int(round(selected_row['qfu']))+180)%360:03d}º",
         "Textbox53": f"{selected_row['elev_ft']:.0f}",
         "Textbox52": f"{selected_row['qnh']:.0f}",
         "Textbox51": f"{selected_row['temp']:.0f}",
-        "Textbox58": f"{int(selected_row['wind_dir']):03d}º/{int(selected_row['wind_kt']):.0f}",
+        "Textbox58": f"{_wdir:03d}º/{_wkt}",
         "Textbox50": f"{selected_row['pa_ft']:.0f}",
         "Textbox49": f"{selected_row['da_ft']:.0f}",
-        # --- Performance
+        # --- Performance (mantemos só ROC no PDF)
         "Textbox47": f"{selected_row['toda_av']:.0f}/{selected_row['lda_av']:.0f}",
         "Textbox45": f"{selected_row['to_50']:.0f}",
         "Textbox41": f"{selected_row['ldg_50']:.0f}",
@@ -507,21 +510,14 @@ def build_pdf_field_map(selected_row: dict) -> Dict[str, str]:
 def fill_pdf_from_path(path: Path, fields: Dict[str, str]) -> bytes:
     reader = PdfReader(str(path))
     writer = PdfWriter()
-    # Copia páginas
     for page in reader.pages:
         writer.add_page(page)
-    # Copia AcroForm para o writer (fundamental para preencher)
     if "/AcroForm" in reader.trailer["/Root"]:
-        writer._root_object.update(
-            {NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]}
-        )
+        writer._root_object.update({NameObject("/AcroForm"): reader.trailer["/Root"]["/AcroForm"]})
         try:
-            writer._root_object["/AcroForm"].update(
-                {NameObject("/NeedAppearances"): BooleanObject(True)}
-            )
+            writer._root_object["/AcroForm"].update({NameObject("/NeedAppearances"): BooleanObject(True)})
         except Exception:
             pass
-    # Atualiza campos (todas as páginas)
     for page in writer.pages:
         writer.update_page_form_field_values(page, fields)
     bio = io.BytesIO()
@@ -529,11 +525,7 @@ def fill_pdf_from_path(path: Path, fields: Dict[str, str]) -> bytes:
     return bio.getvalue()
 
 btn_disabled = (leg_idx is None or pdf_path is None)
-col_a, col_b = st.columns([0.3,0.7])
-with col_a:
-    clicked = st.button("Generate filled PDF", disabled=btn_disabled)
-
-if clicked:
+if st.button("Generate filled PDF", disabled=btn_disabled):
     try:
         selected = perf_rows[leg_idx]
         pdf_bytes = fill_pdf_from_path(pdf_path, build_pdf_field_map(selected))
@@ -546,6 +538,7 @@ if clicked:
         st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
         st.error(f"Não foi possível gerar o PDF: {e}")
+
 
 
 
