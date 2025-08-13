@@ -1,8 +1,8 @@
 streamlit
 pytz
-pdfrw==0.4
-pypdf>=4.2.0
-fpdf
+pypdf
+reportlab
+pdfplumber
 
 pandas>=2.0
 folium>=0.15
