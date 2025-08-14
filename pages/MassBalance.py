@@ -17,7 +17,7 @@ from pathlib import Path
 import pytz
 import unicodedata
 from math import cos, sin, radians
-from typing import Dict, List
+from typing import Dict, List, Optional
 import io
 
 # PDF form filling
@@ -87,25 +87,25 @@ AC = {
     "fuel_arm": 2.209,      # m
     "pilot_arm": 1.800,     # m
     "baggage_arm": 2.417,   # m
-    "max_takeoff_weight": 650.0,  # kg
-    "max_fuel_volume": 120.0,     # L  (tanque limitado a 120 L)
+    "max_takeoff_weight": 650.0,      # kg
+    "max_fuel_volume": 120.0,         # L  (tanque limitado a 120 L)
     "max_passenger_weight": 230.0,
     "max_baggage_weight": 20.0,
-    "cg_limits": (1.841, 1.978),  # m
-    "fuel_density": 0.72,  # kg/L
+    "cg_limits": (1.841, 1.978),      # m
+    "fuel_density": 0.72,             # kg/L
 }
 
 # =========================
 # Aerodrome defaults (editable in UI)
 # =========================
-# Base interna com QFUs (graus magnéticos) – usado para "auto-escolher" direção pela componente de vento
+# QFUs (graus magnéticos) usados para "auto-escolher" direção pela componente de vento
 RUNWAY_QFUS: Dict[str, List[float]] = {
-    "LPSO": [26.0, 206.0],        # Ponte de Sor (AIP/SkyVector)
-    "LPEV": [6.0, 186.0, 74.0, 254.0],  # Évora (principal 01/19 + 07/25)
-    "LPCB": [158.0, 338.0],       # Castelo Branco (aprox. magn.)
+    "LPSO": [26.0, 206.0],                     # Ponte de Sor
+    "LPEV": [6.0, 186.0, 74.0, 254.0],         # Évora (01/19 + 07/25)
+    "LPCB": [158.0, 338.0],                    # Castelo Branco
 }
 
-def pick_qfu_auto(icao: str, wind_dir: float | None) -> float:
+def pick_qfu_auto(icao: str, wind_dir: Optional[float]) -> float:
     """Escolhe QFU que maximiza headwind. Se sem vento, devolve o primeiro conhecido."""
     cands = RUNWAY_QFUS.get(icao.upper(), [])
     if not cands:
@@ -234,7 +234,7 @@ def wind_components(runway_qfu_deg, wind_dir_deg, wind_speed):
     cw = max(-abs(wind_speed), min(abs(wind_speed), cw))
     return hw, cw
 
-# Correções alinhadas com AFM (JC para TO; TC para landing)
+# Correções (mantidas do teu código original)
 def to_corrections_takeoff_gr(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     gr = float(ground_roll)
     if headwind_kt >= 0: gr -= 5.0 * headwind_kt
@@ -246,11 +246,11 @@ def to_corrections_takeoff_gr(ground_roll, headwind_kt, paved=False, slope_pc=0.
 
 def ldg_corrections_gr(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     gr = float(ground_roll)
-    if headwind_kt >= 0: gr -= 5.0 * headwind_kt
-    else: gr += 15.0 * abs(headwind_kt)
-    if paved: gr *= 0.98           # -2%
+    if headwind_kt >= 0: gr -= 4.0 * headwind_kt
+    else: gr += 13.0 * abs(headwind_kt)
+    if paved: gr *= 0.90           # -10%
     slope_pc = clamp(slope_pc, -5.0, 5.0)
-    gr *= (1.0 - 0.025 * slope_pc) # -2.5% por +1%
+    gr *= (1.0 - 0.03 * slope_pc)  # -3% por +1%
     return max(gr, 0.0)
 
 # =========================
@@ -312,11 +312,11 @@ with left:
     ]
     table_html = (
         "<table class='mb-table tight'><tr>"
-        "<th>Item</th><th>Weight (kg)</th><th>Arm (m)</th><th>Moment (kg·m)</th>"
-        "</tr>" +
-        "".join([f"<tr><td>{name}</td><td>{w:.1f}</td><td>{arm:.3f}</td><td>{mom:.2f}</td></tr>" for name,w,arm,mom in rows]) +
-        f"<tr><td><b>Total</b></td><td><b>{total_weight:.1f}</b></td><td><b>{cg:.3f}</b></td><td><b>{total_moment:.2f}</b></td></tr>"
-        "</table>"
+        + "<th>Item</th><th>Weight (kg)</th><th>Arm (m)</th><th>Moment (kg·m)</th>"
+        + "</tr>"
+        + "".join([f"<tr><td>{name}</td><td>{w:.1f}</td><td>{arm:.3f}</td><td>{mom:.2f}</td></tr>" for name,w,arm,mom in rows])
+        + f"<tr><td><b>Total</b></td><td><b>{total_weight:.1f}</b></td><td><b>{cg:.3f}</b></td><td><b>{total_moment:.2f}</b></td></tr>"
+        + "</table>"
     )
     st.markdown(table_html, unsafe_allow_html=True)
 
@@ -335,7 +335,7 @@ with right:
             wind_kt = st.number_input("Wind speed (kt)", min_value=0.0, value=float(a['wind_kt']), step=1.0, key=f"wspd_{i}")
 
             # QFU: auto por vento + base conhecida, com override manual
-            qfu_auto = pick_qfu_auto(icao, wind_dir if wind_kt>0 else None)
+            qfu_auto = pick_qfu_auto(icao, wind_dir if wind_kt > 0 else None)
             qfu = st.number_input("RWY QFU (deg, heading) (auto por vento)", min_value=0.0, max_value=360.0, value=float(qfu_auto), step=1.0, key=f"qfu_{i}")
 
             elev = st.number_input("Elevation (ft)", value=float(a['elev_ft']), step=1.0, key=f"elev_{i}")
@@ -364,7 +364,7 @@ with right:
             ldg_gr_tab = bilinear(pa_ft, temp, LANDING, 'GR')
             ldg_50_tab = bilinear(pa_ft, temp, LANDING, '50ft')
 
-            # Correções AFM (GROUND ROLL apenas)
+            # Correções (GROUND ROLL apenas)
             hw, cw = wind_components(qfu, wind_dir, wind_kt)
             to_gr_corr = to_corrections_takeoff_gr(to_gr_tab, hw, paved=paved, slope_pc=slope_pc)
             ldg_gr_corr = ldg_corrections_gr(ldg_gr_tab, hw, paved=paved, slope_pc=slope_pc)
@@ -408,12 +408,12 @@ def status_cell(ok, margin):
 
 st.markdown(
     "<table class='mb-table'><tr>"
-    "<th>Leg/Aerodrome</th><th>QFU</th><th>PA/DA ft</th>"
-    "<th>TODR 50ft</th><th>TODA</th><th>Takeoff fit</th>"
-    "<th>LDR 50ft</th><th>LDA</th><th>Landing fit</th>"
-    "<th>Wind (H/C)</th><th>ROC (ft/min)</th><th>Vy (kt)</th>"
-    "</tr>" +
-    "".join([
+    + "<th>Leg/Aerodrome</th><th>QFU</th><th>PA/DA ft</th>"
+    + "<th>TODR 50ft</th><th>TODA</th><th>Takeoff fit</th>"
+    + "<th>LDR 50ft</th><th>LDA</th><th>Landing fit</th>"
+    + "<th>Wind (H/C)</th><th>ROC (ft/min)</th><th>Vy (kt)</th>"
+    + "</tr>"
+    + "".join([
         f"<tr>"
         f"<td>{r['role']} {r['icao']}</td>"
         f"<td>{fmt(r['qfu'])}</td>"
@@ -426,7 +426,8 @@ st.markdown(
         f"<td>{fmt(r.get('roc',0))}</td><td>{fmt(r.get('vy',0))}</td>"
         f"</tr>"
         for r in perf_rows
-    ]) + "</table>",
+    ])
+    + "</table>",
     unsafe_allow_html=True
 )
 
@@ -636,7 +637,7 @@ if template_bytes:
     put_any(named_map, fieldset, ["Fuel_W","FUEL_W"], f"{fuel_wt:.1f}")
     put_any(named_map, fieldset, ["Fuel_M","FUEL_M"], f"{m_fuel:.2f}")
     put_any(named_map, fieldset, ["Pilot&Passenger_W","PAX_W"], f"{pilot:.1f}")
-    put_any(named_map, fieldset, ["Pilot&Passenger_M","PAX_M"], f"{m_pilot:.2f"})
+    put_any(named_map, fieldset, ["Pilot&Passenger_M","PAX_M"], f"{m_pilot:.2f}")
     put_any(named_map, fieldset, ["Baggage_W","BAG_W"], f"{baggage:.1f}")
     put_any(named_map, fieldset, ["Baggage_M","BAG_M"], f"{m_bag:.2f}")
     put_any(named_map, fieldset, ["TOTAL_W","TOTAL_WEIGHT"], f"{total_weight:.2f}")
@@ -654,7 +655,7 @@ if template_bytes:
         if not r: continue
         put_any(named_map, fieldset, [f"Airfield_{suf}", f"Aerodrome_{suf}"], r["icao"])
         put_any(named_map, fieldset, [f"QFU_{suf}"], f"{int(round(r['qfu'])):03d}")
-        # ELEVATION — garantir preenchimento Dep/Arr
+        # ELEVATION — garantir preenchimento Dep/Arr/Alt
         put_any(named_map, fieldset, [f"Elev_{suf}", f"Elevation_{suf}"], f"{r['elev_ft']:.0f}")
         put_any(named_map, fieldset, [f"QNH_{suf}"], f"{r['qnh']:.0f}")
         put_any(named_map, fieldset, [f"Temp_{suf}"], f"{r['temp']:.0f}")
@@ -668,8 +669,8 @@ if template_bytes:
         put_any(named_map, fieldset, [f"ROC_{suf}"], f"{r.get('roc', 0):.0f}")
         put_any(named_map, fieldset, [f"VY_{suf}"], f"{r.get('vy', 0):.0f}")
 
-    # Fuel — preenche sempre Taxi, Ramp e Total (valores e tempos)
-    put_any(named_map, fieldset, ["Taxi_T","TAXI_T","Climb_T"], fmt_hm(su_min))  # inclui redundância p/ antigos PDFs
+    # Fuel — preencher sempre Taxi, Ramp e Total (valores e tempos)
+    put_any(named_map, fieldset, ["Taxi_T","TAXI_T","Climb_T"], fmt_hm(su_min))  # redundância p/ PDFs antigos
     put_any(named_map, fieldset, ["Taxi_F","TAXI_F","Climb_F"], f"{time_to_liters(0, su_min):.0f}L")
 
     put_any(named_map, fieldset, ["Trip_T","TRIP_T"], fmt_hm(trip_min))
@@ -686,7 +687,7 @@ if template_bytes:
 
     put_any(named_map, fieldset, ["Ramp_F","RAMP_F"],   f"{req_ramp:.0f}L")
     put_any(named_map, fieldset, ["Total_F","TOTAL_F"], f"{total_ramp:.0f}L")
-    # tempos de Required Ramp e Total Ramp (novos campos)
+    # Tempos de Required Ramp e Total Ramp
     put_any(named_map, fieldset, ["Ramp_T","RAMP_T"],   fmt_hm(req_ramp_min))
     put_any(named_map, fieldset, ["Total_T","TOTAL_T"], fmt_hm(total_ramp_min))
 
