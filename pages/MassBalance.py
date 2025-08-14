@@ -1,15 +1,15 @@
 # Streamlit app – Tecnam P2008 (M&B + Performance) – EN
-# Works on GitHub + Streamlit Cloud
-# Requirements (requirements.txt):
+# Requirements:
 #   streamlit
 #   pytz
 #   pypdf
 #
-# Policy:
-# - ON  -> Taxi=15min, ignora (2)(3)(4) e (6)(7)(8), 1h no (5) e 1h no (9); usa PDF base (…Sheet.pdf)
-# - OFF -> modo normal; usa PDF “…Sheet1.pdf” (campos completos para 2–4 e 6–8)
+# Política:
+# - ON  -> Taxi=15min; ignora (2)(3)(4) e (6)(7)(8); 1h no (5) e 1h no (9)
+#         usa PDF base: pages/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf
+# - OFF -> modo normal; usa PDF “...Sheet1.pdf” com campos para 2–4 e 6–8
 #
-# Valida tudo no AFM antes do voo.
+# Valida sempre contra o AFM antes do voo.
 
 import streamlit as st
 import datetime
@@ -23,6 +23,7 @@ import io
 # PDF form filling
 try:
     from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import NameObject
     PYPDF_OK = True
 except Exception:
     PYPDF_OK = False
@@ -365,7 +366,6 @@ with right:
                 'hw_comp': hw, 'cw_comp': cw,
                 'paved': paved, 'slope_pc': slope_pc,
                 'roc': roc_val, 'vy': vy_val,
-                # incluir vento bruto para o PDF
                 'wind_dir': wind_dir, 'wind_kt': wind_kt,
             })
 
@@ -523,9 +523,7 @@ st.markdown(
 # =========================
 st.markdown("### PDF export (Tecnam P2008 – M&B and Performance Data Sheet)")
 
-# Seleção automática do template correto consoante a política:
-# - Política ON  -> base (…Sheet.pdf)
-# - Política OFF -> versão 1 (…Sheet1.pdf)
+# Política ON -> base; OFF -> Sheet1
 if simple_policy:
     PDF_TEMPLATE_PATH = "pages/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf"
 else:
@@ -566,17 +564,31 @@ def get_field_names(template_bytes: bytes) -> set:
 def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     if not PYPDF_OK:
         raise RuntimeError("pypdf not available. Add 'pypdf' to requirements.txt")
+
     reader = PdfReader(io.BytesIO(template_bytes))
     writer = PdfWriter()
+
+    # Copiar páginas
     for page in reader.pages:
         writer.add_page(page)
+
+    # *** Copiar o /AcroForm do template para o writer ***
+    root = reader.trailer["/Root"]
+    if "/AcroForm" in root:
+        writer._root_object.update({NameObject("/AcroForm"): root["/AcroForm"]})
+        # Aparências para ver o texto sem “flatten”
+        try:
+            writer._root_object["/AcroForm"].update({NameObject("/NeedAppearances"): True})
+        except Exception:
+            pass
+    else:
+        # Sem AcroForm no template não há campos para preencher
+        raise RuntimeError("Template PDF has no AcroForm/fields.")
+
+    # Preencher valores (passa por todas as páginas — o pypdf escreve nos campos existentes)
     for page in writer.pages:
         writer.update_page_form_field_values(page, fields)
-    try:
-        if "/AcroForm" in writer._root_object:
-            writer._root_object["/AcroForm"].update({"/NeedAppearances": True})
-    except Exception:
-        pass
+
     bio = io.BytesIO()
     writer.write(bio)
     return bio.getvalue()
@@ -642,6 +654,9 @@ if template_bytes:
 
     # Fuel — nomes base; o PDF 1 (modo normal) inclui os campos adicionais
     # Taxi
+    def time_to_liters(h=0, m=0, rate=RATE_LPH):  # re-usa função aqui
+        return rate * (h + m/60.0)
+
     put_any(named_map, fieldset, ["Taxi_T","TAXI_T"], fmt_hm(su_min))
     put_any(named_map, fieldset, ["Taxi_F","TAXI_F"], f"{time_to_liters(0, su_min):.0f}L")
     # Climb / Enroute / Descent
@@ -678,3 +693,4 @@ if template_bytes:
             st.success("PDF generated. Review before flight.")
         except Exception as e:
             st.error(f"Could not generate PDF: {e}")
+
