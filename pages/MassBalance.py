@@ -5,18 +5,11 @@
 #   pytz
 #   pypdf
 #
-# Highlights:
-# - Full Mass & Balance table (weights, arms, moments, totals) + CG & MTOW checks
-# - Performance summary incl. ROC (ft/min) + Vy (kt)
-# - Fuel planning with optional "policy" mode:
-#     * ignores (2)(3)(4) and (6)(7)(8), forces 1h in (5) and 1h in (9)
-#     * Extra auto-set to match fuel loaded in M&B (Fuel L)
-#     * Shows how much more you could carry (L) and which limit applies (Tank vs MTOW)
-# - PDF export (repo-first, no upload), using named fields for Dep/Arr/Alt
-#   * Smart handling of a known PDF typo: Taxi_T/Taxi_F are mislabelled as Climb_T/Climb_F
-#     -> this app auto-detects that case and fills them as TAXI.
+# Policy:
+# - ON  -> Taxi=15min, ignora (2)(3)(4) e (6)(7)(8), 1h no (5) e 1h no (9); usa PDF base (…Sheet.pdf)
+# - OFF -> modo normal; usa PDF “…Sheet1.pdf” (campos completos para 2–4 e 6–8)
 #
-# Validate all figures against official AFM before flight.
+# Valida tudo no AFM antes do voo.
 
 import streamlit as st
 import datetime
@@ -37,7 +30,6 @@ except Exception:
 # =========================
 # Helpers & style
 # =========================
-
 def ascii_safe(text):
     if not isinstance(text, str):
         return str(text)
@@ -83,7 +75,7 @@ AC = {
     "pilot_arm": 1.800,     # m
     "baggage_arm": 2.417,   # m
     "max_takeoff_weight": 650.0,  # kg
-    "max_fuel_volume": 124.0,     # L
+    "max_fuel_volume": 120.0,     # L  (tanque limitado a 120 L)
     "max_passenger_weight": 230.0,
     "max_baggage_weight": 20.0,
     "cg_limits": (1.841, 1.978),  # m
@@ -145,7 +137,6 @@ VY = {650:{0:70,2000:69,4000:68,6000:67,8000:65,10000:64,12000:63,14000:62},
 # =========================
 # Interpolation & corrections
 # =========================
-
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
@@ -232,7 +223,7 @@ def to_corrections_takeoff(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
         gr += 15.0 * abs(headwind_kt)
     if paved:
         gr *= 0.9
-    slope_pc = clamp(slope_pc, -5.0, 5.0)  # guard typical use
+    slope_pc = clamp(slope_pc, -5.0, 5.0)
     gr *= (1.0 + 0.07 * slope_pc)
     return max(gr, 0.0)
 
@@ -251,7 +242,6 @@ def ldg_corrections(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
 # =========================
 # UI – inputs
 # =========================
-
 st.markdown('<div class="mb-header">Tecnam P2008 – Mass & Balance & Performance</div>', unsafe_allow_html=True)
 
 left, _, right = st.columns([0.42,0.02,0.56], gap="large")
@@ -375,6 +365,8 @@ with right:
                 'hw_comp': hw, 'cw_comp': cw,
                 'paved': paved, 'slope_pc': slope_pc,
                 'roc': roc_val, 'vy': vy_val,
+                # incluir vento bruto para o PDF
+                'wind_dir': wind_dir, 'wind_kt': wind_kt,
             })
 
     if slope_warn:
@@ -383,7 +375,6 @@ with right:
 # =========================
 # FULL-WIDTH Performance summary
 # =========================
-
 st.markdown("### Performance summary")
 for r in perf_rows:
     r['tod_ok'] = r['to_50'] <= r['toda_av']
@@ -424,13 +415,17 @@ st.markdown(
 )
 
 # =========================
-# Fuel planning (policy: 1h at (5) Trip + 1h at (9) )
+# Fuel planning
 # =========================
 st.markdown("### Fuel planning")
 
 RATE_LPH = 20.0
-simple_policy = st.checkbox("Usar política simplificada: ignorar 2,3,4 e 6,7,8; 1h no (5) e 1h no (9)", value=True)
+simple_policy = st.checkbox(
+    "Usar política simplificada: Taxi=15min; ignorar 2,3,4 e 6,7,8; 1h no (5) e 1h no (9)",
+    value=True
+)
 
+POLICY_TAXI_MIN = 15
 POLICY_TRIP_MIN = 60    # (5)
 POLICY_BLOCK9_MIN = 60  # (9)
 
@@ -440,7 +435,11 @@ def time_to_liters(h=0, m=0, rate=RATE_LPH):
     return rate * (h + m/60.0)
 
 with c1:
-    su_min = st.number_input("Start-up & taxi (min) (1)", min_value=0, value=15, step=1)
+    if simple_policy:
+        su_min = POLICY_TAXI_MIN
+        st.markdown(f"**Start-up & taxi (1)**: {su_min} min *(política)*")
+    else:
+        su_min = st.number_input("Start-up & taxi (min) (1)", min_value=0, value=POLICY_TAXI_MIN, step=1)
     climb_min = st.number_input("Climb (min) (2)", min_value=0, value=15, step=1, disabled=simple_policy)
 with c2:
     enrt_h = st.number_input("Enroute (h) (3)", min_value=0, value=2, step=1, disabled=simple_policy)
@@ -476,16 +475,16 @@ if simple_policy:
     req_ramp = policy_req_l
     total_ramp = req_ramp + extra_l
 else:
-    climb_min_eff = climb_min
-    enrt_min_eff = enrt_h*60 + enrt_min
-    desc_min_eff  = desc_min
-    alt_min_eff   = alt_min
+    climb_min_eff   = climb_min
+    enrt_min_eff    = enrt_h*60 + enrt_min
+    desc_min_eff    = desc_min
+    alt_min_eff     = alt_min
     reserve_min_eff = reserve_min
 
     trip_min = climb_min_eff + enrt_min_eff + desc_min_eff
     trip_l   = time_to_liters(0, trip_min)
 
-    cont_l = 0.05 * trip_l
+    cont_l   = 0.05 * trip_l
     extra_min = extra_min_user
     extra_l   = time_to_liters(0, extra_min)
 
@@ -493,7 +492,7 @@ else:
     total_ramp = req_ramp + extra_l
     block9_min = 0
     block9_l   = 0.0
-    missing_l = 0.0
+    missing_l  = 0.0
 
 st.markdown(f"- **(1) Start-up & taxi**: {su_min} min → {time_to_liters(0, su_min):.1f} L")
 st.markdown(f"- **(5) Trip**: {trip_min} min → {trip_l:.1f} L" + ("  *(política)*" if simple_policy else ""))
@@ -512,7 +511,7 @@ st.markdown(f"- **Total ramp (planeado)**: **{total_ramp:.1f} L**")
 st.markdown(f"- **Fuel carregado (M&B)**: **{fuel_l:.1f} L**")
 
 if simple_policy and missing_l > 0.1:
-    st.error(f"Faltam {missing_l:.1f} L para cumprir a política (1h no 5 + 1h no 9).")
+    st.error(f"Faltam {missing_l:.1f} L para cumprir a política (Taxi 15min + 1h no 5 + 1h no 9).")
 
 st.markdown(
     f"- **Ainda poderias levar**: **{remaining_fuel_l:.1f} L** "
@@ -524,11 +523,15 @@ st.markdown(
 # =========================
 st.markdown("### PDF export (Tecnam P2008 – M&B and Performance Data Sheet)")
 
-PDF_TEMPLATE_PATH = st.text_input(
-    "Template PDF path (in repo)",
-    value="RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf",
-)
+# Seleção automática do template correto consoante a política:
+# - Política ON  -> base (…Sheet.pdf)
+# - Política OFF -> versão 1 (…Sheet1.pdf)
+if simple_policy:
+    PDF_TEMPLATE_PATH = "pages/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf"
+else:
+    PDF_TEMPLATE_PATH = "pages/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet1.pdf"
 
+# Inputs de header
 reg_input = st.text_input("Aircraft registration", value="")
 date_str = st.text_input(
     "Date (dd/mm/yyyy)",
@@ -579,23 +582,19 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     return bio.getvalue()
 
 def put_any(out: dict, fieldset: set, keys, value: str):
-    """Write to the first existing key in 'keys'. If multiple exist, write all of them."""
+    """Escreve em todas as chaves existentes dentro de 'keys'."""
     if isinstance(keys, str):
         keys = [keys]
-    wrote = False
     for k in keys:
         if k in fieldset:
             out[k] = value
-            wrote = True
-    return wrote
 
+# Lê template e nomes de campos (sem mostrar ao utilizador)
 template_bytes = None
 fieldset = set()
 try:
     template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATH)
     fieldset = get_field_names(template_bytes)
-    with st.expander("Detected form fields", expanded=False):
-        st.write(sorted(fieldset) if fieldset else "(no fields found)")
 except Exception as e:
     st.error(f"Cannot read template: {e}")
 
@@ -639,55 +638,37 @@ if template_bytes:
         put_any(named_map, fieldset, f"LDA_{suf}", f"{r['lda_av']:.0f}")
         put_any(named_map, fieldset, f"LDR_{suf}", f"{r['ldg_50']:.0f}")
         put_any(named_map, fieldset, f"ROC_{suf}", f"{r.get('roc', 0):.0f}")
-        # Optional Vy if your PDF has it
         put_any(named_map, fieldset, f"VY_{suf}", f"{r.get('vy', 0):.0f}")
 
-    # ---- Fuel Planning mapping
-    taxi_time = fmt_hm(su_min)
-    taxi_lit  = f"{time_to_liters(0, su_min):.0f}L"
-    # PDF typo handling: if Taxi_* does not exist but Climb_* exists, treat Climb_* as TAXI
-    taxi_misnamed = ("Taxi_T" not in fieldset and "Taxi_F" not in fieldset) and (("Climb_T" in fieldset) or ("Climb_F" in fieldset))
-
-    if taxi_misnamed:
-        # Fill Climb_* with TAXI values (as per known PDF typo)
-        put_any(named_map, fieldset, ["Climb_T"], taxi_time)
-        put_any(named_map, fieldset, ["Climb_F"], taxi_lit)
-    else:
-        # Normal names
-        put_any(named_map, fieldset, ["Taxi_T", "TAXI_T"], taxi_time)
-        put_any(named_map, fieldset, ["Taxi_F", "TAXI_F"], taxi_lit)
-        # Fill real Climb if present and not using the misnamed trick
-        put_any(named_map, fieldset, "Climb_T", fmt_hm(climb_min if not simple_policy else 0))
-        put_any(named_map, fieldset, "Climb_F", f"{time_to_liters(0, (climb_min if not simple_policy else 0)):.0f}L")
-
-    # Enroute / Descent
-    put_any(named_map, fieldset, "Enroute_T", fmt_hm(enrt_min_eff if not simple_policy else 0))
-    put_any(named_map, fieldset, "Enroute_F", f"{time_to_liters(0, (enrt_min_eff if not simple_policy else 0)):.0f}L")
-    put_any(named_map, fieldset, "Descent_T", fmt_hm(desc_min_eff if not simple_policy else 0))
-    put_any(named_map, fieldset, "Descent_F", f"{time_to_liters(0, (desc_min_eff if not simple_policy else 0)):.0f}L")
-
-    # Trip (5) and Block (9)
-    put_any(named_map, fieldset, ["Trip_T", "TRIP_T"], fmt_hm(trip_min))
-    put_any(named_map, fieldset, ["Trip_F", "TRIP_F"], f"{time_to_liters(0, trip_min):.0f}L")
-
-    put_any(named_map, fieldset, ["Block9_T", "BLOCK9_T"], fmt_hm(block9_min))
-    put_any(named_map, fieldset, ["Block9_F", "BLOCK9_F"], f"{time_to_liters(0, block9_min):.0f}L")
-
-    # Alt / Reserve / Contingency
-    put_any(named_map, fieldset, "Alternate_T", fmt_hm(alt_min_eff if not simple_policy else 0))
-    put_any(named_map, fieldset, "Alternate_F", f"{time_to_liters(0, (alt_min_eff if not simple_policy else 0)):.0f}L")
-    put_any(named_map, fieldset, "Reserve_T", fmt_hm(reserve_min_eff if not simple_policy else 0))
-    put_any(named_map, fieldset, "Reserve_F", f"{time_to_liters(0, (reserve_min_eff if not simple_policy else 0)):.0f}L")
-    put_any(named_map, fieldset, ["Contingency_F", "CONTINGENCY_F"], f"{cont_l:.0f}L")
-
-    # Required ramp (1+5+9 or 1+5+6+7+8), Extra (auto if policy), Total
-    put_any(named_map, fieldset, ["Ramp_F", "RAMP_F"], f"{req_ramp:.0f}L")
-    put_any(named_map, fieldset, ["Extra_T", "EXTRA_T"], fmt_hm(extra_min))
-    put_any(named_map, fieldset, ["Extra_F", "EXTRA_F"], f"{extra_l:.0f}L")
-    put_any(named_map, fieldset, ["Total_F", "TOTAL_F"], f"{total_ramp:.0f}L")
-
-    # Optional: actual fuel loaded according to M&B (if you added a field)
-    put_any(named_map, fieldset, ["FuelLoaded_MnB", "FuelLoaded"], f"{fuel_l:.0f}L")
+    # Fuel — nomes base; o PDF 1 (modo normal) inclui os campos adicionais
+    # Taxi
+    put_any(named_map, fieldset, ["Taxi_T","TAXI_T"], fmt_hm(su_min))
+    put_any(named_map, fieldset, ["Taxi_F","TAXI_F"], f"{time_to_liters(0, su_min):.0f}L")
+    # Climb / Enroute / Descent
+    put_any(named_map, fieldset, "Climb_T",   fmt_hm(0 if simple_policy else climb_min))
+    put_any(named_map, fieldset, "Climb_F",   f"{time_to_liters(0, (0 if simple_policy else climb_min)):.0f}L")
+    put_any(named_map, fieldset, "Enroute_T", fmt_hm(0 if simple_policy else (enrt_h*60 + enrt_min)))
+    put_any(named_map, fieldset, "Enroute_F", f"{time_to_liters(0, (0 if simple_policy else (enrt_h*60 + enrt_min))):.0f}L")
+    put_any(named_map, fieldset, "Descent_T", fmt_hm(0 if simple_policy else desc_min))
+    put_any(named_map, fieldset, "Descent_F", f"{time_to_liters(0, (0 if simple_policy else desc_min)):.0f}L")
+    # Trip (5) e Block (9)
+    put_any(named_map, fieldset, ["Trip_T","TRIP_T"], fmt_hm(trip_min))
+    put_any(named_map, fieldset, ["Trip_F","TRIP_F"], f"{time_to_liters(0, trip_min):.0f}L")
+    put_any(named_map, fieldset, ["Block9_T","BLOCK9_T"], fmt_hm(POLICY_BLOCK9_MIN if simple_policy else 0))
+    put_any(named_map, fieldset, ["Block9_F","BLOCK9_F"], f"{time_to_liters(0, (POLICY_BLOCK9_MIN if simple_policy else 0)):.0f}L")
+    # Alternate / Reserve / Contingency
+    put_any(named_map, fieldset, "Alternate_T", fmt_hm(0 if simple_policy else alt_min))
+    put_any(named_map, fieldset, "Alternate_F", f"{time_to_liters(0, (0 if simple_policy else alt_min)):.0f}L")
+    put_any(named_map, fieldset, "Reserve_T",   fmt_hm(0 if simple_policy else reserve_min))
+    put_any(named_map, fieldset, "Reserve_F",   f"{time_to_liters(0, (0 if simple_policy else reserve_min)):.0f}L")
+    put_any(named_map, fieldset, ["Contingency_F","CONTINGENCY_F"], f"{cont_l:.0f}L")
+    # Required ramp + Extra + Total
+    put_any(named_map, fieldset, ["Ramp_F","RAMP_F"],   f"{req_ramp:.0f}L")
+    put_any(named_map, fieldset, ["Extra_T","EXTRA_T"], fmt_hm(extra_min))
+    put_any(named_map, fieldset, ["Extra_F","EXTRA_F"], f"{extra_l:.0f}L")
+    put_any(named_map, fieldset, ["Total_F","TOTAL_F"], f"{total_ramp:.0f}L")
+    # Opcional: fuel real carregado segundo M&B
+    put_any(named_map, fieldset, ["FuelLoaded_MnB","FuelLoaded"], f"{fuel_l:.0f}L")
 
     if st.button("Generate filled PDF", type="primary"):
         try:
@@ -697,4 +678,3 @@ if template_bytes:
             st.success("PDF generated. Review before flight.")
         except Exception as e:
             st.error(f"Could not generate PDF: {e}")
-
