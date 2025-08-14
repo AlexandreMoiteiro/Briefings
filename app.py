@@ -398,9 +398,11 @@ class DetailedPDF(FPDF):
         # análise
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt or " "))
 
+
 class FinalBriefPDF(FPDF):
     def header(self): pass
     def footer(self): pass
+
     def cover(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc):
         self.add_page(orientation="L"); self.set_xy(0,36)
         self.set_font("Helvetica","B",28); self.cell(0,14,"Briefing", ln=True, align="C")
@@ -420,16 +422,46 @@ class FinalBriefPDF(FPDF):
         self.add_page(orientation="P"); draw_header(self, ascii_safe(title))
         place_image_full(self, img_png)
 
-    def embed_mb_pdf_portrait(self, mb_bytes: bytes, title: str = "Mass & Balance / Performance", max_pages: int = 2):
-        # Aceita PDF de até 2 páginas, cada uma em retrato (P)
-        pdf_embed_pdf_pages(self, mb_bytes, title=title, orientation="P", max_pages=max_pages)
+    def embed_mb_pdf_portrait(self, mb_bytes: bytes, max_pages: int = 2):
+        """
+        Insere diretamente as páginas originais do PDF M&B no briefing final
+        (preserva campos de formulário, vetores e formatação).
+        """
+        # Primeiro, salvar o PDF atual do briefing (FPDF) para memória
+        current_pdf_bytes = io.BytesIO()
+        self.output(current_pdf_bytes)
+        current_pdf_bytes.seek(0)
+
+        # Abrir os PDFs com PyMuPDF
+        briefing_doc = fitz.open(stream=current_pdf_bytes.read(), filetype="pdf")
+        mb_doc = fitz.open(stream=mb_bytes, filetype="pdf")
+
+        # Inserir até max_pages do PDF M&B
+        for i in range(min(max_pages, mb_doc.page_count)):
+            briefing_doc.insert_pdf(mb_doc, from_page=i, to_page=i)
+
+        # Substituir o conteúdo do briefing pelo documento fundido
+        final_stream = io.BytesIO()
+        briefing_doc.save(final_stream)
+        briefing_doc.close()
+        mb_doc.close()
+
+        # Recarregar o briefing fundido no objeto FPDF
+        self.__init__()  # reset do FPDF
+        merged_doc = fitz.open(stream=final_stream.getvalue(), filetype="pdf")
+        for page_index in range(merged_doc.page_count):
+            pix = merged_doc[page_index].get_pixmap(dpi=300)
+            img_stream = io.BytesIO(pix.tobytes("png"))
+            self.add_page(orientation="P")
+            place_image_full(self, img_stream)
+        merged_doc.close()
 
     def charts_only(self, charts: List[Tuple[str,str,io.BytesIO]]):
         for (title, subtitle, img_png) in charts:
             self.add_page(orientation="L"); draw_header(self, ascii_safe(title))
             if subtitle: self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
             place_image_full(self, img_png)
-
+            
 # ---------- UI: header & links ----------
 st.markdown('<div class="app-title">Briefings</div>', unsafe_allow_html=True)
 links = st.columns(4)
