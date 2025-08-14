@@ -422,39 +422,32 @@ class FinalBriefPDF(FPDF):
         self.add_page(orientation="P"); draw_header(self, ascii_safe(title))
         place_image_full(self, img_png)
 
-    def embed_mb_pdf_portrait(self, mb_bytes: bytes, max_pages: int = 2):
+    def embed_mb_pdf_portrait(self, mb_bytes: bytes):
         """
-        Insere diretamente as páginas originais do PDF M&B no briefing final
-        (preserva campos de formulário, vetores e formatação).
+        Insere diretamente todas as páginas do PDF de M&B no briefing final,
+        preservando formatação, campos e qualidade.
         """
-        # Primeiro, salvar o PDF atual do briefing (FPDF) para memória
+        # Exportar briefing atual (páginas já criadas no FPDF) para PDF
         current_pdf_bytes = io.BytesIO()
         self.output(current_pdf_bytes)
         current_pdf_bytes.seek(0)
 
-        # Abrir os PDFs com PyMuPDF
+        # Abrir ambos os PDFs com PyMuPDF
         briefing_doc = fitz.open(stream=current_pdf_bytes.read(), filetype="pdf")
         mb_doc = fitz.open(stream=mb_bytes, filetype="pdf")
 
-        # Inserir até max_pages do PDF M&B
-        for i in range(min(max_pages, mb_doc.page_count)):
-            briefing_doc.insert_pdf(mb_doc, from_page=i, to_page=i)
+        # Inserir TODAS as páginas do PDF M&B no final do briefing
+        briefing_doc.insert_pdf(mb_doc)
 
-        # Substituir o conteúdo do briefing pelo documento fundido
+        # Guardar documento combinado no buffer interno do objeto FPDF
         final_stream = io.BytesIO()
         briefing_doc.save(final_stream)
         briefing_doc.close()
         mb_doc.close()
 
-        # Recarregar o briefing fundido no objeto FPDF
-        self.__init__()  # reset do FPDF
-        merged_doc = fitz.open(stream=final_stream.getvalue(), filetype="pdf")
-        for page_index in range(merged_doc.page_count):
-            pix = merged_doc[page_index].get_pixmap(dpi=300)
-            img_stream = io.BytesIO(pix.tobytes("png"))
-            self.add_page(orientation="P")
-            place_image_full(self, img_stream)
-        merged_doc.close()
+        # Substituir o conteúdo gerado internamente pelo PDF final combinado
+        self.__init__()  # reset FPDF
+        self._out_buffer = final_stream.getvalue()
 
     def charts_only(self, charts: List[Tuple[str,str,io.BytesIO]]):
         for (title, subtitle, img_png) in charts:
