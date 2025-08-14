@@ -1,4 +1,5 @@
 # app.py — Briefings com editor de NOTAMs e GAMET (ambos via Gist) + METAR/TAF/SIGMET + PDFs
+
 from typing import Dict, Any, List, Tuple
 import io, os, re, base64, tempfile, unicodedata, json, datetime as dt
 import streamlit as st
@@ -7,7 +8,6 @@ from fpdf import FPDF
 import fitz  # PyMuPDF
 import requests
 from openai import OpenAI
-from pypdf import PdfReader, PdfMerger  # <— para juntar PDFs preservando formularios
 
 # ---------- External pages (ajusta se renomeares) ----------
 APP_WEATHER_URL = "https://briefings.streamlit.app/Weather"
@@ -330,13 +330,24 @@ def place_image_full(pdf: FPDF, png_bytes: io.BytesIO, max_h_pad: int=58):
         img.save(tmp, format="PNG"); path = tmp.name
     pdf.image(path, x=x, y=y, w=w, h=h); os.remove(path); pdf.ln(h+10)
 
+def pdf_embed_pdf_pages(pdf: FPDF, pdf_bytes: bytes, title: str, orientation: str = "P", max_pages: int | None = None):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total = doc.page_count
+    pages = range(total) if max_pages is None else range(min(total, max_pages))
+    for i in pages:
+        page = doc.load_page(i)
+        png = page.get_pixmap(dpi=300).tobytes("png")
+        img = Image.open(io.BytesIO(png)).convert("RGB")
+        bio = io.BytesIO(); img.save(bio, format="PNG"); bio.seek(0)
+        pdf.add_page(orientation=orientation)
+        draw_header(pdf, ascii_safe(title + (f" — p.{i+1}" if total>1 else "")))
+        place_image_full(pdf, bio, max_h_pad=58)
+
 # ---------- PDF classes ----------
 class DetailedPDF(FPDF):
-    # **Sem cover page** neste PDF
     def header(self): pass
     def footer(self): pass
 
-    # Agora recebe (ICAO, METAR_RAW, TAF_RAW, ANALISE)
     def metar_taf_block(self, analyses: List[Tuple[str, str, str, str]]):
         self.add_page(orientation="P")
         draw_header(self, "METAR / TAF — Interpretacao (PT)")
@@ -369,12 +380,10 @@ class DetailedPDF(FPDF):
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt))
 
     def chart_block(self, title: str, subtitle: str, img_png: io.BytesIO, analysis_pt: str):
-        # Mantém o título EXACTO passado pela UI
-        self.add_page(orientation="P")  # charts no detalhado: vertical para consistência
+        self.add_page(orientation="P")
         draw_header(self, ascii_safe(title))
         if subtitle:
             self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
-        # imagem
         max_w = self.w - 22; max_h = (self.h // 2) - 18
         img = Image.open(img_png); iw, ih = img.size
         r = min(max_w/iw, max_h/ih); w, h = int(iw*r), int(ih*r)
@@ -382,7 +391,6 @@ class DetailedPDF(FPDF):
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             img.save(tmp, format="PNG"); path = tmp.name
         self.image(path, x=x, y=y, w=w, h=h); os.remove(path); self.ln(h+12)
-        # análise
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt or " "))
 
 class FinalBriefPDF(FPDF):
@@ -406,6 +414,24 @@ class FinalBriefPDF(FPDF):
     def flightplan_image_portrait(self, title: str, img_png: io.BytesIO):
         self.add_page(orientation="P"); draw_header(self, ascii_safe(title))
         place_image_full(self, img_png)
+
+    def embed_mb_pdf_portrait(self, mb_bytes: bytes, max_pages: int = 2) -> bytes:
+        """Anexa diretamente as primeiras páginas do PDF M&B ao briefing, preservando layout/campos."""
+        try:
+            # Converter o briefing atual (FPDF) para bytes e abrir no PyMuPDF
+            fb_bytes: bytes = self.output(dest="S").encode("latin-1")
+            main = fitz.open(stream=fb_bytes, filetype="pdf")
+            mb = fitz.open(stream=mb_bytes, filetype="pdf")
+            take = min(max_pages, mb.page_count)
+            if take > 0:
+                # start_at=-1 => append ao fim
+                main.insert_pdf(mb, from_page=0, to_page=take-1, start_at=-1)
+            out = main.tobytes()
+            main.close(); mb.close()
+            return out
+        except Exception:
+            # Se algo correr mal, devolve só o briefing atual
+            return self.output(dest="S").encode("latin-1")
 
     def charts_only(self, charts: List[Tuple[str,str,io.BytesIO]]):
         for (title, subtitle, img_png) in charts:
@@ -606,7 +632,6 @@ st.markdown("#### Flight Plan (optional image/PDF/GIF)")
 fp_upload = st.file_uploader("Upload your flight plan (PDF/PNG/JPG/JPEG/GIF)", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=False)
 fp_img_png: io.BytesIO | None = None
 if fp_upload:
-    # Converter para imagem e usar ORIENTACAO VERTICAL no PDF final
     fp_img_png = ensure_png_bytes(fp_upload)
     st.success("Flight plan will be included in the final briefing (portrait page).")
 
@@ -621,42 +646,31 @@ if 'gen_final' in locals() and gen_final:
     fb = FinalBriefPDF()
     fb.cover(mission_no, pilot, aircraft_type, callsign, registration, str(flight_date), time_utc)
 
-    # Inserir flight plan **em retrato** (imagem)
     if fp_img_png is not None:
         fb.flightplan_image_portrait("Flight Plan", fp_img_png)
 
-    # charts extras (no briefing final ficam em landscape)
     if 'charts' in locals():
         fb.charts_only([(c["title"], c["subtitle"], c["img_png"]) for c in charts])
 
-    # Exporta o briefing FPDF para bytes
-    # (fpdf/pyfpdf devolve str latin-1; convertemos para bytes)
+    # Exporta briefing base
     fb_bytes: bytes = fb.output(dest="S").encode("latin-1")
-
     final_bytes = fb_bytes
 
-    # Se houver M&B, junta diretamente as suas páginas originais (até 2) preservando formulário
+    # Se houver M&B, **anexa as páginas originais** (até 2) preservando layout/campos
     if mb_upload is not None:
         mb_bytes = mb_upload.read()
-        merger = PdfMerger()
-        # Primeiro o briefing já gerado
-        merger.append(io.BytesIO(fb_bytes))
-        # Depois as primeiras 1-2 páginas do PDF do M&B, tal como estão
+        # usa o método que faz o append direto via PyMuPDF
         try:
-            mb_reader = PdfReader(io.BytesIO(mb_bytes))
-            total_mb = len(mb_reader.pages)
-            take = min(2, total_mb) if total_mb else 0
+            # abrir briefing e anexar M&B
+            main = fitz.open(stream=fb_bytes, filetype="pdf")
+            mb = fitz.open(stream=mb_bytes, filetype="pdf")
+            take = min(2, mb.page_count)
             if take > 0:
-                # pages=(start, stop) — stop é exclusivo
-                merger.append(io.BytesIO(mb_bytes), pages=(0, take))
+                main.insert_pdf(mb, from_page=0, to_page=take-1, start_at=-1)
+            final_bytes = main.tobytes()
+            main.close(); mb.close()
         except Exception:
-            # Se algo falhar na leitura, ignora e segue sem M&B
-            pass
-
-        buf = io.BytesIO()
-        merger.write(buf)
-        merger.close()
-        final_bytes = buf.getvalue()
+            pass  # fallback: fica só o briefing sem M&B
 
     final_name = f"Briefing - Missao {mission_no or 'X'}.pdf"
     st.download_button("Download Final Briefing (EN)", data=final_bytes, file_name=final_name, mime="application/pdf", use_container_width=True)
@@ -666,6 +680,7 @@ st.markdown(f"**Weather:** {APP_WEATHER_URL}")
 st.markdown(f"**NOTAMs:** {APP_NOTAMS_URL}")
 st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
 st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
+
 
 
 
