@@ -41,7 +41,6 @@ def ascii_safe(text: str) -> str:
     return (t.replace("\u00A0"," ").replace("\u2009"," ").replace("\u2013","-")
              .replace("\u2014","-").replace("\uFEFF",""))
 
-# ---------- ICAO parser ----------
 def parse_icaos(s: str) -> List[str]:
     tokens = re.split(r"[,\s]+", (s or "").strip(), flags=re.UNICODE)
     return [t.upper() for t in tokens if t]
@@ -77,7 +76,6 @@ def cw_headers() -> Dict[str,str]:
     return {"X-API-Key": key} if key else {}
 
 def fetch_metar_now(icao: str) -> str:
-    """METAR via CheckWX (RAW)."""
     try:
         hdr = cw_headers()
         if not hdr: return ""
@@ -90,7 +88,6 @@ def fetch_metar_now(icao: str) -> str:
     except Exception: return ""
 
 def fetch_taf_now(icao: str) -> str:
-    """TAF via CheckWX (RAW)."""
     try:
         hdr = cw_headers()
         if not hdr: return ""
@@ -154,7 +151,6 @@ def load_gamet_from_gist() -> Dict[str,Any]:
         return {"text":"", "updated_utc":None}
 
 def save_gamet_to_gist(text: str) -> tuple[bool, str]:
-    """Guarda o GAMET no Gist no formato {"updated_utc":"...", "text":"..."}. """
     token, gid, fn = _get_gamet_secrets()
     if not all([token, gid, fn]):
         return False, "Faltam segredos do GAMET (TOKEN/ID/FILENAME)."
@@ -213,7 +209,6 @@ def load_notams_from_gist() -> Dict[str, Any]:
         return {"map": {}, "updated_utc": None}
 
 def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
-    """Escreve no Gist o JSON {"updated_utc": "...", "map": {...}}."""
     if not notam_gist_config_ok():
         return False, "Segredos NOTAM_GIST_* em falta."
     try:
@@ -224,9 +219,7 @@ def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
             "updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
             "map": {k: [s for s in v if str(s).strip()] for k, v in new_map.items()}
         }
-        body = {
-            "files": { fn: { "content": json.dumps(payload, ensure_ascii=False, indent=2) } }
-        }
+        body = {"files": { fn: { "content": json.dumps(payload, ensure_ascii=False, indent=2) } } }
         r = requests.patch(
             f"https://api.github.com/gists/{gid}",
             headers={"Authorization": f"token {token}", "Accept":"application/vnd.github+json"},
@@ -240,7 +233,6 @@ def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
 
 # ---------- GPT wrapper (texto) ----------
 def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str:
-    """Usa Chat Completions e limpa texto."""
     try:
         model_name = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
     except Exception:
@@ -262,7 +254,6 @@ def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str
 
 # ---------- Análises (PT) ----------
 def analyze_chart_pt(kind: str, img_b64: str) -> str:
-    """Analisa imagem via Chat Completions Vision (image_url:data URI)."""
     try:
         model_name = st.secrets.get("OPENAI_MODEL_VISION", "gpt-4o").strip() or "gpt-4o"
     except Exception:
@@ -415,29 +406,20 @@ class FinalBriefPDF(FPDF):
         self.add_page(orientation="P"); draw_header(self, ascii_safe(title))
         place_image_full(self, img_png)
 
-    def embed_mb_pdf_portrait(self, mb_bytes: bytes, max_pages: int = 2) -> bytes:
-        """Anexa diretamente as primeiras páginas do PDF M&B ao briefing, preservando layout/campos."""
-        try:
-            # Converter o briefing atual (FPDF) para bytes e abrir no PyMuPDF
-            fb_bytes: bytes = self.output(dest="S").encode("latin-1")
-            main = fitz.open(stream=fb_bytes, filetype="pdf")
-            mb = fitz.open(stream=mb_bytes, filetype="pdf")
-            take = min(max_pages, mb.page_count)
-            if take > 0:
-                # start_at=-1 => append ao fim
-                main.insert_pdf(mb, from_page=0, to_page=take-1, start_at=-1)
-            out = main.tobytes()
-            main.close(); mb.close()
-            return out
-        except Exception:
-            # Se algo correr mal, devolve só o briefing atual
-            return self.output(dest="S").encode("latin-1")
-
     def charts_only(self, charts: List[Tuple[str,str,io.BytesIO]]):
         for (title, subtitle, img_png) in charts:
             self.add_page(orientation="L"); draw_header(self, ascii_safe(title))
             if subtitle: self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
             place_image_full(self, img_png)
+
+# ---------- Helper robusto: FPDF -> bytes (fpdf vs fpdf2) ----------
+def fpdf_to_bytes(doc: FPDF) -> bytes:
+    """Garante bytes tanto em PyFPDF (str) como em fpdf2 (bytes/bytearray)."""
+    data = doc.output(dest="S")
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
+    # PyFPDF (string Latin-1)
+    return data.encode("latin-1")
 
 # ---------- UI: header & links ----------
 st.markdown('<div class="app-title">Briefings</div>', unsafe_allow_html=True)
@@ -652,21 +634,20 @@ if 'gen_final' in locals() and gen_final:
     if 'charts' in locals():
         fb.charts_only([(c["title"], c["subtitle"], c["img_png"]) for c in charts])
 
-    # Exporta briefing base
-    fb_bytes: bytes = fb.output(dest="S").encode("latin-1")
+    # Exporta briefing base (robusto para fpdf/fpdf2)
+    fb_bytes: bytes = fpdf_to_bytes(fb)
     final_bytes = fb_bytes
 
-    # Se houver M&B, **anexa as páginas originais** (até 2) preservando layout/campos
+    # Se houver M&B, anexa as páginas ORIGINAIS (até 2) preservando layout/campos
     if mb_upload is not None:
         mb_bytes = mb_upload.read()
-        # usa o método que faz o append direto via PyMuPDF
         try:
-            # abrir briefing e anexar M&B
             main = fitz.open(stream=fb_bytes, filetype="pdf")
             mb = fitz.open(stream=mb_bytes, filetype="pdf")
             take = min(2, mb.page_count)
             if take > 0:
-                main.insert_pdf(mb, from_page=0, to_page=take-1, start_at=-1)
+                # append ao fim; from_page / to_page são inclusivo / inclusivo
+                main.insert_pdf(mb, from_page=0, to_page=take-1)
             final_bytes = main.tobytes()
             main.close(); mb.close()
         except Exception:
@@ -680,9 +661,6 @@ st.markdown(f"**Weather:** {APP_WEATHER_URL}")
 st.markdown(f"**NOTAMs:** {APP_NOTAMS_URL}")
 st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
 st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
-
-
-
 
 
 
