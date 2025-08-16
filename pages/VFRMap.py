@@ -6,14 +6,12 @@ from folium.plugins import MarkerCluster
 import re
 from math import radians, sin, cos, sqrt, atan2
 
-# ---------- Configuração da página ----------
-st.set_page_config(page_title="Portugal VFR — Localidades + AD/HEL/ULM", layout="wide")
+# ---------- Configuração ----------
+st.set_page_config(page_title="Portugal VFR — Plano de Voo", layout="wide")
 
-# ---------- Estilos ----------
+# ---------- Estilo ----------
 st.markdown("""
 <style>
-.stApp iframe, .stApp .stMarkdown iframe { opacity: 1 !important; filter: none !important; }
-.leaflet-pane, .leaflet-top, .leaflet-bottom { opacity: 1 !important; filter: none !important; }
 h1.title-header {
     font-size: 2rem;
     margin-bottom: 0.2rem;
@@ -28,9 +26,9 @@ h1.title-header {
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Header ----------
-st.markdown("<h1 class='title-header'>Portugal VFR — Localidades + AD/HEL/ULM</h1>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>App por <b>Alexandre Moiteiro</b></div>", unsafe_allow_html=True)
+# ---------- Título ----------
+st.markdown("<h1 class='title-header'>Portugal VFR — Criador de Plano de Voo</h1>", unsafe_allow_html=True)
+st.markdown("<div class='subtitle'>Clica nos pontos do mapa para criar um plano de voo visual.</div>", unsafe_allow_html=True)
 
 # ---------- Helpers ----------
 def dms_to_dd(token: str, is_lon=False):
@@ -54,8 +52,8 @@ def dms_to_dd(token: str, is_lon=False):
         dd = -dd
     return dd
 
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371  # km
+def haversine_nm(lat1, lon1, lat2, lon2):
+    R = 3440.065  # Radius in nautical miles
     phi1, phi2 = radians(lat1), radians(lat2)
     dphi = radians(lat2 - lat1)
     dlambda = radians(lon2 - lon1)
@@ -82,7 +80,7 @@ def parse_ad(df: pd.DataFrame) -> pd.DataFrame:
                 lon_idx = tokens.index(lon_tok); city = " ".join(tokens[lon_idx+1:]) or None
             except ValueError:
                 city = None
-            rows.append({"source":"AD/HEL/ULM","ident":ident,"name":name,"city":city,"lat":lat,"lon":lon})
+            rows.append({"source":"AD","code":ident,"name":name,"city":city,"lat":lat,"lon":lon})
     return pd.DataFrame(rows).dropna(subset=["lat","lon"])
 
 def parse_localidades(df: pd.DataFrame) -> pd.DataFrame:
@@ -106,102 +104,76 @@ def parse_localidades(df: pd.DataFrame) -> pd.DataFrame:
             rows.append({"source":"Localidade","code":code,"name":name,"sector":sector,"lat":lat,"lon":lon})
     return pd.DataFrame(rows).dropna(subset=["lat","lon"])
 
-# ---------- Load Data ----------
+# ---------- Carregamento dos dados ----------
 ad_df = parse_ad(pd.read_csv("AD-HEL-ULM.csv"))
 loc_df = parse_localidades(pd.read_csv("Localidades-Nova-versao-230223.csv"))
 
-# ---------- UI Controls ----------
-col1, col2, col3 = st.columns([1,1,6])
+points_df = pd.concat([ad_df, loc_df], ignore_index=True).dropna(subset=["lat", "lon"])
+point_map = {row["code"]: row for _, row in points_df.iterrows()}
+
+# ---------- Velocidade de cruzeiro ----------
+col1, col2 = st.columns(2)
 with col1:
-    show_ad = st.checkbox("Aeródromos", value=True)
-with col2:
-    show_loc = st.checkbox("Localidades", value=True)
-with col3:
-    query = st.text_input("🔍 Filtrar (código/ident/nome/cidade)", "", placeholder="Ex: ABRAN, LP0078, Porto...")
+    cruise_speed = st.number_input("Velocidade de cruzeiro (knots)", min_value=1, max_value=500, value=100)
 
-def apply_filters(ad_df, loc_df, q):
-    if q:
-        tq = q.lower().strip()
-        ad_df = ad_df[ad_df.apply(lambda r: tq in str(r['name']).lower() or tq in str(r.get('ident','')).lower() or tq in str(r.get('city','')).lower(), axis=1)]
-        loc_df = loc_df[loc_df.apply(lambda r: tq in str(r['name']).lower() or tq in str(r.get('code','')).lower() or tq in str(r.get('sector','')).lower(), axis=1)]
-    return ad_df, loc_df
+# ---------- Estado do plano de voo ----------
+if "flight_plan" not in st.session_state:
+    st.session_state.flight_plan = []
 
-ad_f, loc_f = apply_filters(ad_df, loc_df, query)
+def add_point_to_plan(code):
+    if code not in st.session_state.flight_plan:
+        st.session_state.flight_plan.append(code)
 
-# ---------- Plano de voo (seleção múltipla) ----------
-st.markdown("### ✈️ Criar Plano de Voo")
-flight_points = []
+def clear_plan():
+    st.session_state.flight_plan = []
 
-names_all = []
-point_map = {}
+# ---------- Mapa inicial ----------
+center_lat = points_df["lat"].mean()
+center_lon = points_df["lon"].mean()
+m = folium.Map(location=[center_lat, center_lon], zoom_start=6, control_scale=True)
 
-for df in [ad_f, loc_f]:
-    for _, row in df.iterrows():
-        label = f"{row.get('name')} ({row.get('ident', row.get('code', ''))})"
-        names_all.append(label)
-        point_map[label] = (row["lat"], row["lon"])
+cluster = MarkerCluster(name="Pontos").add_to(m)
 
-selected_labels = st.multiselect("Seleciona os pontos do plano de voo na ordem desejada:", names_all)
+for _, row in points_df.iterrows():
+    tooltip = f"<b>{row['code']}</b><br/>{row['name']}<br/>Lat: {row['lat']:.5f}<br/>Lon: {row['lon']:.5f}"
+    folium.Marker(
+        location=[row["lat"], row["lon"]],
+        icon=folium.Icon(color="blue", icon="info-sign"),
+        tooltip=tooltip,
+        popup=folium.Popup(f"<b>Adicionar {row['code']}</b>", max_width=300),
+    ).add_to(cluster)
 
-for label in selected_labels:
-    latlon = point_map.get(label)
-    if latlon:
-        flight_points.append({"label": label, "lat": latlon[0], "lon": latlon[1]})
+# ---------- Interação: clique no mapa ----------
+map_data = st_folium(m, width=None, height=600)
 
-# ---------- Center map ----------
-if len(ad_f) + len(loc_f) > 0:
-    mean_lat = pd.concat([ad_f["lat"], loc_f["lat"]]).mean()
-    mean_lon = pd.concat([ad_f["lon"], loc_f["lon"]]).mean()
-else:
-    mean_lat, mean_lon = 39.5, -8.0
+if map_data and map_data.get("last_object_clicked"):
+    lat_clicked = map_data["last_object_clicked"]["lat"]
+    lon_clicked = map_data["last_object_clicked"]["lng"]
+    # Tenta encontrar ponto mais próximo (pequena margem de erro)
+    for code, row in point_map.items():
+        if abs(row["lat"] - lat_clicked) < 0.0005 and abs(row["lon"] - lon_clicked) < 0.0005:
+            add_point_to_plan(code)
+            break
 
-# ---------- Map setup ----------
-m = folium.Map(location=[mean_lat, mean_lon], zoom_start=6, tiles=None, control_scale=True)
-sat_tiles = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-sat_attr = "Tiles © Esri, USDA, USGS, AeroGRID, IGN"
-folium.TileLayer(tiles=sat_tiles, attr=sat_attr, name="Satélite", control=False, opacity=1).add_to(m)
+# ---------- Plano de voo desenhado ----------
+if st.session_state.flight_plan:
+    coords = [(point_map[code]["lat"], point_map[code]["lon"]) for code in st.session_state.flight_plan]
+    folium.PolyLine(coords, color="red", weight=4, opacity=0.8).add_to(m)
 
-# ---------- Localidades ----------
-if show_loc and not loc_f.empty:
-    cluster_loc = MarkerCluster(name="Localidades", show=True, disableClusteringAtZoom=10)
-    for _, r in loc_f.iterrows():
-        tooltip_html = f"<b>{r.get('name','')}</b><br/>Sector: {r.get('sector','')}<br/>Código: {r.get('code','')}<br/>Lat: {r['lat']:.5f}<br/>Lon: {r['lon']:.5f}"
-        folium.Marker(
-            location=[r["lat"], r["lon"]],
-            icon=folium.Icon(color="green", icon="info-sign"),
-            tooltip=tooltip_html
-        ).add_to(cluster_loc)
-    cluster_loc.add_to(m)
-
-# ---------- AD/HEL/ULM ----------
-if show_ad and not ad_f.empty:
-    cluster_ad = MarkerCluster(name="AD/HEL/ULM", show=True, disableClusteringAtZoom=10)
-    for _, r in ad_f.iterrows():
-        tooltip_html = f"<b>{r.get('name','')}</b><br/>Ident: {r.get('ident','')}<br/>Cidade: {r.get('city','')}<br/>Lat: {r['lat']:.5f}<br/>Lon: {r['lon']:.5f}"
-        folium.Marker(
-            location=[r["lat"], r["lon"]],
-            icon=folium.Icon(icon="plane", prefix="fa", color="gray"),
-            tooltip=tooltip_html
-        ).add_to(cluster_ad)
-    cluster_ad.add_to(m)
-
-# ---------- Traçar plano de voo ----------
-if len(flight_points) >= 2:
-    coords = [(p["lat"], p["lon"]) for p in flight_points]
-    folium.PolyLine(coords, color="blue", weight=4, opacity=0.8, tooltip="Plano de voo").add_to(m)
-
-    total_distance = 0
+    total_nm = 0
     for i in range(len(coords)-1):
-        d = haversine(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1])
-        total_distance += d
+        d = haversine_nm(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1])
+        total_nm += d
 
-    st.success(f"🛫 Distância total do plano de voo: {total_distance:.1f} km")
+    time_hours = total_nm / cruise_speed
+    hours = int(time_hours)
+    minutes = int((time_hours - hours) * 60)
 
-# ---------- Mostrar mapa ----------
-folium.LayerControl(collapsed=True).add_to(m)
-st_folium(m, width=None, height=720)
+    st.markdown("### 📋 Plano de Voo")
+    st.write("→ ".join(st.session_state.flight_plan))
+    st.success(f"Distância total: **{total_nm:.1f} NM** — Tempo estimado: **{hours}h {minutes}min** a {cruise_speed} kt")
 
-# ---------- Rodapé ----------
-st.caption(f"📍 Total: {len(ad_df)} AD/HEL/ULM | {len(loc_df)} Localidades — Filtro → AD: {len(ad_f)} | Localidades: {len(loc_f)}.")
+    if st.button("🗑️ Limpar plano de voo"):
+        clear_plan()
 
 
