@@ -121,21 +121,24 @@ def parse_notam_dates(text: str):
 
     from_str, to_str = match.group(1), match.group(2).strip()
 
-    # Limpa sufixos e zonas (UTC, EST, etc)
+    # Limpa sufixos (st/nd/rd/th)
     from_str = re.sub(r"(st|nd|rd|th)", "", from_str)
-    to_str_clean = re.sub(r"(st|nd|rd|th)", "", to_str)
-    to_str_clean = re.sub(r"\b(UTC|EST|EDT|WEST|Z)\b", "", to_str_clean, flags=re.IGNORECASE).strip()
+    to_str = re.sub(r"(st|nd|rd|th)", "", to_str)
+
+    # Remove zonas horárias (UTC, EST, etc.)
+    to_str = re.sub(r"\b(UTC|EST|EDT|WEST|Z)\b", "", to_str, flags=re.IGNORECASE).strip()
+    to_str = re.sub(r"\s+", " ", to_str).strip()
 
     try:
         from_dt = datetime.strptime(from_str, "%d %b %Y %H:%M")
     except ValueError:
         from_dt = None
 
-    if to_str.upper().strip() == "PERM":
+    if to_str.upper() == "PERM":
         to_dt = "PERM"
     else:
         try:
-            to_dt = datetime.strptime(to_str_clean, "%d %b %Y %H:%M")
+            to_dt = datetime.strptime(to_str, "%d %b %Y %H:%M")
         except ValueError:
             to_dt = None
 
@@ -174,7 +177,7 @@ for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
         else:
             for n in items:
                 notam_text = n.strip()
-                # NILL NOTAM
+                # NOTAM NILL
                 if notam_text.upper() == "NILL":
                     badge_html = '<span class="badge badge-nill">🚫 Sem NOTAMs</span>'
                     st.markdown(f'<div class="monos">{badge_html}<br>{notam_text}</div>', unsafe_allow_html=True)
