@@ -50,7 +50,7 @@ def parse_icaos(s: str) -> List[str]:
     return [t.upper() for t in tokens if t]
 
 # ---------- Image helpers ----------
-def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 300):
+def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 450):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf"); page = doc.load_page(0)
     png = page.get_pixmap(dpi=dpi).tobytes("png")
     return Image.open(io.BytesIO(png)).convert("RGB").copy()
@@ -411,7 +411,7 @@ def pdf_embed_pdf_pages(pdf: FPDF, pdf_bytes: bytes, title: str, orientation: st
     pages = range(total) if max_pages is None else range(min(total, max_pages))
     for i in pages:
         page = doc.load_page(i)
-        png = page.get_pixmap(dpi=300).tobytes("png")
+        png = page.get_pixmap(dpi=450).tobytes("png")
         img = Image.open(io.BytesIO(png)).convert("RGB")
         bio = io.BytesIO(); img.save(bio, format="PNG"); bio.seek(0)
         pdf.add_page(orientation=orientation)
@@ -613,54 +613,44 @@ with col_gamet[0]:
         else:
             st.error(msg)
 
-# ---------- Charts upload (melhorado) ----------
+# ---------- Charts upload (manual, preview menor) ----------
 st.markdown("#### Charts")
 st.caption("Upload SIGWX / SPC / Wind & Temp. Accepts PDF/PNG/JPG/JPEG/GIF.")
 use_ai_for_charts = st.toggle("Analisar charts com IA", value=True, help="Marcado por omissao")
-uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg","gif"],
-                           accept_multiple_files=True, label_visibility="collapsed")
+preview_w = st.slider("Largura da pré‑visualização (px)", min_value=240, max_value=640, value=420, step=10)
+uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=True, label_visibility="collapsed")
+
+# Títulos base por tipo (evita 'Weather Chart')
+def _base_title_for_kind(k: str) -> str:
+    return {
+        "SIGWX": "Significant Weather Chart (SIGWX)",
+        "SPC": "Surface Pressure Chart (SPC)",
+        "Wind & Temp": "Wind and Temperature Chart",
+        "Other": ""
+    }.get(k, "")
 
 charts: List[Dict[str,Any]] = []
 if uploads:
-    st.markdown("**Pré-visualização e metadados detetados**")
     for idx, f in enumerate(uploads):
-        # Ler bytes uma única vez
-        file_bytes = f.read()
+        raw = f.read()
         mime = f.type or ""
-        img_png = ensure_png_from_bytes(file_bytes, mime)
-        text_hint = ""
-        if (mime or "").lower() == "application/pdf":
-            text_hint = extract_pdf_text_first_page(file_bytes)
+        img_png = ensure_png_from_bytes(raw, mime)
         name = f.name or "(sem nome)"
-        detected_kind = guess_chart_kind(name, text_hint)
-        detected_valid = extract_validity(name + "\n" + text_hint)
-        detected_region = detect_region(name + "\n" + text_hint)
-        default_title = derive_default_title(detected_kind, name, text_hint)
-        default_sub = " — ".join([x for x in [detected_region, detected_valid] if x])
 
-        col_img, col_meta = st.columns([0.45, 0.55])
+        col_img, col_meta = st.columns([0.35, 0.65])
         with col_img:
             try:
-                st.image(img_png.getvalue(), caption=name, use_column_width=True)
+                st.image(img_png.getvalue(), caption=name, width=preview_w)
             except Exception:
                 st.write(name)
         with col_meta:
-            st.text(f"Ficheiro: {name}")
-            kind_options = ["Auto (detetar)"] + _DEF_KINDS
-            try:
-                init_idx = kind_options.index("Auto (detetar)")
-            except ValueError:
-                init_idx = 0
-            kind_sel = st.selectbox(
-                f"Tipo do chart #{idx+1}", kind_options,
-                index=init_idx, key=f"kind_{idx}"
-            )
-            final_kind = detected_kind if kind_sel == "Auto (detetar)" else kind_sel
-            title = st.text_input("Título", value=default_title, key=f"title_{idx}")
-            subtitle = st.text_input("Subtítulo (opcional)", value=default_sub, key=f"subtitle_{idx}")
+            kind = st.selectbox(f"Tipo do chart #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"], index=0, key=f"kind_{idx}")
+            title_default = _base_title_for_kind(kind)
+            title = st.text_input("Título", value=title_default, key=f"title_{idx}")
+            subtitle = st.text_input("Subtítulo (opcional)", value="", key=f"subtitle_{idx}")
             order_val = st.number_input("Ordem", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
         charts.append({
-            "kind": final_kind,
+            "kind": kind,
             "title": title,
             "subtitle": subtitle,
             "img_png": img_png,
