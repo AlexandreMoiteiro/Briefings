@@ -1,56 +1,65 @@
-from typing import Dict, Any, List
-from datetime import datetime
-import streamlit as st, requests, json, re
 
-# --------------------------- CONFIGURAÇÃO ---------------------------
+from typing import Dict, Any, List
+import streamlit as st, requests, json
 
 st.set_page_config(page_title="NOTAMs", layout="wide")
 
+# 💄 CSS Style
 st.markdown("""
 <style>
-[data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
-[data-testid="stSidebarCollapseButton"] { display:none !important; }
-:root {
-    --line: #e5e7eb;
-    --muted: #6b7280;
-    --bg: #f9fafb;
-    --notam-border: #d1d5db;
-    --notam-bg: #ffffff;
-    --notam-font: #111827;
-    --active: #10b981;
-    --expired: #ef4444;
-    --nill: #9ca3af;
+[data-testid="stSidebar"], [data-testid="stSidebarNav"], [data-testid="stSidebarCollapseButton"] {
+    display:none !important;
 }
-body, .main { background-color: var(--bg); }
-.page-title { font-size: 2.5rem; font-weight: 800; margin: 0 0 1rem; }
-.subtle { color: var(--muted); margin-bottom: 1rem; }
+:root {
+    --line:#e5e7eb;
+    --muted:#6b7280;
+    --bg-section:#f9fafb;
+    --border:#d1d5db;
+    --accent:#f97316;
+}
+.page-title {
+    font-size:2.5rem;
+    font-weight:700;
+    margin-bottom:0.25rem;
+    color:#111827;
+}
+.subtle {
+    color:var(--muted);
+    margin-bottom:1rem;
+    font-size:0.9rem;
+}
+.notam-box {
+    background-color: white;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+.icao-section {
+    background-color: var(--bg-section);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 2rem;
+}
 .monos {
     font-family: ui-monospace, Menlo, Consolas, monospace;
     white-space: pre-wrap;
-    background: var(--notam-bg);
-    border: 1px solid var(--notam-border);
-    padding: 0.75rem 1rem;
-    border-radius: 6px;
-    color: var(--notam-font);
-    margin-bottom: 1rem;
+    color: #1f2937;
     font-size: 0.95rem;
-}
-.badge {
-    font-weight: bold;
-    display: inline-block;
     margin-bottom: 0.5rem;
-    padding: 0.2rem 0.5rem;
-    border-radius: 0.375rem;
-    font-size: 0.75rem;
 }
-.badge-active { background-color: var(--active); color: white; }
-.badge-expired { background-color: var(--expired); color: white; }
-.badge-nill { background-color: var(--nill); color: white; }
+.input-row {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1rem;
+    margin-bottom: 2rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# --------------------------- GIST CONFIG ---------------------------
-
+# ✅ Functions
 def notam_gist_config_ok() -> bool:
     token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get("NOTAM_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
@@ -74,8 +83,7 @@ def load_notams() -> Dict[str, Any]:
         files = r.json().get("files", {})
         obj = files.get(fn) or {}
         content = (obj.get("content") or "").strip()
-        if not content:
-            return {"map": {}, "updated_utc": None}
+        if not content: return {"map": {}, "updated_utc": None}
         js = json.loads(content)
         if isinstance(js, dict) and "map" in js:
             return {"map": js.get("map") or {}, "updated_utc": js.get("updated_utc")}
@@ -87,79 +95,27 @@ def load_notams() -> Dict[str, Any]:
     except Exception:
         return {"map": {}, "updated_utc": None}
 
-# --------------------------- DATA PARSING ---------------------------
-
-def parse_notam_dates(text: str):
-    match = re.search(r"FROM:\s*(.*?)\s*TO:\s*(.*?)($|\n)", text, re.IGNORECASE)
-    if not match:
-        return None, None
-
-    from_raw, to_raw = match.group(1), match.group(2)
-
-    def clean_date_str(s: str) -> str:
-        s = re.sub(r'\b(\d{1,2})(st|nd|rd|th)\b', r'\1', s)  # remove sufixos
-        s = re.sub(r"\b(UTC|EST|EDT|WEST|CEST|GMT|Z)\b", "", s, flags=re.IGNORECASE)
-        s = re.sub(r"\s+", " ", s).strip()
-        return s
-
-    from_str = clean_date_str(from_raw)
-    to_str = clean_date_str(to_raw)
-
-    try:
-        from_dt = datetime.strptime(from_str, "%d %b %Y %H:%M")
-    except Exception:
-        from_dt = None
-
-    if to_str.upper() == "PERM":
-        to_dt = "PERM"
-    else:
-        try:
-            to_dt = datetime.strptime(to_str, "%d %b %Y %H:%M")
-        except Exception:
-            to_dt = None
-
-    return from_dt, to_dt
-
-def is_active(from_dt, to_dt):
-    now = datetime.utcnow()
-    if to_dt == "PERM":
-        return True
-    if isinstance(to_dt, datetime):
-        return to_dt > now
-    return False
-
-# --------------------------- INTERFACE ---------------------------
-
+# ✅ Title
 st.markdown('<div class="page-title">NOTAMs</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtle">Display of NOTAMs stored in the configured GitHub Gist</div>', unsafe_allow_html=True)
 
-col = st.columns([0.75, 0.25])
-with col[0]:
-    icaos_str = st.text_input("ICAOs (separados por vírgulas)", value="LPSO, LPCB, LPEV")
-with col[1]:
-    if st.button("🔄 Atualizar"):
-        st.cache_data.clear()
+# ✅ Input section
+st.markdown('<div class="input-row">', unsafe_allow_html=True)
+icaos_str = st.text_input("Enter ICAO codes (comma-separated)", value="LPSO, LPCB, LPEV", label_visibility="collapsed")
+if st.button("🔄 Refresh"):
+    st.cache_data.clear()
+st.markdown('</div>', unsafe_allow_html=True)
 
+# ✅ Display NOTAMs
 data = load_notams()
 m = data.get("map") or {}
 
 for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
+    st.markdown(f'<div class="icao-section"><h4>{icao}</h4>', unsafe_allow_html=True)
     items: List[str] = list((m.get(icao) or []))
-    with st.expander(f"📍 {icao} ({len(items)} NOTAM{'s' if len(items) != 1 else ''})", expanded=True):
-        if not items:
-            st.markdown('<div class="subtle">Nenhum NOTAM encontrado.</div>', unsafe_allow_html=True)
-            continue
-
+    if not items:
+        st.write("— No NOTAMs found —")
+    else:
         for n in items:
-            notam_text = n.strip()
-            if notam_text.upper() == "NILL":
-                badge_html = '<span class="badge badge-nill">🚫 Sem NOTAMs</span>'
-                st.markdown(f'<div class="monos">{badge_html}<br>{notam_text}</div>', unsafe_allow_html=True)
-                continue
-
-            from_dt, to_dt = parse_notam_dates(notam_text)
-            active = is_active(from_dt, to_dt)
-            status = "🟢 Ativo" if active else "🔴 Expirado"
-            badge_class = "badge-active" if active else "badge-expired"
-            badge_html = f'<span class="badge {badge_class}">{status}</span>'
-
-            st.markdown(f'<div class="monos">{badge_html}<br>{notam_text}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="notam-box monos">{n}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
