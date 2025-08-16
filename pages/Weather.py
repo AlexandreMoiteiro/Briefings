@@ -1,14 +1,13 @@
-# pages/Weather.py — METAR/TAF (CheckWX) + SIGMET LPPC (AWC) + GAMET (Gist)
 from typing import List, Dict, Any, Optional
 import datetime as dt, json, requests
 from zoneinfo import ZoneInfo
 import streamlit as st
 import re
 
-# ---------- Page ----------
+# ---------- Página ----------
 st.set_page_config(page_title="Weather", layout="wide")
 
-# ---------- Styles ----------
+# ---------- Estilos ----------
 st.markdown("""
 <style>
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
@@ -22,7 +21,7 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
   --mvfr:#f59e0b;
   --ifr:#ef4444;
   --lifr:#7c3aed;
-  --gamet:#0ea5e9;
+  --gamet:#16a34a;
   --expired:#ef4444;
 }
 
@@ -30,14 +29,16 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
 .subtle { color:var(--muted); margin:0 0 1.5rem }
 
 .card {
-  border:1px solid var(--line);
-  border-radius:14px;
-  padding:16px 18px;
-  background:#fff;
-  margin-bottom:14px;
-  box-shadow: 0 2px 5px rgba(0,0,0,0.04);
+  padding:10px 0;
+  border-bottom:1px solid var(--line);
+  margin-bottom:18px;
 }
-.card h3 { margin:0 0 10px; font-size:1.05rem }
+.card:last-of-type { border-bottom: none }
+
+.card h3 {
+  margin:0 0 6px;
+  font-size:1.05rem;
+}
 
 .badge {
   display:inline-block;
@@ -100,7 +101,6 @@ def zulu_plus_pt(d: Optional[dt.datetime]) -> str:
     return f"{d_utc.strftime('%Y-%m-%d %H:%MZ')} ({d_pt.strftime('%H:%M')} Portugal)"
 
 def parse_gamet_validity(text: str) -> Optional[str]:
-    """Extracts and checks if the GAMET is still active."""
     match = re.search(r'VALID (\d{6})/(\d{6})', text)
     if not match: return None
     start_raw, end_raw = match.groups()
@@ -132,7 +132,6 @@ def fetch_metar_raw(icao: str) -> str:
         if not hdr: return ""
         r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=hdr, timeout=10)
         r.raise_for_status(); data = r.json().get("data", [])
-        if not data: return ""
         return str(data[0]) if not isinstance(data[0], dict) else data[0].get("raw") or ""
     except Exception: return ""
 
@@ -188,11 +187,10 @@ def load_gamet() -> Dict[str,Any]:
     except Exception: pass
     return {"text":"", "updated_utc":None}
 
-# ---------- UI: Header ----------
+# ---------- UI ----------
 st.markdown('<div class="page-title">Weather</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtle">METAR · TAF · SIGMET (LPPC) · GAMET</div>', unsafe_allow_html=True)
 
-# ---------- Controls ----------
 try:
     raw = st.query_params.get("icao", "")
     if isinstance(raw, list): raw = ",".join(raw)
@@ -223,7 +221,7 @@ for icao in icaos:
     st.markdown(f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n<strong>TAF</strong> {taf_raw or "—"}</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------- SIGMET ----------
+# ---------- SIGMET LPPC ----------
 st.subheader("SIGMET (LPPC)")
 sigs = fetch_sigmet_lppc()
 if not sigs:
@@ -242,7 +240,6 @@ if text:
     st.markdown(f'<div class="card monos">{validity_line}{text}</div>', unsafe_allow_html=True)
 else:
     st.write("—")
-
 
 
 
