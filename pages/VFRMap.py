@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import folium
@@ -6,19 +5,31 @@ from streamlit_folium import st_folium
 from folium.plugins import MarkerCluster
 import re
 
+# ---------- Page config ----------
 st.set_page_config(page_title="Portugal VFR — Localidades + AD/HEL/ULM", layout="wide")
 
-# --- CSS: ensure no accidental opacity ---
+# ---------- Custom CSS ----------
 st.markdown("""
 <style>
 .stApp iframe, .stApp .stMarkdown iframe { opacity: 1 !important; filter: none !important; }
 .leaflet-pane, .leaflet-top, .leaflet-bottom { opacity: 1 !important; filter: none !important; }
+h1.title-header {
+    font-size: 2rem;
+    margin-bottom: 0.2rem;
+}
+.subtitle {
+    opacity: 0.9;
+    margin-top: 0px;
+    margin-bottom: 18px;
+    font-size: 0.95rem;
+    color: #6b7280;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Brand / header ----------
-st.markdown("<h1 style='margin-bottom:0'>Portugal VFR — Localidades + AD/HEL/ULM</h1>", unsafe_allow_html=True)
-st.markdown("<div style='opacity:0.95;margin-top:2px;margin-bottom:14px'>App by <b>Alexandre Moiteiro</b></div>", unsafe_allow_html=True)
+# ---------- Header ----------
+st.markdown("<h1 class='title-header'>Portugal VFR — Localidades + AD/HEL/ULM</h1>", unsafe_allow_html=True)
+st.markdown("<div class='subtitle'>App por <b>Alexandre Moiteiro</b></div>", unsafe_allow_html=True)
 
 # ---------- Helpers ----------
 def dms_to_dd(token: str, is_lon=False):
@@ -97,7 +108,7 @@ with col1:
 with col2:
     show_loc = st.checkbox("Localidades", value=True)
 with col3:
-    query = st.text_input("Filtrar (código/ident/nome/cidade)", "", placeholder="Ex.: ABRAN, LP0078, Porto...")
+    query = st.text_input("🔍 Filtrar (código/ident/nome/cidade)", "", placeholder="Ex: ABRAN, LP0078, Porto...")
 
 def apply_filters(ad_df, loc_df, q):
     if q:
@@ -108,27 +119,27 @@ def apply_filters(ad_df, loc_df, q):
 
 ad_f, loc_f = apply_filters(ad_df, loc_df, query)
 
-# ---------- Center ----------
+# ---------- Map Center ----------
 if len(ad_f) + len(loc_f) > 0:
     mean_lat = pd.concat([ad_f["lat"], loc_f["lat"]]).mean()
     mean_lon = pd.concat([ad_f["lon"], loc_f["lon"]]).mean()
 else:
     mean_lat, mean_lon = 39.5, -8.0
 
-# ---------- Satellite basemap ----------
+# ---------- Folium Map Setup ----------
 m = folium.Map(location=[mean_lat, mean_lon], zoom_start=6, tiles=None, control_scale=True)
 sat_tiles = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-sat_attr = "Tiles &copy; Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community"
+sat_attr = "Tiles © Esri, USDA, USGS, AeroGRID, IGN"
 folium.TileLayer(tiles=sat_tiles, attr=sat_attr, name="Satélite", control=False, opacity=1).add_to(m)
 
-# ---------- Layers ----------
+# ---------- Localidades ----------
 if show_loc and not loc_f.empty:
     cluster_loc = MarkerCluster(name="Localidades", show=True, disableClusteringAtZoom=10)
     for _, r in loc_f.iterrows():
         code = r.get("code") or ""
-        tooltip_html = "<b>{}</b><br/>Sector: {}<br/>Código: {}".format(r.get('name',''), r.get('sector',''), code)
+        tooltip_html = f"<b>{r.get('name','')}</b><br/>Sector: {r.get('sector','')}<br/>Código: {code}"
         label_html = (
-            '<div style="font-size:11px;font-weight:600;color:#ffffff;'
+            '<div style="font-size:11px;font-weight:600;color:#fff;'
             'background:rgba(0,0,0,0.60);padding:2px 6px;border-radius:4px;'
             'border:1px solid rgba(255,255,255,0.35);backdrop-filter:blur(1px);">{}</div>'.format(code)
         )
@@ -139,18 +150,25 @@ if show_loc and not loc_f.empty:
         ).add_to(cluster_loc)
     cluster_loc.add_to(m)
 
+# ---------- AD/HEL/ULM ----------
 if show_ad and not ad_f.empty:
     cluster_ad = MarkerCluster(name="AD/HEL/ULM", show=True, disableClusteringAtZoom=10)
     for _, r in ad_f.iterrows():
-        tooltip_html = "<b>{}</b><br/>Ident: {}<br/>Cidade: {}".format(r.get('name',''), r.get('ident',''), r.get('city',''))
+        tooltip_html = f"<b>{r.get('name','')}</b><br/>Ident: {r.get('ident','')}<br/>Cidade: {r.get('city','')}"
         folium.Marker(
             location=[r["lat"], r["lon"]],
-            icon=folium.Icon(icon="plane", prefix="fa", color="lightgray"),
+            icon=folium.Icon(icon="plane", prefix="fa", color="gray"),
             tooltip=tooltip_html
         ).add_to(cluster_ad)
     cluster_ad.add_to(m)
 
+# ---------- Layer control + Display ----------
 folium.LayerControl(collapsed=True).add_to(m)
-
 st_folium(m, width=None, height=720)
-st.caption(f"Carregados {len(ad_df)} AD/HEL/ULM e {len(loc_df)} Localidades. Filtro → AD: {len(ad_f)} | Localidades: {len(loc_f)}.")
+
+# ---------- Footer summary ----------
+if len(ad_f) == 0 and len(loc_f) == 0:
+    st.info("🔍 Nenhum resultado encontrado com esse filtro.")
+else:
+    st.caption(f"📍 Total carregado: {len(ad_df)} AD/HEL/ULM, {len(loc_df)} Localidades. Filtro ativo → AD: {len(ad_f)} | Localidades: {len(loc_f)}.")
+
