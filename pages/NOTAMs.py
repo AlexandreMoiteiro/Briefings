@@ -5,7 +5,7 @@ import streamlit as st, requests, json, re
 # Configuração da página
 st.set_page_config(page_title="NOTAMs", layout="wide")
 
-# Estilo CSS customizado
+# Estilo CSS
 st.markdown("""
 <style>
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
@@ -82,7 +82,7 @@ def notam_gist_config_ok() -> bool:
     fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
     return bool(token and gid and fn)
 
-# Carrega os NOTAMs (cache de 60 segundos)
+# Carrega os NOTAMs
 @st.cache_data(ttl=60)
 def load_notams() -> Dict[str, Any]:
     if not notam_gist_config_ok():
@@ -113,20 +113,20 @@ def load_notams() -> Dict[str, Any]:
     except Exception:
         return {"map": {}, "updated_utc": None}
 
-# Extrai datas FROM / TO
+# Corrige datas e remove fuso horário/sufixos
 def parse_notam_dates(text: str):
-    match = re.search(r"FROM:\s*(\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+\d{4}\s+\d{2}:\d{2})\s*TO:\s*([A-Za-z0-9:\s]+)", text)
+    match = re.search(r"FROM:\s*(.*?)\s*TO:\s*(.*?)($|\s)", text, re.IGNORECASE)
     if not match:
         return None, None
 
     from_str, to_str = match.group(1), match.group(2).strip()
 
-    # Limpa sufixos (st/nd/rd/th)
-    from_str = re.sub(r"(st|nd|rd|th)", "", from_str)
-    to_str = re.sub(r"(st|nd|rd|th)", "", to_str)
+    # Remove sufixos: st, nd, rd, th
+    from_str = re.sub(r'\b(\d{1,2})(st|nd|rd|th)\b', r'\1', from_str)
+    to_str = re.sub(r'\b(\d{1,2})(st|nd|rd|th)\b', r'\1', to_str)
 
-    # Remove zonas horárias (UTC, EST, etc.)
-    to_str = re.sub(r"\b(UTC|EST|EDT|WEST|Z)\b", "", to_str, flags=re.IGNORECASE).strip()
+    # Remove zonas horárias
+    to_str = re.sub(r"\b(UTC|EST|EDT|WEST|CEST|GMT|Z)\b", "", to_str, flags=re.IGNORECASE).strip()
     to_str = re.sub(r"\s+", " ", to_str).strip()
 
     try:
@@ -144,7 +144,7 @@ def parse_notam_dates(text: str):
 
     return from_dt, to_dt
 
-# Verifica se o NOTAM está ativo
+# Verifica se está ativo
 def is_active(from_dt, to_dt):
     now = datetime.utcnow()
     if to_dt == "PERM":
@@ -156,7 +156,7 @@ def is_active(from_dt, to_dt):
 # Título
 st.markdown('<div class="page-title">NOTAMs</div>', unsafe_allow_html=True)
 
-# Entrada de ICAOs e botão Atualizar
+# Entrada de ICAOs
 col = st.columns([0.75, 0.25])
 with col[0]:
     icaos_str = st.text_input("ICAOs (separados por vírgulas)", value="LPSO, LPCB, LPEV")
@@ -164,11 +164,11 @@ with col[1]:
     if st.button("🔄 Atualizar"):
         st.cache_data.clear()
 
-# Carrega dados
+# Carrega os dados
 data = load_notams()
 m = data.get("map") or {}
 
-# Exibe NOTAMs
+# Mostra NOTAMs
 for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
     items: List[str] = list((m.get(icao) or []))
     with st.expander(f"📍 {icao} ({len(items)} NOTAM{'s' if len(items) != 1 else ''})", expanded=True):
@@ -177,7 +177,6 @@ for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
         else:
             for n in items:
                 notam_text = n.strip()
-                # NOTAM NILL
                 if notam_text.upper() == "NILL":
                     badge_html = '<span class="badge badge-nill">🚫 Sem NOTAMs</span>'
                     st.markdown(f'<div class="monos">{badge_html}<br>{notam_text}</div>', unsafe_allow_html=True)
@@ -190,3 +189,4 @@ for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
                 badge_html = f'<span class="badge {badge_class}">{status}</span>'
 
                 st.markdown(f'<div class="monos">{badge_html}<br>{notam_text}</div>', unsafe_allow_html=True)
+
