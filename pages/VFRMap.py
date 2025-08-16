@@ -5,32 +5,26 @@ from streamlit_folium import st_folium
 from folium.plugins import MarkerCluster
 import re
 from math import radians, sin, cos, sqrt, atan2
+from datetime import timedelta
 
-# ---------- Configuração ----------
+# Configurar página
 st.set_page_config(page_title="Portugal VFR — Plano de Voo", layout="wide")
 
-# ---------- Estilo ----------
-st.markdown("""
-<style>
-h1.title-header {
-    font-size: 2rem;
-    margin-bottom: 0.2rem;
-}
-.subtitle {
-    opacity: 0.9;
-    margin-top: 0px;
-    margin-bottom: 18px;
-    font-size: 0.95rem;
-    color: #6b7280;
-}
-</style>
-""", unsafe_allow_html=True)
+# Sessão para plano de voo
+if "rota" not in st.session_state:
+    st.session_state["rota"] = []
 
-# ---------- Título ----------
-st.markdown("<h1 class='title-header'>Portugal VFR — Criador de Plano de Voo</h1>", unsafe_allow_html=True)
-st.markdown("<div class='subtitle'>Clica nos pontos do mapa para criar um plano de voo visual.</div>", unsafe_allow_html=True)
+# Distância Haversine (NM)
+def haversine_nm(lat1, lon1, lat2, lon2):
+    R = 6371.0  # raio da Terra em km
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    km = R * c
+    return km * 0.539957  # km para NM
 
-# ---------- Helpers ----------
+# Conversor de coordenadas
 def dms_to_dd(token: str, is_lon=False):
     token = str(token).strip()
     m = re.match(r"^(\d+(?:\.\d+)?)([NSEW])$", token, re.I)
@@ -52,14 +46,7 @@ def dms_to_dd(token: str, is_lon=False):
         dd = -dd
     return dd
 
-def haversine_nm(lat1, lon1, lat2, lon2):
-    R = 3440.065  # Radius in nautical miles
-    phi1, phi2 = radians(lat1), radians(lat2)
-    dphi = radians(lat2 - lat1)
-    dlambda = radians(lon2 - lon1)
-    a = sin(dphi/2)**2 + cos(phi1)*cos(phi2)*sin(dlambda/2)**2
-    return R * (2 * atan2(sqrt(a), sqrt(1 - a)))
-
+# Parse de dados
 def parse_ad(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for line in df.iloc[:,0].dropna().tolist():
@@ -80,7 +67,8 @@ def parse_ad(df: pd.DataFrame) -> pd.DataFrame:
                 lon_idx = tokens.index(lon_tok); city = " ".join(tokens[lon_idx+1:]) or None
             except ValueError:
                 city = None
-            rows.append({"source":"AD","code":ident,"name":name,"city":city,"lat":lat,"lon":lon})
+            code = ident or name
+            rows.append({"source":"AD","code":code,"name":name,"city":city,"lat":lat,"lon":lon})
     return pd.DataFrame(rows).dropna(subset=["lat","lon"])
 
 def parse_localidades(df: pd.DataFrame) -> pd.DataFrame:
@@ -104,76 +92,94 @@ def parse_localidades(df: pd.DataFrame) -> pd.DataFrame:
             rows.append({"source":"Localidade","code":code,"name":name,"sector":sector,"lat":lat,"lon":lon})
     return pd.DataFrame(rows).dropna(subset=["lat","lon"])
 
-# ---------- Carregamento dos dados ----------
+# Carregar dados
 ad_df = parse_ad(pd.read_csv("AD-HEL-ULM.csv"))
 loc_df = parse_localidades(pd.read_csv("Localidades-Nova-versao-230223.csv"))
+all_df = pd.concat([ad_df, loc_df], ignore_index=True)
 
-points_df = pd.concat([ad_df, loc_df], ignore_index=True).dropna(subset=["lat", "lon"])
-point_map = {row["code"]: row for _, row in points_df.iterrows()}
-
-# ---------- Velocidade de cruzeiro ----------
-col1, col2 = st.columns(2)
+# Filtros
+col1, col2, col3 = st.columns([1,1,6])
 with col1:
-    cruise_speed = st.number_input("Velocidade de cruzeiro (knots)", min_value=1, max_value=500, value=100)
+    show_ad = st.checkbox("AD/HEL/ULM", value=True)
+with col2:
+    show_loc = st.checkbox("Localidades", value=True)
+with col3:
+    filtro = st.text_input("🔍 Filtro (código, nome, cidade)", "")
 
-# ---------- Estado do plano de voo ----------
-if "flight_plan" not in st.session_state:
-    st.session_state.flight_plan = []
+if filtro:
+    f = filtro.lower()
+    ad_df = ad_df[ad_df.apply(lambda r: f in str(r["code"]).lower() or f in str(r["name"]).lower() or f in str(r.get("city","")).lower(), axis=1)]
+    loc_df = loc_df[loc_df.apply(lambda r: f in str(r["code"]).lower() or f in str(r["name"]).lower() or f in str(r.get("sector","")).lower(), axis=1)]
 
-def add_point_to_plan(code):
-    if code not in st.session_state.flight_plan:
-        st.session_state.flight_plan.append(code)
+# Mapa central
+mean_lat = all_df["lat"].mean()
+mean_lon = all_df["lon"].mean()
+m = folium.Map(location=[mean_lat, mean_lon], zoom_start=6, control_scale=True)
 
-def clear_plan():
-    st.session_state.flight_plan = []
-
-# ---------- Mapa inicial ----------
-center_lat = points_df["lat"].mean()
-center_lon = points_df["lon"].mean()
-m = folium.Map(location=[center_lat, center_lon], zoom_start=6, control_scale=True)
-
+# Agrupar pontos
 cluster = MarkerCluster(name="Pontos").add_to(m)
 
-for _, row in points_df.iterrows():
-    tooltip = f"<b>{row['code']}</b><br/>{row['name']}<br/>Lat: {row['lat']:.5f}<br/>Lon: {row['lon']:.5f}"
+# Função de popup com botão
+def make_popup(p):
+    info = f"<b>{p['code']}</b><br>{p['name']}<br>Lat: {p['lat']:.4f}<br>Lon: {p['lon']:.4f}<br>"
+    button = f"""
+    <form action="" method="post">
+        <input type="hidden" name="code" value="{p['code']}">
+        <input type="submit" value="➕ Adicionar à rota" style="margin-top:5px;">
+    </form>
+    """
+    return folium.Popup(info + button, max_width=250)
+
+# Adicionar marcadores
+for _, p in pd.concat([ad_df if show_ad else pd.DataFrame(), loc_df if show_loc else pd.DataFrame()]).iterrows():
     folium.Marker(
-        location=[row["lat"], row["lon"]],
-        icon=folium.Icon(color="blue", icon="info-sign"),
-        tooltip=tooltip,
-        popup=folium.Popup(f"<b>Adicionar {row['code']}</b>", max_width=300),
+        location=[p["lat"], p["lon"]],
+        tooltip=f"{p['code']} — {p['name']}",
+        popup=make_popup(p),
+        icon=folium.Icon(color="blue" if p["source"] == "AD" else "green", icon="info-sign")
     ).add_to(cluster)
 
-# ---------- Interação: clique no mapa ----------
-map_data = st_folium(m, width=None, height=600)
+# Traçar rota
+rota = st.session_state["rota"]
+if len(rota) >= 2:
+    coords = [(p["lat"], p["lon"]) for p in rota]
+    folium.PolyLine(coords, color="red", weight=4, opacity=0.8, tooltip="Rota").add_to(m)
 
-if map_data and map_data.get("last_object_clicked"):
-    lat_clicked = map_data["last_object_clicked"]["lat"]
-    lon_clicked = map_data["last_object_clicked"]["lng"]
-    # Tenta encontrar ponto mais próximo (pequena margem de erro)
-    for code, row in point_map.items():
-        if abs(row["lat"] - lat_clicked) < 0.0005 and abs(row["lon"] - lon_clicked) < 0.0005:
-            add_point_to_plan(code)
-            break
+# Mostrar mapa
+st_data = st_folium(m, height=700, returned_objects=["last_object_clicked"])
 
-# ---------- Plano de voo desenhado ----------
-if st.session_state.flight_plan:
-    coords = [(point_map[code]["lat"], point_map[code]["lon"]) for code in st.session_state.flight_plan]
-    folium.PolyLine(coords, color="red", weight=4, opacity=0.8).add_to(m)
+# Adicionar ponto se clicado
+clicked = st_data.get("last_object_clicked")
+if clicked:
+    lat, lon = round(clicked["lat"], 5), round(clicked["lng"], 5)
+    for _, row in all_df.iterrows():
+        if abs(row["lat"] - lat) < 0.0005 and abs(row["lon"] - lon) < 0.0005:
+            if row["code"] not in [p["code"] for p in rota]:
+                st.session_state["rota"].append(dict(row))
+                st.experimental_rerun()
 
+# Mostrando plano de voo
+st.markdown("### ✈️ Plano de Voo")
+if not rota:
+    st.info("Nenhum ponto selecionado ainda. Clique nos pontos no mapa para adicioná-los.")
+else:
+    for i, p in enumerate(rota):
+        st.write(f"{i+1}. {p['code']} — {p['name']} ({p['lat']:.4f}, {p['lon']:.4f})")
+
+    # Distância total
     total_nm = 0
-    for i in range(len(coords)-1):
-        d = haversine_nm(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1])
-        total_nm += d
+    for i in range(len(rota)-1):
+        total_nm += haversine_nm(rota[i]["lat"], rota[i]["lon"], rota[i+1]["lat"], rota[i+1]["lon"])
 
-    time_hours = total_nm / cruise_speed
-    hours = int(time_hours)
-    minutes = int((time_hours - hours) * 60)
+    cruise = st.number_input("Velocidade de cruzeiro (nós)", value=90, min_value=30, max_value=300)
+    if cruise > 0:
+        time_hours = total_nm / cruise
+        duration = timedelta(hours=time_hours)
+        st.success(f"🧭 Distância total: {total_nm:.1f} NM — Tempo estimado: {str(duration)[:-3]}")
 
-    st.markdown("### 📋 Plano de Voo")
-    st.write("→ ".join(st.session_state.flight_plan))
-    st.success(f"Distância total: **{total_nm:.1f} NM** — Tempo estimado: **{hours}h {minutes}min** a {cruise_speed} kt")
+    if st.button("🗑️ Limpar rota"):
+        st.session_state["rota"] = []
+        st.experimental_rerun()
 
-    if st.button("🗑️ Limpar plano de voo"):
-        clear_plan()
 
 
