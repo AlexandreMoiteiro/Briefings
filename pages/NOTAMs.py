@@ -1,72 +1,72 @@
-# pages/NOTAMs.py — Visual aprimorado para exibição de NOTAMs
 from typing import Dict, Any, List
 import streamlit as st, requests, json
 
+# Configuração da página
 st.set_page_config(page_title="NOTAMs", layout="wide")
+
+# Estilo CSS customizado
 st.markdown("""
 <style>
-[data-testid="stSidebar"], [data-testid="stSidebarNav"], [data-testid="stSidebarCollapseButton"] {
-    display: none !important;
-}
+[data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
+[data-testid="stSidebarCollapseButton"] { display:none !important; }
 :root {
     --line: #e5e7eb;
     --muted: #6b7280;
-    --bg-light: #f9fafb;
-    --card-bg: #ffffff;
-    --border-color: #e0e0e0;
-    --shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    --bg: #f9fafb;
+    --notam-border: #d1d5db;
+    --notam-bg: #ffffff;
+    --notam-font: #111827;
 }
-body {
-    background-color: var(--bg-light);
+
+body, .main {
+    background-color: var(--bg);
 }
+
 .page-title {
-    font-size: 2.2rem;
-    font-weight: 700;
-    margin-bottom: 1rem;
-    color: #111827;
+    font-size: 2.5rem;
+    font-weight: 800;
+    margin: 0 0 1rem;
 }
+
 .subtle {
     color: var(--muted);
-    margin-bottom: 0.5rem;
-}
-.input-row {
-    background: var(--card-bg);
-    padding: 1rem;
-    border-radius: 8px;
-    box-shadow: var(--shadow);
-    margin-bottom: 1.5rem;
-}
-.card {
-    background: var(--card-bg);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
     margin-bottom: 1rem;
-    box-shadow: var(--shadow);
 }
-.card pre {
+
+.monos {
     font-family: ui-monospace, Menlo, Consolas, monospace;
     white-space: pre-wrap;
+    background: var(--notam-bg);
+    border: 1px solid var(--notam-border);
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    color: var(--notam-font);
+    margin-bottom: 1rem;
     font-size: 0.95rem;
 }
-.icao-title {
-    font-size: 1.4rem;
-    font-weight: 600;
-    margin-top: 2rem;
-    margin-bottom: 0.5rem;
-    color: #1f2937;
-    border-bottom: 1px solid var(--line);
-    padding-bottom: 0.25rem;
+
+input[type="text"] {
+    background-color: #fff !important;
+    padding: 0.5rem;
+    font-size: 1rem;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--line);
+    margin: 1rem 0;
 }
 </style>
 """, unsafe_allow_html=True)
 
+# Checa se as configurações do Gist estão ok
 def notam_gist_config_ok() -> bool:
     token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-    gid   = (st.secrets.get("NOTAM_GIST_ID") or st.secrets.get("GIST_ID") or "").strip()
+    gid   = (st.secrets.get("NOTAM_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
     fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
     return bool(token and gid and fn)
 
+# Carrega os NOTAMs do Gist (cacheado)
 @st.cache_data(ttl=60)
 def load_notams() -> Dict[str, Any]:
     if not notam_gist_config_ok():
@@ -84,7 +84,8 @@ def load_notams() -> Dict[str, Any]:
         files = r.json().get("files", {})
         obj = files.get(fn) or {}
         content = (obj.get("content") or "").strip()
-        if not content: return {"map": {}, "updated_utc": None}
+        if not content:
+            return {"map": {}, "updated_utc": None}
         js = json.loads(content)
         if isinstance(js, dict) and "map" in js:
             return {"map": js.get("map") or {}, "updated_utc": js.get("updated_utc")}
@@ -97,32 +98,29 @@ def load_notams() -> Dict[str, Any]:
         return {"map": {}, "updated_utc": None}
 
 # Título da página
-st.markdown('<div class="page-title">🛬 NOTAMs Viewer</div>', unsafe_allow_html=True)
+st.markdown('<div class="page-title">NOTAMs</div>', unsafe_allow_html=True)
 
-# Inputs do usuário
-with st.container():
-    st.markdown('<div class="input-row">', unsafe_allow_html=True)
-    col1, col2 = st.columns([0.8, 0.2])
-    with col1:
-        icaos_str = st.text_input("ICAOs (separados por vírgula)", value="LPSO, LPCB, LPEV")
-    with col2:
-        if st.button("🔄 Atualizar"):
-            st.cache_data.clear()
-    st.markdown('</div>', unsafe_allow_html=True)
+# Entrada de ICAOs e botão de refresh
+col = st.columns([0.75, 0.25])
+with col[0]:
+    icaos_str = st.text_input("ICAOs (separados por vírgulas)", value="LPSO, LPCB, LPEV")
+with col[1]:
+    if st.button("🔄 Atualizar"):
+        st.cache_data.clear()
 
-# Carregar NOTAMs
+# Carregamento dos dados
 data = load_notams()
 m = data.get("map") or {}
 
-# Exibir NOTAMs ICAO por ICAO
+# Exibição dos NOTAMs
 for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
-    st.markdown(f'<div class="icao-title">{icao}</div>', unsafe_allow_html=True)
     items: List[str] = list((m.get(icao) or []))
-    if not items:
-        st.info("Nenhum NOTAM disponível.")
-    else:
-        for n in items:
-            st.markdown(f'<div class="card"><pre>{n}</pre></div>', unsafe_allow_html=True)
+    with st.expander(f"📍 {icao} ({len(items)} NOTAM{'s' if len(items) != 1 else ''})", expanded=True):
+        if not items:
+            st.markdown('<div class="subtle">Nenhum NOTAM encontrado.</div>', unsafe_allow_html=True)
+        else:
+            for n in items:
+                st.markdown(f'<div class="monos">{n}</div>', unsafe_allow_html=True)
 
 
 
