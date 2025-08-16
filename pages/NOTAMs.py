@@ -19,6 +19,7 @@ st.markdown("""
     --notam-font: #111827;
     --active: #10b981;
     --expired: #ef4444;
+    --nill: #9ca3af;
 }
 
 body, .main {
@@ -66,17 +67,22 @@ body, .main {
     background-color: var(--expired);
     color: white;
 }
+
+.badge-nill {
+    background-color: var(--nill);
+    color: white;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# Função para verificar configurações do Gist
+# Verifica se as configs do Gist estão definidas
 def notam_gist_config_ok() -> bool:
     token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get("NOTAM_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
     fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
     return bool(token and gid and fn)
 
-# Função para carregar NOTAMs do Gist
+# Carrega os NOTAMs (cache de 60 segundos)
 @st.cache_data(ttl=60)
 def load_notams() -> Dict[str, Any]:
     if not notam_gist_config_ok():
@@ -107,32 +113,35 @@ def load_notams() -> Dict[str, Any]:
     except Exception:
         return {"map": {}, "updated_utc": None}
 
-# Função para extrair e analisar datas dos NOTAMs
+# Extrai datas FROM / TO
 def parse_notam_dates(text: str):
     match = re.search(r"FROM:\s*(\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+\d{4}\s+\d{2}:\d{2})\s*TO:\s*([A-Za-z0-9:\s]+)", text)
     if not match:
         return None, None
-    from_str, to_str = match.group(1), match.group(2).strip().upper()
 
-    # Limpeza de sufixos (st/nd/rd/th)
+    from_str, to_str = match.group(1), match.group(2).strip()
+
+    # Limpa sufixos e zonas (UTC, EST, etc)
     from_str = re.sub(r"(st|nd|rd|th)", "", from_str)
+    to_str_clean = re.sub(r"(st|nd|rd|th)", "", to_str)
+    to_str_clean = re.sub(r"\b(UTC|EST|EDT|WEST|Z)\b", "", to_str_clean, flags=re.IGNORECASE).strip()
 
     try:
         from_dt = datetime.strptime(from_str, "%d %b %Y %H:%M")
     except ValueError:
         from_dt = None
 
-    if to_str == "PERM":
+    if to_str.upper().strip() == "PERM":
         to_dt = "PERM"
     else:
-        to_str = re.sub(r"(st|nd|rd|th)", "", to_str)
         try:
-            to_dt = datetime.strptime(to_str, "%d %b %Y %H:%M")
+            to_dt = datetime.strptime(to_str_clean, "%d %b %Y %H:%M")
         except ValueError:
             to_dt = None
 
     return from_dt, to_dt
 
+# Verifica se o NOTAM está ativo
 def is_active(from_dt, to_dt):
     now = datetime.utcnow()
     if to_dt == "PERM":
@@ -144,7 +153,7 @@ def is_active(from_dt, to_dt):
 # Título
 st.markdown('<div class="page-title">NOTAMs</div>', unsafe_allow_html=True)
 
-# Campo de entrada ICAOs + botão
+# Entrada de ICAOs e botão Atualizar
 col = st.columns([0.75, 0.25])
 with col[0]:
     icaos_str = st.text_input("ICAOs (separados por vírgulas)", value="LPSO, LPCB, LPEV")
@@ -152,11 +161,11 @@ with col[1]:
     if st.button("🔄 Atualizar"):
         st.cache_data.clear()
 
-# Carrega NOTAMs
+# Carrega dados
 data = load_notams()
 m = data.get("map") or {}
 
-# Exibe NOTAMs por ICAO
+# Exibe NOTAMs
 for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
     items: List[str] = list((m.get(icao) or []))
     with st.expander(f"📍 {icao} ({len(items)} NOTAM{'s' if len(items) != 1 else ''})", expanded=True):
@@ -164,17 +173,17 @@ for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
             st.markdown('<div class="subtle">Nenhum NOTAM encontrado.</div>', unsafe_allow_html=True)
         else:
             for n in items:
-                if n.strip().upper() == "NILL":
+                notam_text = n.strip()
+                # NILL NOTAM
+                if notam_text.upper() == "NILL":
+                    badge_html = '<span class="badge badge-nill">🚫 Sem NOTAMs</span>'
+                    st.markdown(f'<div class="monos">{badge_html}<br>{notam_text}</div>', unsafe_allow_html=True)
                     continue
 
-                from_dt, to_dt = parse_notam_dates(n)
+                from_dt, to_dt = parse_notam_dates(notam_text)
                 active = is_active(from_dt, to_dt)
                 status = "🟢 Ativo" if active else "🔴 Expirado"
                 badge_class = "badge-active" if active else "badge-expired"
                 badge_html = f'<span class="badge {badge_class}">{status}</span>'
 
-                st.markdown(f'<div class="monos">{badge_html}<br>{n}</div>', unsafe_allow_html=True)
-
-
-
-
+                st.markdown(f'<div class="monos">{badge_html}<br>{notam_text}</div>', unsafe_allow_html=True)
