@@ -1,82 +1,69 @@
+# pages/NOTAMs.py — Visual aprimorado para exibição de NOTAMs
 from typing import Dict, Any, List
 import streamlit as st, requests, json
 
 st.set_page_config(page_title="NOTAMs", layout="wide")
-
-# 💄 STYLE
 st.markdown("""
 <style>
-/* Oculta a sidebar e botão */
 [data-testid="stSidebar"], [data-testid="stSidebarNav"], [data-testid="stSidebarCollapseButton"] {
-    display:none !important;
+    display: none !important;
 }
-
-/* Cores */
 :root {
-    --line:#e5e7eb;
-    --muted:#6b7280;
-    --bg-section:#f9fafb;
-    --border:#d1d5db;
-    --accent:#f97316;
+    --line: #e5e7eb;
+    --muted: #6b7280;
+    --bg-light: #f9fafb;
+    --card-bg: #ffffff;
+    --border-color: #e0e0e0;
+    --shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
 }
-
-/* Título */
+body {
+    background-color: var(--bg-light);
+}
 .page-title {
-    font-size:2.5rem;
-    font-weight:700;
-    margin-bottom:0.25rem;
-    color:#111827;
-}
-
-/* Subtítulo */
-.subtle {
-    color:var(--muted);
-    margin-bottom:1rem;
-    font-size:0.9rem;
-}
-
-/* NOTAM em bloco */
-.notam-box {
-    background-color: white;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 1rem;
+    font-size: 2.2rem;
+    font-weight: 700;
     margin-bottom: 1rem;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    color: #111827;
 }
-
-/* ICAO container */
-.icao-section {
-    background-color: var(--bg-section);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 1rem;
-    margin-bottom: 2rem;
-}
-
-/* Monospace content */
-.monos {
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    white-space: pre-wrap;
-    color: #1f2937;
-    font-size: 0.95rem;
+.subtle {
+    color: var(--muted);
     margin-bottom: 0.5rem;
 }
-
-/* Input + botão alinhamento */
 .input-row {
-    display: flex;
-    gap: 1rem;
-    margin-top: 1rem;
-    margin-bottom: 2rem;
+    background: var(--card-bg);
+    padding: 1rem;
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    margin-bottom: 1.5rem;
+}
+.card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1rem;
+    box-shadow: var(--shadow);
+}
+.card pre {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    font-size: 0.95rem;
+}
+.icao-title {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin-top: 2rem;
+    margin-bottom: 0.5rem;
+    color: #1f2937;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 0.25rem;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ✅ Funções
 def notam_gist_config_ok() -> bool:
     token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-    gid   = (st.secrets.get("NOTAM_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
+    gid   = (st.secrets.get("NOTAM_GIST_ID") or st.secrets.get("GIST_ID") or "").strip()
     fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
     return bool(token and gid and fn)
 
@@ -109,29 +96,33 @@ def load_notams() -> Dict[str, Any]:
     except Exception:
         return {"map": {}, "updated_utc": None}
 
-# ✅ Header
-st.markdown('<div class="page-title">NOTAMs</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtle">Consulta de NOTAMs salvos no Gist</div>', unsafe_allow_html=True)
+# Título da página
+st.markdown('<div class="page-title">🛬 NOTAMs Viewer</div>', unsafe_allow_html=True)
 
-# ✅ Input ICAO
-st.markdown('<div class="input-row">', unsafe_allow_html=True)
-icaos_str = st.text_input("ICAOs (separados por vírgula)", value="LPSO, LPCB, LPEV", label_visibility="collapsed")
-if st.button("🔄 Atualizar"):
-    st.cache_data.clear()
-st.markdown('</div>', unsafe_allow_html=True)
+# Inputs do usuário
+with st.container():
+    st.markdown('<div class="input-row">', unsafe_allow_html=True)
+    col1, col2 = st.columns([0.8, 0.2])
+    with col1:
+        icaos_str = st.text_input("ICAOs (separados por vírgula)", value="LPSO, LPCB, LPEV")
+    with col2:
+        if st.button("🔄 Atualizar"):
+            st.cache_data.clear()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# ✅ NOTAMs
+# Carregar NOTAMs
 data = load_notams()
 m = data.get("map") or {}
 
+# Exibir NOTAMs ICAO por ICAO
 for icao in [x.strip().upper() for x in icaos_str.split(",") if x.strip()]:
-    st.markdown(f'<div class="icao-section"><h4>{icao}</h4>', unsafe_allow_html=True)
+    st.markdown(f'<div class="icao-title">{icao}</div>', unsafe_allow_html=True)
     items: List[str] = list((m.get(icao) or []))
     if not items:
-        st.write("— Nenhum NOTAM encontrado —")
+        st.info("Nenhum NOTAM disponível.")
     else:
         for n in items:
-            st.markdown(f'<div class="notam-box monos">{n}</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="card"><pre>{n}</pre></div>', unsafe_allow_html=True)
+
 
 
