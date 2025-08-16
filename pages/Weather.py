@@ -1,8 +1,9 @@
-# pages/Weather.py
+# pages/Weather.py — METAR/TAF (CheckWX) + SIGMET LPPC (AWC) + GAMET (Gist)
 from typing import List, Dict, Any, Optional
 import datetime as dt, json, requests
 from zoneinfo import ZoneInfo
 import streamlit as st
+import re
 
 # ---------- Page ----------
 st.set_page_config(page_title="Weather", layout="wide")
@@ -10,12 +11,10 @@ st.set_page_config(page_title="Weather", layout="wide")
 # ---------- Styles ----------
 st.markdown("""
 <style>
-/* Hide sidebar */
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
 [data-testid="stSidebarCollapseButton"] { display:none !important; }
 header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
 
-/* Tokens */
 :root {
   --line:#e5e7eb;
   --muted:#6b7280;
@@ -23,40 +22,26 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
   --mvfr:#f59e0b;
   --ifr:#ef4444;
   --lifr:#7c3aed;
-  --sigmet-green: #059669;
-  --sigmet-red: #dc2626;
+  --gamet:#0ea5e9;
+  --expired:#ef4444;
 }
 
-/* Page */
-.page-title {
-  font-size:2.25rem;
-  font-weight:800;
-  margin:0 0 .25rem
-}
-.subtle {
-  color:var(--muted);
-  margin:0 0 1rem
-}
+.page-title { font-size:2rem; font-weight:800; margin:0 0 .25rem }
+.subtle { color:var(--muted); margin:0 0 1.5rem }
 
-/* Cards (full width, stacked) */
 .card {
   border:1px solid var(--line);
   border-radius:14px;
-  padding:14px 16px;
+  padding:16px 18px;
   background:#fff;
-  margin-bottom:16px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  margin-bottom:14px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.04);
 }
-.card h3 {
-  margin:0 0 10px;
-  font-size:1.15rem;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
+.card h3 { margin:0 0 10px; font-size:1.05rem }
+
 .badge {
   display:inline-block;
-  padding:2px 10px;
+  padding:3px 10px;
   border-radius:999px;
   font-weight:700;
   font-size:.80rem;
@@ -64,28 +49,32 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
   margin-left:8px;
   vertical-align:middle
 }
-.vfr {background:var(--vfr)}
-.mvfr {background:var(--mvfr)}
-.ifr {background:var(--ifr)}
-.lifr {background:var(--lifr)}
-.meta {
-  font-size:.85rem;
-  color:var(--muted);
-  margin-left:12px
-}
+.vfr { background:var(--vfr) } .mvfr { background:var(--mvfr) }
+.ifr { background:var(--ifr) } .lifr { background:var(--lifr) }
+
+.meta { font-size:.9rem; color:var(--muted); margin-left:8px }
 
 .monos {
-  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size:.95rem;
-  white-space:pre-wrap
+  white-space: pre-wrap;
 }
 
-.section {margin-top:28px}
+.gamet-valid {
+  font-weight: bold;
+  color: var(--gamet);
+  margin-bottom: 6px;
+}
+.gamet-expired {
+  font-weight: bold;
+  color: var(--expired);
+  margin-bottom: 6px;
+}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- Defaults ----------
-DEFAULT_ICAOS = ["LPPT","LPBJ","LEBZ"]
+DEFAULT_ICAOS = ["LPPT", "LPBJ", "LEBZ"]
 
 # ---------- Helpers ----------
 def cw_headers() -> Dict[str,str]:
@@ -110,6 +99,21 @@ def zulu_plus_pt(d: Optional[dt.datetime]) -> str:
     d_pt  = d_utc.astimezone(ZoneInfo("Europe/Lisbon"))
     return f"{d_utc.strftime('%Y-%m-%d %H:%MZ')} ({d_pt.strftime('%H:%M')} Portugal)"
 
+def parse_gamet_validity(text: str) -> Optional[str]:
+    """Extracts and checks if the GAMET is still active."""
+    match = re.search(r'VALID (\d{6})/(\d{6})', text)
+    if not match: return None
+    start_raw, end_raw = match.groups()
+    try:
+        today = dt.datetime.utcnow()
+        start = dt.datetime.strptime(start_raw, "%d%H%M").replace(year=today.year, month=today.month)
+        end = dt.datetime.strptime(end_raw, "%d%H%M").replace(year=today.year, month=today.month)
+        now = dt.datetime.utcnow()
+        status = "active" if start <= now <= end else "expired"
+        return f"{start.strftime('%d %b %H:%M')}Z – {end.strftime('%d %b %H:%M')}Z ({status})"
+    except Exception:
+        return None
+
 # ---------- Data ----------
 @st.cache_data(ttl=75)
 def fetch_metar_decoded(icao: str) -> Optional[Dict[str,Any]]:
@@ -129,19 +133,8 @@ def fetch_metar_raw(icao: str) -> str:
         r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=hdr, timeout=10)
         r.raise_for_status(); data = r.json().get("data", [])
         if not data: return ""
-        if isinstance(data[0], dict): return data[0].get("raw") or data[0].get("raw_text","") or ""
-        return str(data[0])
+        return str(data[0]) if not isinstance(data[0], dict) else data[0].get("raw") or ""
     except Exception: return ""
-
-@st.cache_data(ttl=75)
-def fetch_taf_decoded(icao: str) -> Optional[Dict[str,Any]]:
-    try:
-        hdr = cw_headers()
-        if not hdr: return None
-        r = requests.get(f"https://api.checkwx.com/taf/{icao}/decoded", headers=hdr, timeout=10)
-        r.raise_for_status(); data = r.json().get("data", [])
-        return data[0] if data else None
-    except Exception: return None
 
 @st.cache_data(ttl=75)
 def fetch_taf_raw(icao: str) -> str:
@@ -150,9 +143,7 @@ def fetch_taf_raw(icao: str) -> str:
         if not hdr: return ""
         r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=hdr, timeout=10)
         r.raise_for_status(); data = r.json().get("data", [])
-        if not data: return ""
-        if isinstance(data[0], dict): return data[0].get("raw") or data[0].get("raw_text","") or ""
-        return str(data[0])
+        return str(data[0]) if not isinstance(data[0], dict) else data[0].get("raw") or ""
     except Exception: return ""
 
 @st.cache_data(ttl=120)
@@ -165,16 +156,14 @@ def fetch_sigmet_lppc() -> List[str]:
         out: List[str] = []
         for it in items:
             props = it.get("properties", {}) if isinstance(it, dict) else {}
-            if not props and isinstance(it, dict): props = it
-            raw = (props.get("raw") or props.get("raw_text") or props.get("sigmet_text") or "").strip()
-            fir = (props.get("fir") or props.get("firid") or props.get("firId") or "").upper()
+            raw = (props.get("raw") or props.get("sigmet_text") or "").strip()
+            fir = (props.get("fir") or props.get("firid") or "").upper()
             if not raw: continue
-            if fir == "LPPC" or " LPPC " in f" {raw} " or "FIR LPPC" in raw or " LPPC FIR" in raw:
+            if fir == "LPPC" or " LPPC " in f" {raw} ":
                 out.append(raw)
         return out
     except Exception: return []
 
-# ---------- GAMET ----------
 def gamet_gist_config_ok() -> bool:
     return bool(
         st.secrets.get("GAMET_GIST_TOKEN","") and
@@ -187,43 +176,38 @@ def load_gamet() -> Dict[str,Any]:
     if not gamet_gist_config_ok():
         return {"text":"", "updated_utc":None}
     try:
-        token = st.secrets["GAMET_GIST_TOKEN"]; gid = st.secrets["GAMET_GIST_ID"]; fn = st.secrets["GAMET_GIST_FILENAME"]
-        r = requests.get(
-            f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}"},
-            timeout=10
-        )
+        token = st.secrets["GAMET_GIST_TOKEN"]
+        gid   = st.secrets["GAMET_GIST_ID"]
+        fn    = st.secrets["GAMET_GIST_FILENAME"]
+        r = requests.get(f"https://api.github.com/gists/{gid}",
+                         headers={"Authorization": f"token {token}"}, timeout=10)
         r.raise_for_status(); files = r.json().get("files", {})
         if fn in files and "content" in files[fn]:
             content = files[fn]["content"]
-            try: return json.loads(content)
-            except Exception: return {"text": content, "updated_utc": None}
+            return json.loads(content)
     except Exception: pass
     return {"text":"", "updated_utc":None}
 
-# ---------- UI ----------
+# ---------- UI: Header ----------
 st.markdown('<div class="page-title">Weather</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtle">METAR · TAF · SIGMET (LPPC) · GAMET</div>', unsafe_allow_html=True)
 
+# ---------- Controls ----------
 try:
-    q = st.query_params
-    raw = q.get("icao", "")
+    raw = st.query_params.get("icao", "")
     if isinstance(raw, list): raw = ",".join(raw)
-except Exception:
-    raw = ""
-if not raw:
-    raw = ",".join(DEFAULT_ICAOS)
+except Exception: raw = ""
 
+raw = raw or ",".join(DEFAULT_ICAOS)
 cc1, cc2 = st.columns([0.75,0.25])
 with cc1:
     icaos_input = st.text_input("ICAO list (comma-separated)", value=raw)
 with cc2:
-    if st.button("Refresh"):
-        st.cache_data.clear()
+    if st.button("Refresh"): st.cache_data.clear()
 
 icaos = [x.strip().upper() for x in icaos_input.split(",") if x.strip()]
 
-# ---------- METAR/TAF ----------
+# ---------- METAR / TAF ----------
 for icao in icaos:
     metar_dec = fetch_metar_decoded(icao)
     metar_raw = fetch_metar_raw(icao)
@@ -232,21 +216,19 @@ for icao in icaos:
     cat = (metar_dec or {}).get("flight_category","").upper()
     klass = {"VFR":"vfr","MVFR":"mvfr","IFR":"ifr","LIFR":"lifr"}.get(cat,"")
     badge = f'<span class="badge {klass}">{cat}</span>' if klass else ""
-
     obs = zulu_plus_pt(parse_iso_utc((metar_dec or {}).get("observed")))
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(f'<h3>{icao} {badge}<span class="meta">Observed {obs}</span></h3>', unsafe_allow_html=True)
+    st.markdown(f'<h3>{icao} {badge}' + (f'<span class="meta">Observed {obs}</span>' if obs else "") + '</h3>', unsafe_allow_html=True)
     st.markdown(f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n<strong>TAF</strong> {taf_raw or "—"}</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------- SIGMET LPPC ----------
+# ---------- SIGMET ----------
 st.subheader("SIGMET (LPPC)")
 sigs = fetch_sigmet_lppc()
 if not sigs:
-    st.markdown('<div class="card" style="color:white;background:var(--sigmet-green)">✅ No active SIGMETs for LPPC FIR</div>', unsafe_allow_html=True)
+    st.write("—")
 else:
-    st.markdown(f'<div class="card" style="color:white;background:var(--sigmet-red)">⚠️ {len(sigs)} Active SIGMET(s) for LPPC FIR</div>', unsafe_allow_html=True)
     for s in sigs:
         st.markdown(f'<div class="card monos">{s}</div>', unsafe_allow_html=True)
 
@@ -254,10 +236,13 @@ else:
 st.subheader("GAMET")
 gamet = load_gamet()
 text = (gamet.get("text") or "").strip()
+validity = parse_gamet_validity(text)
 if text:
-    st.markdown(f'<div class="card monos">{text}</div>', unsafe_allow_html=True)
+    validity_line = f'<div class="gamet-valid">GAMET Validity: {validity}</div>' if 'active' in (validity or "") else f'<div class="gamet-expired">GAMET Expired: {validity or "Unknown"}</div>'
+    st.markdown(f'<div class="card monos">{validity_line}{text}</div>', unsafe_allow_html=True)
 else:
     st.write("—")
+
 
 
 
