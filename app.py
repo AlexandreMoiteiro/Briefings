@@ -617,7 +617,6 @@ with col_gamet[0]:
 st.markdown("#### Charts")
 st.caption("Upload SIGWX / SPC / Wind & Temp. Accepts PDF/PNG/JPG/JPEG/GIF.")
 use_ai_for_charts = st.toggle("Analisar charts com IA", value=True, help="Marcado por omissao")
-preview_w = st.slider("Largura da pré‑visualização (px)", min_value=240, max_value=640, value=420, step=10)
 uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=True, label_visibility="collapsed")
 
 # Títulos base por tipo (evita 'Weather Chart')
@@ -782,10 +781,7 @@ if 'gen_final' in locals() and gen_final:
     st.download_button("Download Final Briefing (EN)", data=final_bytes, file_name=final_name, mime="application/pdf", use_container_width=True)
 
 st.divider()
-st.markdown(f"**Weather:** {APP_WEATHER_URL}")
-st.markdown(f"**NOTAMs:** {APP_NOTAMS_URL}")
-st.markdown(f"**VFR Map:** {APP_VFRMAP_URL}")
-st.markdown(f"**M&B / Performance:** {APP_MNB_URL}")
+
 
 
 
