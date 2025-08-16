@@ -1,79 +1,79 @@
-# pages/NOTAMs.py — mostra os NOTAMs guardados no Gist (UI/UX melhorado)
-from __future__ import annotations
+# pages/NOTAMs.py — mostra os NOTAMs guardados no Gist (sem rótulos “live/saved”)
 from typing import Dict, Any, List
 import streamlit as st, requests, json
-from datetime import datetime, timezone
-import re
+from io import StringIO
+from datetime import datetime
 
-# ————————————————————————————————————————————————————————————————
+# ——————————————————————————————————————————————————————
 # Configuração base
-# ————————————————————————————————————————————————————————————————
-st.set_page_config(page_title="NOTAMs", page_icon="🛫", layout="wide")
-
-# ————————————————————————————————————————————————————————————————
-# Estilos (dark/light) e componentes visuais
-# ————————————————————————————————————————————————————————————————
-st.markdown(
-    """
-<style>
-:root{
-  --bg: var(--background, #0b0f19);
-  --card: rgba(255,255,255,.04);
-  --muted:#6b7280;
-  --line: rgba(148,163,184,.22);
-  --accent: linear-gradient(90deg,#22d3ee, #a78bfa 40%, #f472b6);
-}
-[data-testid="stSidebar"], [data-testid="stSidebarNav"], [data-testid="stSidebarCollapseButton"]{display:none!important}
-
-/**** Header ****/
-.app-header{display:flex;align-items:center;gap:.75rem;margin:0 0 .5rem}
-.app-title{font-size:2rem;font-weight:900;letter-spacing:-.02em;line-height:1.1}
-.app-title span{background:var(--accent);-webkit-background-clip:text;background-clip:text;color:transparent}
-.app-subtle{color:var(--muted)}
-.badge{display:inline-flex;align-items:center;gap:.4rem;padding:.25rem .5rem;border:1px solid var(--line);border-radius:999px;font-size:.775rem}
-.badge .dot{width:.5rem;height:.5rem;border-radius:999px;background:#22d3ee;box-shadow:0 0 8px #22d3ee66}
-
-/**** Controlo ****/
-.toolbar{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin:.25rem 0 1rem}
-.toolbar .field{min-width:260px}
-
-/**** Tabs ****/
-.stTabs [data-baseweb="tab"]{font-weight:600}
-
-/**** Cartões ****/
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
-.card{border:1px solid var(--line);border-radius:14px;padding:12px;background:var(--card);backdrop-filter:blur(6px)}
-.card h4{margin:.2rem 0 .6rem;font-size:1rem}
-.code{font-family:ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
-.hr{height:1px;background:var(--line);margin:.5rem 0}
-
-/**** Empty state ****/
-.empty{border:1.5px dashed var(--line);border-radius:14px;padding:18px;text-align:center;color:var(--muted)}
-
-/**** Pills de ICAO ****/
-.pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:.25rem}
-.pill{border:1px solid var(--line);border-radius:999px;padding:.15rem .55rem;font-size:.8rem}
-
-/**** Ajustes do Streamlit ****/
-/* Ocultar linhas extra dos expanders e dar mais conforto */
-details > summary{cursor:pointer}
-
-</style>
-""",
-    unsafe_allow_html=True,
+# ——————————————————————————————————————————————————————
+st.set_page_config(
+    page_title="NOTAMs",
+    layout="wide",
+    page_icon="🛫",
+    menu_items={
+        "About": "🛫 NOTAMs — visual limpo e minimalista, com cache de 60s."
+    },
 )
 
-# ————————————————————————————————————————————————————————————————
-# Helpers
-# ————————————————————————————————————————————————————————————————
+# Estilos globais (claro/escuro) + componentes
+st.markdown("""
+<style>
+:root{
+  --line:#e5e7eb; --muted:#6b7280; --bg:#ffffff; --card:#ffffff; --text:#0f172a;
+}
+html[data-theme="dark"]:root{
+  --line:#2a2f37; --muted:#9aa3af; --bg:#0b0f16; --card:#0f141c; --text:#e5e7eb;
+}
+[data-testid="stSidebar"], [data-testid="stSidebarNav"], [data-testid="stSidebarCollapseButton"] { display:none !important; }
 
+.page-wrap{max-width:1320px;margin:0 auto;}
+.page-title{font-size:2.1rem;font-weight:800;margin:0 0 .25rem;letter-spacing:-.02em;}
+.subtle{color:var(--muted);margin-bottom:1rem;}
+.row{display:flex;gap:.75rem;flex-wrap:wrap;align-items:end}
+.row .col{flex:1 1 240px;min-width:240px}
+.card{
+  background:var(--card);
+  border:1px solid var(--line);
+  border-radius:16px;
+  padding:16px 16px 12px;
+  box-shadow:0 1px 1px rgba(0,0,0,.02), 0 8px 24px rgba(0,0,0,.04);
+  margin-bottom:14px;
+}
+.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:.25rem}
+.badge{
+  display:inline-flex;align-items:center;gap:.5ch;
+  border:1px solid var(--line);border-radius:999px;padding:.25rem .6rem;
+  font-size:.82rem;font-weight:700;letter-spacing:.02em;
+  background:linear-gradient(180deg, rgba(0,0,0,.04), transparent);
+}
+.badge.gray{opacity:.7}
+.count{opacity:.85;font-weight:700}
+.btns{display:flex;gap:.5rem;flex-wrap:wrap}
+.btn{
+  display:inline-flex;align-items:center;gap:.5ch;
+  border:1px solid var(--line);border-radius:10px;padding:.35rem .7rem;
+  background:transparent;cursor:pointer;font-size:.85rem;text-decoration:none;color:inherit;
+}
+.btn:hover{background:rgba(127,127,127,.08)}
+.monos{font-family:ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;line-height:1.4}
+.sep{border:none;border-top:1px dashed var(--line);margin:.6rem 0}
+.empty{color:var(--muted);text-align:center;padding:.75rem 0;font-style:italic}
+.hint{font-size:.84rem;color:var(--muted)}
+.control-note{font-size:.82rem;color:var(--muted);margin:.25rem 0 0}
+</style>
+""", unsafe_allow_html=True)
+
+# ——————————————————————————————————————————————————————
+# Utilitários
+# ——————————————————————————————————————————————————————
 def notam_gist_config_ok() -> bool:
     token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get("NOTAM_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
     fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
     return bool(token and gid and fn)
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def load_notams() -> Dict[str, Any]:
     if not notam_gist_config_ok():
         return {"map": {}, "updated_utc": None}
@@ -90,8 +90,7 @@ def load_notams() -> Dict[str, Any]:
         files = r.json().get("files", {})
         obj = files.get(fn) or {}
         content = (obj.get("content") or "").strip()
-        if not content:
-            return {"map": {}, "updated_utc": None}
+        if not content: return {"map": {}, "updated_utc": None}
         js = json.loads(content)
         if isinstance(js, dict) and "map" in js:
             return {"map": js.get("map") or {}, "updated_utc": js.get("updated_utc")}
@@ -103,176 +102,141 @@ def load_notams() -> Dict[str, Any]:
     except Exception:
         return {"map": {}, "updated_utc": None}
 
-
-def fmt_updated(ts: str | None) -> str:
-    if not ts:
-        return "sem info"
+def fmt_updated(ts: Any) -> str:
+    if not ts: return "—"
+    s = str(ts)
+    # tenta ISO; cai para string crua caso falhe
     try:
-        # lida com 'Z'
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        local = dt.astimezone()
-        return local.strftime("%d %b %Y, %H:%M %Z")
+        # remove Z se existir
+        s2 = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s2)
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
-        return str(ts)
+        return s
 
+def as_txt_block(icao: str, items: List[str]) -> str:
+    buf = StringIO()
+    buf.write(f"{icao}\n")
+    buf.write("=" * len(icao) + "\n\n")
+    if not items:
+        buf.write("— Sem NOTAMs —\n")
+    else:
+        for i, n in enumerate(items, 1):
+            buf.write(f"[{i}] {n}\n")
+            buf.write("-" * 80 + "\n")
+    return buf.getvalue()
 
-def normalize_icaos(raw: str) -> List[str]:
-    # Aceita separação por vírgulas, espaços e quebras de linha
-    parts = re.split(r"[\s,;]+", (raw or "").strip())
-    icaos = [p.upper() for p in parts if p]
-    # Limpa duplicados mantendo ordem
-    seen = set()
-    out: List[str] = []
-    for x in icaos:
-        if x not in seen:
-            out.append(x)
-            seen.add(x)
-    return out
+def render_copy_button(key: str, text: str, label: str = "Copiar tudo"):
+    # truque simples: text_area + copy do navegador
+    with st.popover(label, use_container_width=False):
+        st.text_area("Conteúdo", value=text, height=180, label_visibility="collapsed", key=f"ta_{key}")
 
-# ————————————————————————————————————————————————————————————————
-# UI — Header
-# ————————————————————————————————————————————————————————————————
+# ——————————————————————————————————————————————————————
+# Cabeçalho
+# ——————————————————————————————————————————————————————
+st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
+st.markdown('<div class="page-title">🛫 NOTAMs</div>', unsafe_allow_html=True)
+
+data = load_notams()
+m = data.get("map") or {}
+updated_str = fmt_updated(data.get("updated_utc"))
+
+total_icaos = len(m)
+total_notams = sum(len(v or []) for v in m.values()) if m else 0
+st.markdown(
+    f'<div class="subtle">Atualização: <strong>{updated_str}</strong> · '
+    f'Cache: 60s · ICAOs no Gist: <strong>{total_icaos}</strong> · NOTAMs: <strong>{total_notams}</strong></div>',
+    unsafe_allow_html=True
+)
+
+# ——————————————————————————————————————————————————————
+# Controlo (inputs)
+# ——————————————————————————————————————————————————————
 with st.container():
-    c1, c2 = st.columns([0.75, 0.25], vertical_alignment="center")
-    with c1:
-        st.markdown(
-            '<div class="app-header">\n' \
-            '  <div style="font-size:1.6rem">🛫</div>' \
-            '  <div class="app-title">NOTAMs <span>Viewer</span></div>' \
-            '</div>',
-            unsafe_allow_html=True,
+    st.markdown('<div class="row">', unsafe_allow_html=True)
+
+    with st.container():
+        st.markdown('<div class="col">', unsafe_allow_html=True)
+        icaos_str = st.text_input(
+            "ICAOs (separados por vírgulas)",
+            value="LPSO, LPCB, LPEV",
+            placeholder="Ex.: LPPT, LPPR, LPMR",
+            help="Ordem é preservada. Espaços são ignorados."
         )
-        st.caption("Visualização rápida dos NOTAMs guardados no Gist.")
-    with c2:
-        if st.button("🔄 Atualizar", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# ————————————————————————————————————————————————————————————————
-# Controlo — filtros e entradas
-# ————————————————————————————————————————————————————————————————
-with st.container():
-    st.markdown('<div class="toolbar">', unsafe_allow_html=True)
-    icaos_default = "LPSO, LPCB, LPEV"
-    icaos_str = st.text_input("ICAOs", value=icaos_default, placeholder="LPSO, LPPT, LPFR…", help="Separar por vírgulas, espaços ou linhas.", key="icaos", label_visibility="visible")
-    search = st.text_input("Filtrar NOTAMs", value="", placeholder="palavra-chave…", help="Filtra pelo texto do NOTAM.", key="filter")
-    compact = st.toggle("Vista compacta", value=False)
+    with st.container():
+        st.markdown('<div class="col">', unsafe_allow_html=True)
+        filtro_txt = st.text_input(
+            "Filtro de texto (opcional)",
+            value="",
+            placeholder="Filtra NOTAMs que contenham este texto (case-insensitive)."
+        )
+        st.markdown('<p class="control-note">Dica: use códigos (ex.: RWY, TWY, ILS, NAV) ou trechos de Q-line.</p>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with st.container():
+        st.markdown('<div class="col">', unsafe_allow_html=True)
+        colA, colB = st.columns([1,1], vertical_alignment="bottom")
+        with colA:
+            compact = st.checkbox("Modo compacto", value=False, help="Remove separadores entre NOTAMs.")
+        with colB:
+            if st.button("🔄 Atualizar", use_container_width=True, type="secondary"):
+                st.cache_data.clear()
+                st.toast("Cache limpa. A recarregar…", icon="🔄")
+        st.markdown('</div>', unsafe_allow_html=True)
+
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ————————————————————————————————————————————————————————————————
-# Dados
-# ————————————————————————————————————————————————————————————————
-data = load_notams()
-m: Dict[str, List[str]] = data.get("map") or {}
-updated_utc = data.get("updated_utc")
+# Aviso de configuração (se necessário)
+if not notam_gist_config_ok():
+    st.warning("Configuração do Gist em falta: defina `NOTAM_GIST_TOKEN`, `NOTAM_GIST_ID` e `NOTAM_GIST_FILENAME` em `st.secrets`.")
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.stop()
 
-# Info topo: estado e hora
-left, right = st.columns([0.7, 0.3])
-with left:
-    pills_html = ''.join([f'<span class="pill">{p}</span>' for p in normalize_icaos(icaos_str)])
-    st.markdown(f"<div class='pills'>{pills_html}</div>", unsafe_allow_html=True)
-with right:
-    st.markdown(
-        f"<div class='badge' style='justify-content:flex-end'><span class='dot'></span> Atualizado: {fmt_updated(updated_utc)}</div>",
-        unsafe_allow_html=True,
-    )
+# ——————————————————————————————————————————————————————
+# Renderização por ICAO
+# ——————————————————————————————————————————————————————
+def normalize_icaos(raw: str) -> List[str]:
+    return [x.strip().upper() for x in raw.split(",") if x.strip()]
 
-# ————————————————————————————————————————————————————————————————
-# Renderização por ICAO em tabs
-# ————————————————————————————————————————————————————————————————
 icaos = normalize_icaos(icaos_str)
 
-if not icaos:
-    st.markdown('<div class="empty">Indique pelo menos um ICAO para começar.</div>', unsafe_allow_html=True)
-else:
-    # construir tabs com contagem
-    labels = []
-    datasets: List[List[str]] = []
-    for icao in icaos:
-        items = list((m.get(icao) or []))
-        if search:
-            s = search.lower().strip()
-            items = [n for n in items if s in n.lower()]
-        labels.append(f"{icao} ({len(items)})")
-        datasets.append(items)
+for icao in icaos:
+    items: List[str] = list((m.get(icao) or []))
+    if filtro_txt:
+        ft = filtro_txt.lower()
+        items = [n for n in items if ft in n.lower()]
 
-    if len(labels) == 1:
-        # Sem tabs, só uma secção
-        icao = icaos[0]
-        items = datasets[0]
-        st.markdown(f"#### {icao}")
-        if not items:
-            st.markdown('<div class="empty">Sem NOTAMs para mostrar.</div>', unsafe_allow_html=True)
-        else:
-            # download de todos para este ICAO
-            joined = "\n\n".join(items)
-            st.download_button(
-                label="⬇️ Descarregar NOTAMs (.txt)",
-                data=joined,
-                file_name=f"{icao}_NOTAMs.txt",
-                mime="text/plain",
-            )
-            if compact:
-                for i, n in enumerate(items, 1):
-                    st.code(n, language=None)
-                    if i != len(items):
-                        st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="grid">', unsafe_allow_html=True)
-                for n in items:
-                    st.markdown('<div class="card">', unsafe_allow_html=True)
-                    # Expander se longo
-                    if len(n) > 260:
-                        with st.expander(n[:120] + "…", expanded=False):
-                            st.markdown(f"<div class='code'>{n}</div>", unsafe_allow_html=True)
-                    else:
-                        st.markdown(f"<div class='code'>{n}</div>", unsafe_allow_html=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+    # Cabeçalho do cartão
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="card-head">', unsafe_allow_html=True)
+    if items:
+        st.markdown(f'<div class="badge">{icao} <span class="count">· {len(items)} NOTAM(s)</span></div>', unsafe_allow_html=True)
     else:
-        tabs = st.tabs(labels)
-        for idx, tab in enumerate(tabs):
-            with tab:
-                icao = icaos[idx]
-                items = datasets[idx]
-                if not items:
-                    st.markdown('<div class="empty">Sem NOTAMs para mostrar.</div>', unsafe_allow_html=True)
-                else:
-                    joined = "\n\n".join(items)
-                    st.download_button(
-                        label=f"⬇️ Descarregar {icao} (.txt)",
-                        data=joined,
-                        file_name=f"{icao}_NOTAMs.txt",
-                        mime="text/plain",
-                        key=f"dl-{icao}",
-                    )
-                    if compact:
-                        for i, n in enumerate(items, 1):
-                            st.code(n, language=None)
-                            if i != len(items):
-                                st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown('<div class="grid">', unsafe_allow_html=True)
-                        for n in items:
-                            st.markdown('<div class="card">', unsafe_allow_html=True)
-                            if len(n) > 260:
-                                with st.expander(n[:120] + "…", expanded=False):
-                                    st.markdown(f"<div class='code'>{n}</div>", unsafe_allow_html=True)
-                            else:
-                                st.markdown(f"<div class='code'>{n}</div>", unsafe_allow_html=True)
-                            st.markdown('</div>', unsafe_allow_html=True)
-                        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="badge gray">{icao} <span class="count">· 0</span></div>', unsafe_allow_html=True)
 
-# ————————————————————————————————————————————————————————————————
-# Mensagens de ajuda/erro
-# ————————————————————————————————————————————————————————————————
-if not notam_gist_config_ok():
-    with st.container(border=True):
-        st.error("⚙️ Falta configurar o acesso ao Gist (NOTAM_GIST_TOKEN, NOTAM_GIST_ID e NOTAM_GIST_FILENAME em st.secrets).", icon="⚠️")
-        st.markdown(
-            "- **NOTAM_GIST_TOKEN**: token pessoal do GitHub com acesso a gists.\n"
-            "- **NOTAM_GIST_ID**: ID do gist que contém os NOTAMs.\n"
-            "- **NOTAM_GIST_FILENAME**: nome do ficheiro JSON dentro do gist.")
+    # Botões de ação
+    txt_block = as_txt_block(icao, items)
+    st.markdown('<div class="btns">', unsafe_allow_html=True)
+    render_copy_button(key=f"copy_{icao}", text=txt_block, label="📋 Copiar tudo")
+    st.download_button("⬇️ Baixar .txt", data=txt_block, file_name=f"{icao}_NOTAMs.txt", mime="text/plain", use_container_width=False, key=f"dl_{icao}")
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)  # /card-head
 
+    # Lista de NOTAMs
+    if not items:
+        st.markdown('<div class="empty">— Sem NOTAMs —</div>', unsafe_allow_html=True)
+    else:
+        for idx, n in enumerate(items):
+            st.markdown(f'<div class="monos">{n}</div>', unsafe_allow_html=True)
+            if not compact and idx < len(items)-1:
+                st.markdown('<hr class="sep"/>', unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)  # /card
+
+# Rodapé leve
+st.markdown('<div class="hint">Dica: clique em “Atualizar” para limpar o cache (TTL 60s).</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)  # /page-wrap
 
 
