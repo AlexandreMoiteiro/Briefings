@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import datetime as dt, json, requests
 from zoneinfo import ZoneInfo
 import streamlit as st
@@ -82,7 +82,7 @@ def cw_headers() -> Dict[str,str]:
     key = st.secrets.get("CHECKWX_API_KEY","")
     return {"X-API-Key": key} if key else {}
 
-def parse_iso_utc(s: str) -> Optional[dt.datetime]:
+def parse_iso_utc(s: Optional[str]) -> Optional[dt.datetime]:
     if not s: return None
     try:
         if s.endswith("Z"): return dt.datetime.fromisoformat(s.replace("Z","+00:00"))
@@ -106,13 +106,27 @@ def parse_gamet_validity(text: str) -> Optional[str]:
     start_raw, end_raw = match.groups()
     try:
         today = dt.datetime.utcnow()
-        start = dt.datetime.strptime(start_raw, "%d%H%M").replace(year=today.year, month=today.month)
-        end = dt.datetime.strptime(end_raw, "%d%H%M").replace(year=today.year, month=today.month)
-        now = dt.datetime.utcnow()
+        start = dt.datetime.strptime(start_raw, "%d%H%M").replace(year=today.year, month=today.month, tzinfo=dt.timezone.utc)
+        end   = dt.datetime.strptime(end_raw, "%d%H%M").replace(year=today.year, month=today.month, tzinfo=dt.timezone.utc)
+        now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
         status = "active" if start <= now <= end else "expired"
         return f"{start.strftime('%d %b %H:%M')}Z – {end.strftime('%d %b %H:%M')}Z ({status})"
     except Exception:
         return None
+
+def get_query_param_icao() -> str:
+    """Compatível com Streamlit antigos (experimental_get_query_params) e novos (st.query_params)."""
+    try:
+        if hasattr(st, "query_params"):
+            val = st.query_params.get("icao", "")
+            if isinstance(val, list): return ",".join(val)
+            return str(val or "")
+        else:
+            qp = st.experimental_get_query_params()
+            val = qp.get("icao", [""])
+            return ",".join(val) if isinstance(val, list) else str(val or "")
+    except Exception:
+        return ""
 
 # ---------- Data: METAR/TAF via CheckWX ----------
 @st.cache_data(ttl=75)
@@ -123,7 +137,8 @@ def fetch_metar_decoded(icao: str) -> Optional[Dict[str,Any]]:
         r = requests.get(f"https://api.checkwx.com/metar/{icao}/decoded", headers=hdr, timeout=10)
         r.raise_for_status(); data = r.json().get("data", [])
         return data[0] if data else None
-    except Exception: return None
+    except Exception:
+        return None
 
 @st.cache_data(ttl=75)
 def fetch_metar_raw(icao: str) -> str:
@@ -132,8 +147,10 @@ def fetch_metar_raw(icao: str) -> str:
         if not hdr: return ""
         r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=hdr, timeout=10)
         r.raise_for_status(); data = r.json().get("data", [])
-        return str(data[0]) if not isinstance(data[0], dict) else data[0].get("raw") or ""
-    except Exception: return ""
+        if not data: return ""
+        return str(data[0]) if not isinstance(data[0], dict) else (data[0].get("raw") or "")
+    except Exception:
+        return ""
 
 @st.cache_data(ttl=75)
 def fetch_taf_raw(icao: str) -> str:
@@ -142,87 +159,121 @@ def fetch_taf_raw(icao: str) -> str:
         if not hdr: return ""
         r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=hdr, timeout=10)
         r.raise_for_status(); data = r.json().get("data", [])
-        return str(data[0]) if not isinstance(data[0], dict) else data[0].get("raw") or ""
-    except Exception: return ""
+        if not data: return ""
+        return str(data[0]) if not isinstance(data[0], dict) else (data[0].get("raw") or "")
+    except Exception:
+        return ""
+
+# ---------- GitHub Gist helpers ----------
+def gh_headers(token: Optional[str]) -> Dict[str,str]:
+    hdr = {"Accept": "application/vnd.github+json"}
+    if token:
+        hdr["Authorization"] = f"Bearer {token}"
+    return hdr
+
+@st.cache_data(ttl=90)
+def fetch_gist_file_content(gist_id: str, filename: str, token: Optional[str]) -> Tuple[Optional[str], Dict[str,Any]]:
+    """
+    Devolve (conteudo_texto | None, debug_info).
+    Lida com ficheiros truncados -> segue o raw_url.
+    Funciona com Gist público (token None) ou privado (token obrigatório).
+    """
+    debug: Dict[str,Any] = {"stage":"init", "gist_id":gist_id, "filename":filename, "used_raw_url":False}
+    try:
+        r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=gh_headers(token), timeout=10)
+        debug["stage"] = "gist_meta"
+        r.raise_for_status()
+        js = r.json()
+        files = js.get("files", {}) or {}
+        if filename not in files:
+            debug["error"] = f"filename '{filename}' não encontrado no gist"
+            return None, debug
+        fobj = files[filename]
+        debug["truncated"] = bool(fobj.get("truncated"))
+        # Preferir content se não truncado
+        if fobj.get("truncated"):
+            raw_url = fobj.get("raw_url")
+            if not raw_url:
+                debug["error"] = "ficheiro truncado e sem raw_url"
+                return None, debug
+            rr = requests.get(raw_url, headers=gh_headers(token), timeout=10)
+            debug["stage"] = "gist_raw"
+            rr.raise_for_status()
+            debug["used_raw_url"] = True
+            return rr.text, debug
+        else:
+            content = fobj.get("content")
+            if isinstance(content, str):
+                return content, debug
+            debug["error"] = "content vazio ou não textual"
+            return None, debug
+    except Exception as e:
+        debug["exception"] = str(e)
+        return None, debug
+
+def parse_gist_payload(content: Optional[str]) -> Tuple[Dict[str,Any], Optional[str]]:
+    """
+    Tenta json.loads. Se falhar, assume que o conteúdo é texto simples (SIGMET/GAMET)
+    e devolve {"text": content, "updated_utc": None}.
+    Retorna (payload, error_str).
+    """
+    if content is None:
+        return {"text":"", "updated_utc":None}, "sem conteúdo"
+    try:
+        payload = json.loads(content)
+        # Normalizar estrutura esperada
+        if isinstance(payload, dict):
+            text = (payload.get("text") or "").strip() if "text" in payload else ""
+            updated = payload.get("updated_utc") if "updated_utc" in payload else None
+            # se for um array de blocos, junta
+            if not text and isinstance(payload.get("items"), list):
+                text = "\n\n".join([str(x) for x in payload["items"]])
+            return {"text": text, "updated_utc": updated}, None
+        # se for string dentro do JSON
+        if isinstance(payload, str):
+            return {"text": payload.strip(), "updated_utc": None}, None
+        return {"text":"", "updated_utc":None}, "JSON não é dict/str"
+    except Exception:
+        # Conteúdo não-JSON -> tratar como texto simples
+        return {"text": content.strip(), "updated_utc": None}, None
 
 # ---------- Data: GAMET via Gist ----------
 def gamet_gist_config_ok() -> bool:
-    return bool(
-        st.secrets.get("GAMET_GIST_TOKEN","") and
-        st.secrets.get("GAMET_GIST_ID","") and
-        st.secrets.get("GAMET_GIST_FILENAME","")
-    )
+    return bool(st.secrets.get("GAMET_GIST_ID","") and st.secrets.get("GAMET_GIST_FILENAME",""))
 
 @st.cache_data(ttl=90)
-def load_gamet() -> Dict[str,Any]:
+def load_gamet() -> Tuple[Dict[str,Any], Dict[str,Any]]:
     if not gamet_gist_config_ok():
-        return {"text":"", "updated_utc":None}
-    try:
-        token = st.secrets["GAMET_GIST_TOKEN"]
-        gid   = st.secrets["GAMET_GIST_ID"]
-        fn    = st.secrets["GAMET_GIST_FILENAME"]
-        r = requests.get(
-            f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}"},
-            timeout=10
-        )
-        r.raise_for_status()
-        files = r.json().get("files", {})
-        if fn in files and "content" in files[fn]:
-            content = files[fn]["content"]
-            return json.loads(content)
-    except Exception:
-        pass
-    return {"text":"", "updated_utc":None}
+        return {"text":"", "updated_utc":None}, {"error":"GAMET Gist não configurado"}
+    token = st.secrets.get("GAMET_GIST_TOKEN","") or None  # público se None
+    gid   = st.secrets["GAMET_GIST_ID"]
+    fn    = st.secrets["GAMET_GIST_FILENAME"]
+    content, dbg = fetch_gist_file_content(gid, fn, token)
+    payload, perr = parse_gist_payload(content)
+    if perr: dbg["payload_warning"] = perr
+    return payload, dbg
 
 # ---------- Data: SIGMET via Gist (igual ao GAMET) ----------
 def sigmet_gist_config_ok() -> bool:
-    return bool(
-        st.secrets.get("SIGMET_GIST_TOKEN","") and
-        st.secrets.get("SIGMET_GIST_ID","") and
-        st.secrets.get("SIGMET_GIST_FILENAME","")
-    )
+    return bool(st.secrets.get("SIGMET_GIST_ID","") and st.secrets.get("SIGMET_GIST_FILENAME",""))
 
 @st.cache_data(ttl=90)
-def load_sigmet() -> Dict[str,Any]:
-    """
-    Espera um JSON no Gist com o formato:
-    {
-      "text": "texto completo dos SIGMETs LPPC (pode ser múltiplos concatenados)",
-      "updated_utc": "2025-08-24T11:05:00Z"
-    }
-    """
+def load_sigmet() -> Tuple[Dict[str,Any], Dict[str,Any]]:
     if not sigmet_gist_config_ok():
-        return {"text":"", "updated_utc":None}
-    try:
-        token = st.secrets["SIGMET_GIST_TOKEN"]
-        gid   = st.secrets["SIGMET_GIST_ID"]
-        fn    = st.secrets["SIGMET_GIST_FILENAME"]
-        r = requests.get(
-            f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}"},
-            timeout=10
-        )
-        r.raise_for_status()
-        files = r.json().get("files", {})
-        if fn in files and "content" in files[fn]:
-            content = files[fn]["content"]
-            return json.loads(content)
-    except Exception:
-        pass
-    return {"text":"", "updated_utc":None}
+        return {"text":"", "updated_utc":None}, {"error":"SIGMET Gist não configurado"}
+    token = st.secrets.get("SIGMET_GIST_TOKEN","") or None  # público se None
+    gid   = st.secrets["SIGMET_GIST_ID"]
+    fn    = st.secrets["SIGMET_GIST_FILENAME"]
+    content, dbg = fetch_gist_file_content(gid, fn, token)
+    payload, perr = parse_gist_payload(content)
+    if perr: dbg["payload_warning"] = perr
+    return payload, dbg
 
 # ---------- UI ----------
 st.markdown('<div class="page-title">Weather</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtle">METAR · TAF · SIGMET (LPPC) · GAMET</div>', unsafe_allow_html=True)
 
-try:
-    raw = st.query_params.get("icao", "")
-    if isinstance(raw, list): raw = ",".join(raw)
-except Exception:
-    raw = ""
-
-raw = raw or ",".join(DEFAULT_ICAOS)
+raw = get_query_param_icao() or ",".join(DEFAULT_ICAOS)
 cc1, cc2 = st.columns([0.75,0.25])
 with cc1:
     icaos_input = st.text_input("ICAO list (comma-separated)", value=raw)
@@ -243,19 +294,13 @@ for icao in icaos:
     obs = zulu_plus_pt(parse_iso_utc((metar_dec or {}).get("observed")))
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(
-        f'<h3>{icao} {badge}' + (f'<span class="meta">Observed {obs}</span>' if obs else "") + '</h3>',
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n<strong>TAF</strong> {taf_raw or "—"}</div>',
-        unsafe_allow_html=True
-    )
+    st.markdown(f'<h3>{icao} {badge}' + (f'<span class="meta">Observed {obs}</span>' if obs else "") + '</h3>', unsafe_allow_html=True)
+    st.markdown(f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n<strong>TAF</strong> {taf_raw or "—"}</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------- SIGMET LPPC (via Gist) ----------
 st.subheader("SIGMET (LPPC)")
-sigmet = load_sigmet()
+sigmet, sig_dbg = load_sigmet()
 sig_text = (sigmet.get("text") or "").strip()
 sig_updated = zulu_plus_pt(parse_iso_utc(sigmet.get("updated_utc")))
 if not sig_text:
@@ -267,7 +312,7 @@ else:
 
 # ---------- GAMET ----------
 st.subheader("GAMET")
-gamet = load_gamet()
+gamet, gamet_dbg = load_gamet()
 text = (gamet.get("text") or "").strip()
 validity = parse_gamet_validity(text)
 gamet_updated = zulu_plus_pt(parse_iso_utc(gamet.get("updated_utc")))
@@ -282,7 +327,21 @@ if text:
 else:
     st.write("—")
 
-
-
-
-
+# ---------- Debug ----------
+with st.expander("🔧 Debug (Gists & Config)", expanded=False):
+    def show_dbg(title, dbg):
+        st.markdown(f"**{title}**")
+        st.code(json.dumps(dbg, indent=2, ensure_ascii=False))
+    st.markdown("**Secrets configuradas**")
+    st.write({
+        "GAMET_GIST_ID": bool(st.secrets.get("GAMET_GIST_ID","")),
+        "GAMET_GIST_FILENAME": bool(st.secrets.get("GAMET_GIST_FILENAME","")),
+        "GAMET_GIST_TOKEN?": bool(st.secrets.get("GAMET_GIST_TOKEN","")),
+        "SIGMET_GIST_ID": bool(st.secrets.get("SIGMET_GIST_ID","")),
+        "SIGMET_GIST_FILENAME": bool(st.secrets.get("SIGMET_GIST_FILENAME","")),
+        "SIGMET_GIST_TOKEN?": bool(st.secrets.get("SIGMET_GIST_TOKEN","")),
+        "CHECKWX_API_KEY?": bool(st.secrets.get("CHECKWX_API_KEY","")),
+        "streamlit_query_params_api": "st.query_params" if hasattr(st, "query_params") else "experimental_get_query_params"
+    })
+    show_dbg("GAMET debug", gamet_dbg)
+    show_dbg("SIGMET debug", sig_dbg)
