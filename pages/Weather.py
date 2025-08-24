@@ -317,12 +317,6 @@ text = (gamet.get("text") or "").strip()
 validity = parse_gamet_validity(text)
 gamet_updated = zulu_plus_pt(parse_iso_utc(gamet.get("updated_utc")))
 if text:
-    if 'active' in (validity or ""):
-        validity_line = f'<div class="gamet-valid">GAMET Validity: {validity}</div>'
-    else:
-        validity_line = f'<div class="gamet-expired">GAMET Expired: {validity or "Unknown"}</div>'
-    if gamet_updated:
-        validity_line += f'<div class="meta">Atualizado: {gamet_updated}</div>'
     st.markdown(f'<div class="card monos">{validity_line}{text}</div>', unsafe_allow_html=True)
 else:
     st.write("—")
