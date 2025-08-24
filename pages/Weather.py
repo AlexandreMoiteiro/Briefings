@@ -114,7 +114,7 @@ def parse_gamet_validity(text: str) -> Optional[str]:
     except Exception:
         return None
 
-# ---------- Data ----------
+# ---------- Data: METAR/TAF via CheckWX ----------
 @st.cache_data(ttl=75)
 def fetch_metar_decoded(icao: str) -> Optional[Dict[str,Any]]:
     try:
@@ -145,24 +145,7 @@ def fetch_taf_raw(icao: str) -> str:
         return str(data[0]) if not isinstance(data[0], dict) else data[0].get("raw") or ""
     except Exception: return ""
 
-@st.cache_data(ttl=120)
-def fetch_sigmet_lppc() -> List[str]:
-    try:
-        r = requests.get("https://aviationweather.gov/api/data/isigmet",
-                         params={"loc":"eur","format":"json"}, timeout=12)
-        r.raise_for_status(); js = r.json()
-        items = js if isinstance(js, list) else js.get("features", []) or []
-        out: List[str] = []
-        for it in items:
-            props = it.get("properties", {}) if isinstance(it, dict) else {}
-            raw = (props.get("raw") or props.get("sigmet_text") or "").strip()
-            fir = (props.get("fir") or props.get("firid") or "").upper()
-            if not raw: continue
-            if fir == "LPPC" or " LPPC " in f" {raw} ":
-                out.append(raw)
-        return out
-    except Exception: return []
-
+# ---------- Data: GAMET via Gist ----------
 def gamet_gist_config_ok() -> bool:
     return bool(
         st.secrets.get("GAMET_GIST_TOKEN","") and
@@ -178,13 +161,55 @@ def load_gamet() -> Dict[str,Any]:
         token = st.secrets["GAMET_GIST_TOKEN"]
         gid   = st.secrets["GAMET_GIST_ID"]
         fn    = st.secrets["GAMET_GIST_FILENAME"]
-        r = requests.get(f"https://api.github.com/gists/{gid}",
-                         headers={"Authorization": f"token {token}"}, timeout=10)
-        r.raise_for_status(); files = r.json().get("files", {})
+        r = requests.get(
+            f"https://api.github.com/gists/{gid}",
+            headers={"Authorization": f"token {token}"},
+            timeout=10
+        )
+        r.raise_for_status()
+        files = r.json().get("files", {})
         if fn in files and "content" in files[fn]:
             content = files[fn]["content"]
             return json.loads(content)
-    except Exception: pass
+    except Exception:
+        pass
+    return {"text":"", "updated_utc":None}
+
+# ---------- Data: SIGMET via Gist (igual ao GAMET) ----------
+def sigmet_gist_config_ok() -> bool:
+    return bool(
+        st.secrets.get("SIGMET_GIST_TOKEN","") and
+        st.secrets.get("SIGMET_GIST_ID","") and
+        st.secrets.get("SIGMET_GIST_FILENAME","")
+    )
+
+@st.cache_data(ttl=90)
+def load_sigmet() -> Dict[str,Any]:
+    """
+    Espera um JSON no Gist com o formato:
+    {
+      "text": "texto completo dos SIGMETs LPPC (pode ser múltiplos concatenados)",
+      "updated_utc": "2025-08-24T11:05:00Z"
+    }
+    """
+    if not sigmet_gist_config_ok():
+        return {"text":"", "updated_utc":None}
+    try:
+        token = st.secrets["SIGMET_GIST_TOKEN"]
+        gid   = st.secrets["SIGMET_GIST_ID"]
+        fn    = st.secrets["SIGMET_GIST_FILENAME"]
+        r = requests.get(
+            f"https://api.github.com/gists/{gid}",
+            headers={"Authorization": f"token {token}"},
+            timeout=10
+        )
+        r.raise_for_status()
+        files = r.json().get("files", {})
+        if fn in files and "content" in files[fn]:
+            content = files[fn]["content"]
+            return json.loads(content)
+    except Exception:
+        pass
     return {"text":"", "updated_utc":None}
 
 # ---------- UI ----------
@@ -194,7 +219,8 @@ st.markdown('<div class="subtle">METAR · TAF · SIGMET (LPPC) · GAMET</div>', 
 try:
     raw = st.query_params.get("icao", "")
     if isinstance(raw, list): raw = ",".join(raw)
-except Exception: raw = ""
+except Exception:
+    raw = ""
 
 raw = raw or ",".join(DEFAULT_ICAOS)
 cc1, cc2 = st.columns([0.75,0.25])
@@ -217,31 +243,44 @@ for icao in icaos:
     obs = zulu_plus_pt(parse_iso_utc((metar_dec or {}).get("observed")))
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(f'<h3>{icao} {badge}' + (f'<span class="meta">Observed {obs}</span>' if obs else "") + '</h3>', unsafe_allow_html=True)
-    st.markdown(f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n<strong>TAF</strong> {taf_raw or "—"}</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<h3>{icao} {badge}' + (f'<span class="meta">Observed {obs}</span>' if obs else "") + '</h3>',
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        f'<div class="monos"><strong>METAR</strong> {metar_raw or "—"}\n\n<strong>TAF</strong> {taf_raw or "—"}</div>',
+        unsafe_allow_html=True
+    )
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------- SIGMET LPPC ----------
+# ---------- SIGMET LPPC (via Gist) ----------
 st.subheader("SIGMET (LPPC)")
-sigs = fetch_sigmet_lppc()
-if not sigs:
+sigmet = load_sigmet()
+sig_text = (sigmet.get("text") or "").strip()
+sig_updated = zulu_plus_pt(parse_iso_utc(sigmet.get("updated_utc")))
+if not sig_text:
     st.write("—")
 else:
-    for s in sigs:
-        st.markdown(f'<div class="card monos">{s}</div>', unsafe_allow_html=True)
+    if sig_updated:
+        st.markdown(f'<div class="meta">Atualizado: {sig_updated}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="card monos">{sig_text}</div>', unsafe_allow_html=True)
 
 # ---------- GAMET ----------
 st.subheader("GAMET")
 gamet = load_gamet()
 text = (gamet.get("text") or "").strip()
 validity = parse_gamet_validity(text)
+gamet_updated = zulu_plus_pt(parse_iso_utc(gamet.get("updated_utc")))
 if text:
-    validity_line = f'<div class="gamet-valid">GAMET Validity: {validity}</div>' if 'active' in (validity or "") else f'<div class="gamet-expired">GAMET Expired: {validity or "Unknown"}</div>'
+    if 'active' in (validity or ""):
+        validity_line = f'<div class="gamet-valid">GAMET Validity: {validity}</div>'
+    else:
+        validity_line = f'<div class="gamet-expired">GAMET Expired: {validity or "Unknown"}</div>'
+    if gamet_updated:
+        validity_line += f'<div class="meta">Atualizado: {gamet_updated}</div>'
     st.markdown(f'<div class="card monos">{validity_line}{text}</div>', unsafe_allow_html=True)
 else:
     st.write("—")
-
-
 
 
 
