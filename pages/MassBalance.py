@@ -1,3 +1,6 @@
+# Streamlit app – Tecnam P2008 (M&B + Performance) – EN
+# Reqs: streamlit, pytz, pypdf
+
 import streamlit as st
 import datetime
 from pathlib import Path
@@ -179,7 +182,7 @@ def wind_components(runway_qfu_deg, wind_dir_deg, wind_speed):
     cw = max(-abs(wind_speed), min(abs(wind_speed), cw))
     return hw, cw
 
-# Correções (iguais ao teu modelo inicial)
+# Correções
 def to_corrections_takeoff_gr(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     gr = float(ground_roll)
     if headwind_kt >= 0: gr -= 5.0 * headwind_kt
@@ -335,7 +338,6 @@ for r in perf_rows:
     r['ldg_margin'] = r['lda_av'] - r['ldg_50']
 
 def fmt(v): return f"{v:.0f}" if isinstance(v, (int,float)) else str(v)
-
 def status_cell(ok, margin, pct=None):
     cls = 'ok' if ok else 'bad'
     sign = '+' if margin >= 0 else '−'
@@ -411,11 +413,13 @@ if simple_policy:
     total_ramp = req_ramp + extra_l
     req_ramp_min = su_min + trip_min + block9_min
     total_ramp_min = req_ramp_min + extra_min
-    # Set detailed legs to zero for PDF fields
+
+    # vars de detalhe usadas no PDF (vão a 0 porque serão mostradas como "-" na folha)
     climb_min_eff = 0
     enrt_min_eff = 0
     desc_min_eff = 0
     cont_min = 0
+    cont_l = 0.0
 else:
     climb_min_eff   = climb_min
     enrt_min_eff    = enrt_h*60 + enrt_min
@@ -440,7 +444,7 @@ st.markdown(f"- **(5) Trip**: {trip_min} min → {trip_l:.1f} L" + ("  *(políti
 if simple_policy:
     st.markdown(f"- **(9)**: {block9_min} min → {time_to_liters(0, block9_min):.1f} L  *(política)*")
 else:
-    st.markdown(f"- **(6) Contingency 5%**: {time_to_liters(0, cont_min):.1f} L")
+    st.markdown(f"- **(6) Contingency 5%**: {cont_l:.1f} L")
     st.markdown(f"- **(7) Alternate**: {alt_min} min → {time_to_liters(0, alt_min):.1f} L")
     st.markdown(f"- **(8) Reserve**: {reserve_min} min → {time_to_liters(0, reserve_min):.1f} L")
 
@@ -449,7 +453,7 @@ st.markdown(f"- **Extra**: {extra_l:.1f} L" + ("  *(auto para bater com M&B)*" i
 st.markdown(f"- **Total ramp (planeado)**: **{total_ramp:.1f} L**  *(tempo: {fmt_hm(total_ramp_min)})*")
 st.markdown(f"- **Fuel carregado (M&B)**: **{fuel_l:.1f} L**")
 if simple_policy and missing_l > 0.1:
-    st.error(f"Faltam {missing_l:.1f} L para cumprir a política (Taxi 15min + 1h no 5 + 1h no 9).")
+    st.error(f"Faltam {missing_l:.1f} L para cumprir a política (Taxi 15min + 1h no (5) + 1h no (9)).")
 st.markdown(f"- **Ainda poderias levar**: **{remaining_fuel_l:.1f} L** (limitado por **{'Tanque' if remaining_by_tank < remaining_by_mtow else 'MTOW'}**).")
 
 # ===== PDF export =====
@@ -537,7 +541,6 @@ try:
         if not r: continue
         put_any(named_map, fieldset, f"Airfield_{suf}", r["icao"])
         put_any(named_map, fieldset, f"QFU_{suf}", f"{int(round(r['qfu'])):03d}")
-        # Elevation specific fields
         if suf == "Dep": put_any(named_map, fieldset, "Elev_Dep", f"{r['elev_ft']:.0f}")
         elif suf == "Arr": put_any(named_map, fieldset, "Elev_Arr", f"{r['elev_ft']:.0f}")
         else: put_any(named_map, fieldset, "Elev_Alt", f"{r['elev_ft']:.0f}")
@@ -548,33 +551,41 @@ try:
         put_any(named_map, fieldset, f"PA_{suf}", f"{r['pa_ft']:.0f}")
         put_any(named_map, fieldset, f"DA_{suf}", f"{r['da_ft']:.0f}")
         put_any(named_map, fieldset, f"TODA_{suf}", f"{r['toda_av']:.0f}")
-        put_any(named_map, fieldset, f"TODR_{suf}", f"{r['to_50']:.0f}")
+
+        # Percentagem dentro do campo TODR/LDR
+        tod_str = f"{r['to_50']:.0f} ({r['tod_pct']:.0f}%)" if r.get('tod_pct') is not None else f"{r['to_50']:.0f}"
+        ldr_str = f"{r['ldg_50']:.0f} ({r['ldg_pct']:.0f}%)" if r.get('ldg_pct') is not None else f"{r['ldg_50']:.0f}"
+
+        put_any(named_map, fieldset, f"TODR_{suf}", tod_str)
         put_any(named_map, fieldset, f"LDA_{suf}", f"{r['lda_av']:.0f}")
-        put_any(named_map, fieldset, f"LDR_{suf}", f"{r['ldg_50']:.0f}")
+        put_any(named_map, fieldset, f"LDR_{suf}", ldr_str)
         put_any(named_map, fieldset, f"ROC_{suf}", f"{r.get('roc', 0):.0f}")
 
     # Fuel — campos do PDF (preenchemos também os detalhados se modo normal)
+    def dash_if(cond, val):
+        return val if not cond else "-"
+
     put_any(named_map, fieldset, "Taxi_T", fmt_hm(su_min))
     put_any(named_map, fieldset, "Taxi_F", f"{int(round(RATE_LPH * su_min/60))}")
     put_any(named_map, fieldset, "Trip_T", fmt_hm(trip_min))
     put_any(named_map, fieldset, "Trip_F", f"{int(round(RATE_LPH * (trip_min/60)))}")
 
-    # Detalhe (2/3/4) – só faz sentido fora do modo simples, mas colocamos zeros se simples
-    put_any(named_map, fieldset, "Climb_T", fmt_hm(climb_min_eff))
-    put_any(named_map, fieldset, "Climb_F", f"{int(round(RATE_LPH * (climb_min_eff/60)))}")
-    put_any(named_map, fieldset, "Enroute_T", fmt_hm(enrt_min_eff))
-    put_any(named_map, fieldset, "Enroute_F", f"{int(round(RATE_LPH * (enrt_min_eff/60)))}")
-    put_any(named_map, fieldset, "Descent_T", fmt_hm(desc_min_eff))
-    put_any(named_map, fieldset, "Descent_F", f"{int(round(RATE_LPH * (desc_min_eff/60)))}")
+    # Detalhe (2/3/4)
+    put_any(named_map, fieldset, "Climb_T", dash_if(simple_policy, fmt_hm(climb_min_eff)))
+    put_any(named_map, fieldset, "Climb_F", dash_if(simple_policy, f"{int(round(RATE_LPH * (climb_min_eff/60)))}"))
+    put_any(named_map, fieldset, "Enroute_T", dash_if(simple_policy, fmt_hm(enrt_min_eff)))
+    put_any(named_map, fieldset, "Enroute_F", dash_if(simple_policy, f"{int(round(RATE_LPH * (enrt_min_eff/60)))}"))
+    put_any(named_map, fieldset, "Descent_T", dash_if(simple_policy, fmt_hm(desc_min_eff)))
+    put_any(named_map, fieldset, "Descent_F", dash_if(simple_policy, f"{int(round(RATE_LPH * (desc_min_eff/60)))}"))
 
-    # 6/7/8 (Cont/Alt/Reserve)
     if simple_policy:
-        put_any(named_map, fieldset, "Contingency_T", fmt_hm(0))
-        put_any(named_map, fieldset, "Contingency_F", "0")
-        put_any(named_map, fieldset, "Alternate_T", fmt_hm(0))
-        put_any(named_map, fieldset, "Alternate_F", "0")
-        put_any(named_map, fieldset, "Reserve_T", fmt_hm(0))
-        put_any(named_map, fieldset, "Reserve_F", "0")
+        put_any(named_map, fieldset, "Contingency_T", "-")
+        put_any(named_map, fieldset, "Contingency_F", "-")
+        put_any(named_map, fieldset, "Alternate_T", "-")
+        put_any(named_map, fieldset, "Alternate_F", "-")
+        # Reserva = 1h em política simplificada
+        put_any(named_map, fieldset, "Reserve_T", fmt_hm(60))
+        put_any(named_map, fieldset, "Reserve_F", f"{int(round(time_to_liters(0,60)))}")
     else:
         put_any(named_map, fieldset, "Contingency_T", fmt_hm(cont_min))
         put_any(named_map, fieldset, "Contingency_F", f"{int(round(cont_l))}")
