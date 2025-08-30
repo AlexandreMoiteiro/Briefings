@@ -1,6 +1,3 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – EN
-# Reqs: streamlit, pytz, pypdf
-
 import streamlit as st
 import datetime
 from pathlib import Path
@@ -290,8 +287,8 @@ with right:
             if abs(slope_pc) > 3.0: slope_warn = True
 
             # PA/DA
-            pa_ft = elev + (1013.25 - qnh) * 27
-            isa_temp = 15 - 2*(pa_ft/1000)
+            pa_ft = elev + (1013 - qnh) * 30
+            isa_temp = 15 - 2*(elev/1000)
             da_ft = pa_ft + (120*(temp - isa_temp))
 
             # Interpolação por PA & OAT
@@ -309,6 +306,10 @@ with right:
             roc_val = roc_interp(pa_ft, temp, total_weight) if total_weight>0 else 0.0
             vy_val = vy_interp(pa_ft, total_weight) if total_weight>0 else 0.0
 
+            # Percentagens (uso da pista)
+            tod_pct = (to_50_tab / toda_av * 100.0) if toda_av > 0 else 0.0
+            ldg_pct = (ldg_50_tab / lda_av * 100.0) if lda_av > 0 else 0.0
+
             perf_rows.append({
                 'role': a['role'], 'icao': icao, 'qfu': qfu,
                 'elev_ft': elev, 'qnh': qnh, 'temp': temp,
@@ -319,6 +320,7 @@ with right:
                 'hw_comp': hw, 'cw_comp': cw, 'paved': paved, 'slope_pc': slope_pc,
                 'roc': roc_val, 'vy': vy_val,
                 'wind_dir': wind_dir, 'wind_kt': wind_kt,
+                'tod_pct': tod_pct, 'ldg_pct': ldg_pct,
             })
 
     if slope_warn:
@@ -333,10 +335,12 @@ for r in perf_rows:
     r['ldg_margin'] = r['lda_av'] - r['ldg_50']
 
 def fmt(v): return f"{v:.0f}" if isinstance(v, (int,float)) else str(v)
-def status_cell(ok, margin):
+
+def status_cell(ok, margin, pct=None):
     cls = 'ok' if ok else 'bad'
     sign = '+' if margin >= 0 else '−'
-    return f"<span class='{cls}'>{'OK' if ok else 'NOK'} ({sign}{abs(margin):.0f} m)</span>"
+    pct_str = f" • {pct:.0f}%" if (pct is not None and pct>0) else ""
+    return f"<span class='{cls}'>{'OK' if ok else 'NOK'} ({sign}{abs(margin):.0f} m){pct_str}</span>"
 
 st.markdown(
     "<table class='mb-table'><tr>"
@@ -351,9 +355,9 @@ st.markdown(
         f"<td>{fmt(r['qfu'])}</td>"
         f"<td>{fmt(r['pa_ft'])}/{fmt(r['da_ft'])}</td>"
         f"<td>{fmt(r['to_50'])}</td><td>{fmt(r['toda_av'])}</td>"
-        f"<td>{status_cell(r['tod_ok'], r['tod_margin'])}</td>"
+        f"<td>{status_cell(r['tod_ok'], r['tod_margin'], r['tod_pct'])}</td>"
         f"<td>{fmt(r['ldg_50'])}</td><td>{fmt(r['lda_av'])}</td>"
-        f"<td>{status_cell(r['ldg_ok'], r['ldg_margin'])}</td>"
+        f"<td>{status_cell(r['ldg_ok'], r['ldg_margin'], r['ldg_pct'])}</td>"
         f"<td>{('HW' if r['hw_comp']>=0 else 'TW')} {abs(r['hw_comp']):.0f} / {abs(r.get('cw_comp',0)):.0f} kt</td>"
         f"<td>{fmt(r.get('roc',0))}</td><td>{fmt(r.get('vy',0))}</td>"
         f"</tr>"
@@ -407,6 +411,11 @@ if simple_policy:
     total_ramp = req_ramp + extra_l
     req_ramp_min = su_min + trip_min + block9_min
     total_ramp_min = req_ramp_min + extra_min
+    # Set detailed legs to zero for PDF fields
+    climb_min_eff = 0
+    enrt_min_eff = 0
+    desc_min_eff = 0
+    cont_min = 0
 else:
     climb_min_eff   = climb_min
     enrt_min_eff    = enrt_h*60 + enrt_min
@@ -416,6 +425,7 @@ else:
     trip_min = climb_min_eff + enrt_min_eff + desc_min_eff
     trip_l   = time_to_liters(0, trip_min)
     cont_l   = 0.05 * trip_l
+    cont_min = int(round(0.05 * trip_min))
     extra_min = extra_min_user
     extra_l   = time_to_liters(0, extra_min)
     req_ramp = time_to_liters(0, su_min) + trip_l + cont_l + time_to_liters(0, alt_min_eff) + time_to_liters(0, reserve_min_eff)
@@ -430,7 +440,7 @@ st.markdown(f"- **(5) Trip**: {trip_min} min → {trip_l:.1f} L" + ("  *(políti
 if simple_policy:
     st.markdown(f"- **(9)**: {block9_min} min → {time_to_liters(0, block9_min):.1f} L  *(política)*")
 else:
-    st.markdown(f"- **(6) Contingency 5%**: {cont_l:.1f} L")
+    st.markdown(f"- **(6) Contingency 5%**: {time_to_liters(0, cont_min):.1f} L")
     st.markdown(f"- **(7) Alternate**: {alt_min} min → {time_to_liters(0, alt_min):.1f} L")
     st.markdown(f"- **(8) Reserve**: {reserve_min} min → {time_to_liters(0, reserve_min):.1f} L")
 
@@ -444,18 +454,22 @@ st.markdown(f"- **Ainda poderias levar**: **{remaining_fuel_l:.1f} L** (limitado
 
 # ===== PDF export =====
 st.markdown("### PDF export (Tecnam P2008 – M&B and Performance Data Sheet)")
-PDF_TEMPLATE_PATH = ("pages/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf"
-                     if simple_policy else
-                     "pages/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet1.pdf")
+# Always use the NEW sheet. Try local 'pages/' first, then fallback to /mnt/data (uploaded).
+PDF_TEMPLATE_PATHS = [
+    "pages/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf",
+    "/mnt/data/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf",
+]
 
 reg_input = st.text_input("Aircraft registration", value="")
 date_str = st.text_input("Date (dd/mm/yyyy)",
                          datetime.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%d/%m/%Y"))
 
-def read_pdf_bytes(path_str: str) -> bytes:
-    p = Path(path_str)
-    if not p.exists(): raise FileNotFoundError(f"Template not found: {p}")
-    return p.read_bytes()
+def read_pdf_bytes(paths) -> bytes:
+    for path_str in paths:
+        p = Path(path_str)
+        if p.exists():
+            return p.read_bytes()
+    raise FileNotFoundError(f"Template not found in any known path: {paths}")
 
 def get_field_names(template_bytes: bytes) -> set:
     names = set()
@@ -496,7 +510,7 @@ def put_any(out: dict, fieldset: set, keys, value: str):
 # build fields map
 named_map: Dict[str,str] = {}
 try:
-    template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATH)
+    template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
     fieldset = get_field_names(template_bytes)
 
     # M&B
@@ -515,7 +529,7 @@ try:
     put_any(named_map, fieldset, "Aircraf_Reg", reg_input or "")
     put_any(named_map, fieldset, "Date", date_str)
 
-    # Perf por leg -> nomes EXATOS do teu PDF
+    # Perf por leg -> nomes EXATOS do PDF (Dep/Arr/Alt)
     roles = {"Departure": "Dep", "Arrival": "Arr", "Alternate": "Alt"}
     by_role = {r["role"]: r for r in perf_rows} if perf_rows else {}
     for role, suf in roles.items():
@@ -523,7 +537,7 @@ try:
         if not r: continue
         put_any(named_map, fieldset, f"Airfield_{suf}", r["icao"])
         put_any(named_map, fieldset, f"QFU_{suf}", f"{int(round(r['qfu'])):03d}")
-        # Elevation — agora existem Dep/Arr/Alt no PDF
+        # Elevation specific fields
         if suf == "Dep": put_any(named_map, fieldset, "Elev_Dep", f"{r['elev_ft']:.0f}")
         elif suf == "Arr": put_any(named_map, fieldset, "Elev_Arr", f"{r['elev_ft']:.0f}")
         else: put_any(named_map, fieldset, "Elev_Alt", f"{r['elev_ft']:.0f}")
@@ -539,11 +553,36 @@ try:
         put_any(named_map, fieldset, f"LDR_{suf}", f"{r['ldg_50']:.0f}")
         put_any(named_map, fieldset, f"ROC_{suf}", f"{r.get('roc', 0):.0f}")
 
-    # Fuel — campos do PDF (sem sufixo 'L' nos _F)
+    # Fuel — campos do PDF (preenchemos também os detalhados se modo normal)
     put_any(named_map, fieldset, "Taxi_T", fmt_hm(su_min))
     put_any(named_map, fieldset, "Taxi_F", f"{int(round(RATE_LPH * su_min/60))}")
     put_any(named_map, fieldset, "Trip_T", fmt_hm(trip_min))
     put_any(named_map, fieldset, "Trip_F", f"{int(round(RATE_LPH * (trip_min/60)))}")
+
+    # Detalhe (2/3/4) – só faz sentido fora do modo simples, mas colocamos zeros se simples
+    put_any(named_map, fieldset, "Climb_T", fmt_hm(climb_min_eff))
+    put_any(named_map, fieldset, "Climb_F", f"{int(round(RATE_LPH * (climb_min_eff/60)))}")
+    put_any(named_map, fieldset, "Enroute_T", fmt_hm(enrt_min_eff))
+    put_any(named_map, fieldset, "Enroute_F", f"{int(round(RATE_LPH * (enrt_min_eff/60)))}")
+    put_any(named_map, fieldset, "Descent_T", fmt_hm(desc_min_eff))
+    put_any(named_map, fieldset, "Descent_F", f"{int(round(RATE_LPH * (desc_min_eff/60)))}")
+
+    # 6/7/8 (Cont/Alt/Reserve)
+    if simple_policy:
+        put_any(named_map, fieldset, "Contingency_T", fmt_hm(0))
+        put_any(named_map, fieldset, "Contingency_F", "0")
+        put_any(named_map, fieldset, "Alternate_T", fmt_hm(0))
+        put_any(named_map, fieldset, "Alternate_F", "0")
+        put_any(named_map, fieldset, "Reserve_T", fmt_hm(0))
+        put_any(named_map, fieldset, "Reserve_F", "0")
+    else:
+        put_any(named_map, fieldset, "Contingency_T", fmt_hm(cont_min))
+        put_any(named_map, fieldset, "Contingency_F", f"{int(round(cont_l))}")
+        put_any(named_map, fieldset, "Alternate_T", fmt_hm(alt_min))
+        put_any(named_map, fieldset, "Alternate_F", f"{int(round(time_to_liters(0, alt_min)))}")
+        put_any(named_map, fieldset, "Reserve_T", fmt_hm(reserve_min))
+        put_any(named_map, fieldset, "Reserve_F", f"{int(round(time_to_liters(0, reserve_min)))}")
+
     put_any(named_map, fieldset, "Ramp_T", fmt_hm(req_ramp_min))
     put_any(named_map, fieldset, "Ramp_F", f"{int(round(req_ramp))}")
     put_any(named_map, fieldset, "Extra_T", fmt_hm(extra_min))
