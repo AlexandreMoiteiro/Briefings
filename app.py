@@ -70,7 +70,7 @@ def ensure_png_bytes(uploaded):
         img = Image.open(uploaded).convert("RGB").copy()
     return to_png_bytes(img)
 
-# Novo: gerar PNG a partir de bytes já lidos (evita ler ficheiro 2x) + fallback robusto
+# Novo: gerar PNG a partir de bytes ja lidos (evita ler ficheiro 2x) + fallback robusto
 def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
     try:
         m = (mime or "").lower()
@@ -100,7 +100,7 @@ def extract_pdf_text_first_page(pdf_bytes: bytes) -> str:
     except Exception:
         return ""
 
-# Heurísticas simples para detetar tipo/validades/região a partir de nome+texto
+# Heuristicas simples para detetar tipo/validades/regiao a partir de nome+texto
 _DEF_KINDS = ["SIGWX", "SPC", "Wind & Temp", "Other"]
 
 def guess_chart_kind(name: str, text: str) -> str:
@@ -109,15 +109,15 @@ def guess_chart_kind(name: str, text: str) -> str:
         return "SIGWX"
     if any(x in s for x in ["surface pressure", "mslp", "isobar", "spc"]):
         return "SPC"
-    if ("wind" in s and ("temp" in s or "temperature" in s)) or re.search(r"\bfl\d{2,3}\b", s):
+    if ("wind" in s and ("temp" in s or "temperature" in s)) or re.search(r"\\bfl\\d{2,3}\\b", s):
         return "Wind & Temp"
     return "Other"
 
 def extract_validity(s: str) -> str:
     u = (s or "").upper()
-    m = re.search(r"VALID\s*([0-3]?\d/?[0-2]?\dZ\s*-\s*[0-3]?\d/?[0-2]?\dZ|[0-2]?\d{2,3}Z)", u)
+    m = re.search(r"VALID\\s*([0-3]?\\d/?[0-2]?\\dZ\\s*-\\s*[0-3]?\\d/?[0-2]?\\dZ|[0-2]?\\d{2,3}Z)", u)
     if m: return m.group(0).strip()
-    m2 = re.search(r"\b([01]?\d|2[0-3])(?:00)?Z\b(\s*-\s*([01]?\d|2[0-3])(?:00)?Z\b)?", u)
+    m2 = re.search(r"\\b([01]?\\d|2[0-3])(?:00)?Z\\b(\\s*-\\s*([01]?\\d|2[0-3])(?:00)?Z\\b)?", u)
     if m2: return m2.group(0).strip()
     return ""
 
@@ -137,9 +137,17 @@ def derive_default_title(kind: str, filename: str, text_hint: str) -> str:
     short = extract_validity(filename) or extract_validity(text_hint)
     return f"{base}{' — '+short if short else ''}"
 
+# ---------- Ordenacao logica de charts ----------
+_KIND_RANK = {"SPC": 1, "SIGWX": 2, "Wind & Temp": 3, "Other": 9}
+def _chart_sort_key(c: Dict[str, Any]) -> Tuple[int, int]:
+    kind = c.get("kind", "Other")
+    rank = _KIND_RANK.get(kind, 9)
+    order = int(c.get("order", 9999) or 9999)
+    return (rank, order)
+
 # ---------- METAR/TAF (CheckWX) ----------
 def cw_headers() -> Dict[str,str]:
-    key = st.secrets.get("CHECKWX_API_KEY","\n").strip()
+    key = st.secrets.get("CHECKWX_API_KEY","\\n").strip()
     return {"X-API-Key": key} if key else {}
 
 def fetch_metar_now(icao: str) -> str:
@@ -298,7 +306,7 @@ def save_notams_to_gist(new_map: Dict[str, List[str]]) -> tuple[bool, str]:
     except Exception as e:
         return False, f"Erro a gravar no Gist: {e}"
 
-# ---------- Gist helpers: SIGMET (texto único, sem fetch automático) ----------
+# ---------- Gist helpers: SIGMET (texto unico, sem fetch automatico) ----------
 def _get_sigmet_secrets():
     token = (st.secrets.get("SIGMET_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get("SIGMET_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
@@ -375,21 +383,22 @@ def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str
     except Exception as e2:
         return ascii_safe(f"Analise indisponivel (erro IA: {e2})")
 
-# ---------- Análises (PT) ----------
+# ---------- Analises (PT) — PROMPTS REFORCADOS ----------
 def analyze_chart_pt(kind: str, img_b64: str, filename_hint: str = "") -> str:
     try:
         model_name = st.secrets.get("OPENAI_MODEL_VISION", "gpt-4o").strip() or "gpt-4o"
     except Exception:
         model_name = "gpt-4o"
     sys = (
-        "És meteorologista aeronáutico sénior. Analisa EXAUSTIVAMENTE o chart em PT-PT, "
-        "em prosa corrida (sem listas) e em 3 blocos curtos: "
-        "1) Visão geral — padrão sinóptico, frentes (tipo e movimento), centros/pressão, jatos (altitude/nóe de isotacas), áreas de fenómenos e janelas de validade (horas UTC exatamente como no chart). "
-        "2) Portugal continental — detalhe por litoral/N/C/S com ALTURA/NÍVEL (SFC/AGL/AMSL/FL) e valores: vento (sfc e níveis usuais VFR/IFR), visibilidade/tecto, precipitação e tipo, nebulosidade (FEW/SCT/BKN/OVC com alturas tops/bases), 0°C/nível de congelação, gelo (lev/mod/sev e camadas), turbulência (lev/mod/sev), cisalhamento, CB/TCU e áreas SIGWX. "
-        "3) Alentejo (inclui LPSO) — pormenor operacional: rotas/altitudes recomendadas/evitadas, riscos, alternantes. "
-        "IDENTIFICA e NOMEIA TODOS os símbolos/etiquetas visíveis (linhas, setas, barbules, isóbaras/isotacas/isotermas, limites de áreas, legendas e escalas) e explica o seu significado. "
-        "Se o chart tiver horários/validade, escreve-os explicitamente; se algo não estiver indicado, diz ‘não indicado no chart’. "
-        "Conclui com impacto operacional claro (VFR/IFR) e ações práticas. Usa apenas informação visível; não inventes."
+        "Es meteorologista aeronautico senior. Responde em PT-PT, texto corrido, sem listas, "
+        "com 4 blocos compactos e sempre baseados apenas no que se ve no chart (nao inventes): "
+        "1) Visao geral — padrao sinoptico, centros/isobaras/isotermas/isotacas, jatos (niveis/FL e isotacas), frentes (tipo/movimento), areas de fenomenos e janela de validade exatamente como inscrita. "
+        "2) Portugal continental — litoral/N/C/S com niveis/altitudes (SFC/AGL/AMSL/FL) e valores para vento, visibilidade/tecto, precipitacao/tipo, nebulosidade (FEW/SCT/BKN/OVC com bases/tops), risco de gelo (lev/mod/sev; camadas) e turbulencia (lev/mod/sev), cisalhamento e presenca de TCU/CB. "
+        "3) Alentejo (inclui LPSO) — conselhos operacionais: altitudes/rotas recomendadas/evitadas, riscos e alternantes. "
+        "4) Legenda/Simbologia — identifica todos os simbolos/linhas/setas/barbulas/limites/etiquetas presentes no chart e explica o seu significado pratico. "
+        "Se o chart for SPC, relaciona explicitamente cada frente (fria/quente/oclusao/estacionaria) com os fenomenos e tipologia de nuvens esperaveis (SC/ST/NS/AS/AC/TCU/CB) e impactos em superficie e niveis usuais VFR/IFR; se nao estiver desenhado, diz 'nao indicado no chart'. "
+        "Se for SIGWX, detalha jatos (eixo/nivel/isotacas), areas de turbulencia/gelo/CB/TCU com limites verticais e validade, explicando a simbologia (por ex., linhas serrilhadas, sombreados, triangulos/semicirculos das frentes, notacao de tops/bases, abreviacoes). "
+        "Termina com impacto operacional (VFR/IFR) e acoes praticas. Usa horas UTC tal como no chart."
     )
     user_txt = f"Tipo de chart: {kind}. Ficheiro: {filename_hint}"
     if not (st.secrets.get("OPENAI_API_KEY") or "").strip():
@@ -404,8 +413,8 @@ def analyze_chart_pt(kind: str, img_b64: str, filename_hint: str = "") -> str:
                     {"type":"image_url","image_url":{"url":f"data:image/png;base64,{img_b64}"}}
                 ]},
             ],
-            max_tokens=900,
-            temperature=0.2
+            max_tokens=1100,
+            temperature=0.15
         )
         out = (r.choices[0].message.content or "").strip()
         return ascii_safe(out) if out else "Analise indisponivel."
@@ -414,33 +423,35 @@ def analyze_chart_pt(kind: str, img_b64: str, filename_hint: str = "") -> str:
 
 def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
     sys = (
-        "És meteorologista aeronáutico sénior. Em PT-PT e TEXTO CORRIDO, faz uma interpretação exaustiva do METAR e TAF, "
-        "decodificando token a token SEM OMITIR o significado de NENHUM código (inclui, se existirem: COR/AMD, hora, vento/VRB/GUST, CAVOK, RVR, vis, fenómenos (+/– RA/TS/BR/FG/… e ‘RE’), nuvens FEW/SCT/BKN/OVC/NSC/NCD com alturas, T/Td, QNH/QFE, TREND, RMK). "
-        "Para o TAF, explica validade, BECMG/TEMPO/PROB, e cada linha/segmento. "
-        "Se um grupo não existir, indica ‘não presente’. "
-        "Termina com impacto operacional (VFR/IFR, altitudes, riscos) e um mini-glossário das abreviaturas encontradas. Usa apenas o texto fornecido."
+        "Es meteorologista aeronautico senior. Em PT-PT e TEXTO CORRIDO, interpreta exaustivamente o METAR e o TAF token a token: "
+        "inclui (se existirem) COR/AMD, hora, vento/VRB/rajadas, CAVOK, RVR, visibilidade, fenomenos (+/– RA/TS/BR/FG/… e 'RE'), "
+        "nuvens FEW/SCT/BKN/OVC/NSC/NCD com alturas e equivalencia em oktas (FEW 1–2, SCT 3–4, BKN 5–7, OVC 8), T/Td, QNH/QFE, TREND e RMK. "
+        "Para o TAF: janela de validade, BECMG/TEMPO/PROB, e interpretacao linha a linha. "
+        "Se um grupo nao existir, escreve 'nao presente'. "
+        "Conclui com impacto operacional (VFR/IFR, altitudes recomendadas, riscos especificos) e um mini-glossario dos codigos usados."
     )
-    user = f"Aerodromo {icao}\n\nMETAR (RAW):\n{metar}\n\nTAF (RAW):\n{taf}"
-    return gpt_text(sys, user, max_tokens=2000)
+    user = f"Aerodromo {icao}\\n\\nMETAR (RAW):\\n{metar}\\n\\nTAF (RAW):\\n{taf}"
+    return gpt_text(sys, user, max_tokens=2200)
 
 def analyze_sigmet_pt(sigmet_text: str) -> str:
     if not sigmet_text.strip(): return ""
     sys = (
-        "És meteorologista aeronáutico sénior. Em PT-PT e prosa corrida, interpreta o SIGMET LPPC de forma completa: "
-        "fenómeno, área/limites, níveis/FL, validade/horas, movimento/intensidade, e impacto operacional (VFR/IFR)."
+        "Es meteorologista aeronautico senior. Em PT-PT, interpreta o SIGMET LPPC: fenomeno, area/limites (com coordenadas se existirem), "
+        "niveis/FL, validade/hora, movimento/intensidade e impacto operacional (VFR/IFR). "
+        "Inclui uma breve explicacao da simbologia/abreviaturas usada no texto (ex.: BTN, TOP/BASE, EMBD/OCNL/FRQ, SEV TURB/ICE, MOV dir/vel)."
     )
-    return gpt_text(sys, sigmet_text, max_tokens=1200)
+    return gpt_text(sys, sigmet_text, max_tokens=1400)
 
 def analyze_gamet_pt(gamet_text: str) -> str:
     if not gamet_text.strip(): return ""
     lat, lon = LPSO_ARP
     sys = (
-        "És meteorologista aeronáutico sénior. Em PT-PT e texto corrido, explica o GAMET LPPC EXAUSTIVAMENTE: "
-        "fenómenos, níveis/camadas, áreas e subdivisões, validades/horas e qualquer PROB/TEMPO/BECMG, interpretando TODOS os códigos SEM omitir significados. "
-        "Se houver coordenadas/áreas, avalia explicitamente se ABRANGEM o ponto LPSO (Ponte de Sor) ARP 39°12'42\"N 008°03'28\"W (≈ {lat:.6f}, {lon:.6f}). "
-        "Escreve no final uma linha clara: ‘Abrange LPSO’, ‘Não abrange LPSO’ ou ‘Indeterminado com o texto dado’. Usa apenas o texto fornecido; não inventes."
+        "Es meteorologista aeronautico senior. Em PT-PT e texto corrido, explica o GAMET LPPC EXAUSTIVAMENTE: "
+        "fenomenos, niveis/camadas, areas e subdivisoes, validades/horas e qualquer PROB/TEMPO/BECMG, interpretando TODOS os codigos SEM omitir significados. "
+        "Se houver coordenadas/areas, avalia explicitamente se ABRANGEM o ponto LPSO (Ponte de Sor) ARP 39°12'42\\\"N 008°03'28\\\"W (≈ {lat:.6f}, {lon:.6f}). "
+        "Escreve no final uma linha clara: 'Abrange LPSO', 'Nao abrange LPSO' ou 'Indeterminado com o texto dado'. Usa apenas o texto fornecido; nao inventes."
     )
-    user = f"Texto integral do GAMET:\n{gamet_text}\n\nReferência: LPSO ≈ {lat:.6f}, {lon:.6f}."
+    user = f"Texto integral do GAMET:\\n{gamet_text}\\n\\nReferencia: LPSO ≈ {lat:.6f}, {lon:.6f}."
     return gpt_text(sys, user, max_tokens=2000)
 
 # ---------- PDF helpers ----------
@@ -477,6 +488,13 @@ def pdf_embed_pdf_pages(pdf: FPDF, pdf_bytes: bytes, title: str, orientation: st
 class DetailedPDF(FPDF):
     def header(self): pass
     def footer(self): pass
+
+    def section_page(self, title: str):
+        self.add_page(orientation="P")
+        self.set_font("Helvetica","B",22)
+        self.set_text_color(*PASTEL)
+        self.cell(0, 16, ascii_safe(title), ln=True, align="C")
+        self.set_text_color(0,0,0)
 
     def metar_taf_block(self, analyses: List[Tuple[str, str, str, str]]):
         self.add_page(orientation="P")
@@ -522,6 +540,24 @@ class DetailedPDF(FPDF):
             img.save(tmp, format="PNG"); path = tmp.name
         self.image(path, x=x, y=y, w=w, h=h); os.remove(path); self.ln(h+12)
         self.set_font("Helvetica","",12); self.multi_cell(0,7,ascii_safe(analysis_pt or " "))
+
+    def glossary_page(self):
+        self.add_page(orientation="P")
+        draw_header(self, "Glossario — Simbologia e Abreviaturas")
+        self.set_font("Helvetica","",12)
+        txt = (
+            "Cobertura em nuvens (oktas): FEW 1–2; SCT 3–4; BKN 5–7; OVC 8.\\n"
+            "Frentes: fria (triangulos) — ar frio avanca; quente (semicirculos) — ar quente sobrepoe; "
+            "oclusao (triangulos+semicirculos) — mistura, tempo tipicamente ativo; estacionaria (triangulos e semicirculos opostos) — pouco movimento.\\n"
+            "Nuvens associadas (tendencial): frente fria — CB/TCU, linhas de aguaceiros/TS, turbulencia; "
+            "frente quente — AS/NS com chuva estratiforme, gelo em camadas; oclusao — mix de convectivo e estratiforme; estacionaria — precipitacao persistente fraca/moderada.\\n"
+            "SIGWX: jatos (eixo com isotacas), areas de turbulencia (linhas serrilhadas ou sombreados), "
+            "gelo (ICE), CB/TCU com tops/bases (ex.: CB TOP FL350), EMBD/OCNL/FRQ para cobertura/concentracao.\\n"
+            "Abreviaturas: BECMG (a tornar-se), TEMPO (temporario), PROB30/40 (probabilidade), "
+            "VRB (variavel), G (rajadas), CAVOK (>=10 km, sem nuvens signif., sem tempo signif.), "
+            "RVR (visibilidade na pista), QNH/QFE (pressao), NSC/NCD (sem nuvens significativas/detectaveis)."
+        )
+        self.multi_cell(0,7,ascii_safe(txt))
 
 class FinalBriefPDF(FPDF):
     def header(self): pass
@@ -605,7 +641,7 @@ existing_map: Dict[str, List[str]] = (saved_notams.get("map") or {}) if isinstan
 def parse_block_to_list(text: str) -> List[str]:
     if not text.strip():
         return []
-    parts = re.split(r"\n\s*\n+", text.strip())
+    parts = re.split(r"\\n\\s*\\n+", text.strip())
     return [p.strip() for p in parts if p.strip()]
 
 edit_cols = st.columns(3)
@@ -614,12 +650,12 @@ for i, icao in enumerate(icaos_notam):
     with edit_cols[i % 3]:
         initial_text = ""
         if existing_map.get(icao):
-            initial_text = "\n\n".join(existing_map.get(icao, []))
+            initial_text = "\\n\\n".join(existing_map.get(icao, []))
         editors_notam[icao] = st.text_area(
             f"{icao} — NOTAMs",
             value=initial_text,
-            placeholder=("Ex.: AERODROME BEACON ONLY FLASH-GREEN LIGHT OPERATIVE.\n"
-                         "FROM: 29th Jul 2025 15:10 TO: 29th Sep 2025 18:18 EST\n\n"
+            placeholder=("Ex.: AERODROME BEACON ONLY FLASH-GREEN LIGHT OPERATIVE.\\n"
+                         "FROM: 29th Jul 2025 15:10 TO: 29th Sep 2025 18:18 EST\\n\\n"
                          "Outro NOTAM aqui..."),
             key=f"ed_notam_{icao}",
             height=160
@@ -652,7 +688,7 @@ _gamet_initial = (_gamet_obj.get("text") or "").strip()
 gamet_text = st.text_area(
     "Texto completo do GAMET",
     value=_gamet_initial,
-    placeholder="Ex.: LPPC FIR GAMET VALID 12/06Z-12/12Z\n... (texto integral aqui) ...",
+    placeholder="Ex.: LPPC FIR GAMET VALID 12/06Z-12/12Z\\n... (texto integral aqui) ...",
     height=220,
     key="gamet_editor"
 )
@@ -668,7 +704,7 @@ with col_gamet[0]:
         else:
             st.error(msg)
 
-# ---------- Editor de SIGMET (novo: sem fetch automático) ----------
+# ---------- Editor de SIGMET (novo: sem fetch automatico) ----------
 st.markdown("### SIGMET (editar e guardar)")
 _sigmet_obj = load_sigmet_from_gist()
 _sigmet_initial = (_sigmet_obj.get("text") or "").strip()
@@ -676,8 +712,8 @@ _sigmet_initial = (_sigmet_obj.get("text") or "").strip()
 sigmet_text = st.text_area(
     "Texto completo do SIGMET (ex.: LPPC SIGMET ...)",
     value=_sigmet_initial,
-    placeholder=("Ex.: LPPC SIGMET 2 VALID 12/09Z-12/13Z LPPC-\n"
-                 "SEV TURB FCST BTN FL080/FL200 MOV NE 20KT ..."),
+    placeholder(("Ex.: LPPC SIGMET 2 VALID 12/09Z-12/13Z LPPC-\\n"
+                 "SEV TURB FCST BTN FL080/FL200 MOV NE 20KT ...")),
     height=160,
     key="sigmet_editor"
 )
@@ -697,10 +733,10 @@ with col_sigmet[0]:
 st.markdown("#### Charts")
 st.caption("Upload SIGWX / SPC / Wind & Temp. Accepts PDF/PNG/JPG/JPEG/GIF.")
 use_ai_for_charts = st.toggle("Analisar charts com IA", value=True, help="Marcado por omissao")
-preview_w = st.slider("Largura da pré-visualização (px)", min_value=240, max_value=640, value=420, step=10)
+preview_w = st.slider("Largura da pre-visualizacao (px)", min_value=240, max_value=640, value=420, step=10)
 uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=True, label_visibility="collapsed")
 
-# Títulos base por tipo (evita 'Weather Chart' vazio)
+# Titulos base por tipo (evita 'Weather Chart' vazio)
 def _base_title_for_kind(k: str) -> str:
     return {
         "SIGWX": "Significant Weather Chart (SIGWX)",
@@ -725,8 +761,8 @@ if uploads:
         with col_meta:
             kind = st.selectbox(f"Tipo do chart #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"], index=0, key=f"kind_{idx}")
             title_default = _base_title_for_kind(kind)
-            title = st.text_input("Título", value=title_default, key=f"title_{idx}")
-            subtitle = st.text_input("Subtítulo (opcional)", value="", key=f"subtitle_{idx}")
+            title = st.text_input("Titulo", value=title_default, key=f"title_{idx}")
+            subtitle = st.text_input("Subtitulo (opcional)", value="", key=f"subtitle_{idx}")
             order_val = st.number_input("Ordem", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
         charts.append({
             "kind": kind,
@@ -739,55 +775,14 @@ if uploads:
 
 # ---------- Generate Detailed (PT) ----------
 def analyze_notams_text_only(icao: str, notams_raw: List[str]) -> str:
-    return "\n\n".join(notams_raw).strip() or "Sem NOTAMs."
+    return "\\n\\n".join(notams_raw).strip() or "Sem NOTAMs."
 
 st.markdown("### PDFs")
 col_pdfs = st.columns(2)
 with col_pdfs[0]:
     gen_det = st.button("Generate Detailed (PT)")
 
-if 'gen_det' in locals() and gen_det:
-    # METAR/TAF (RAW + interpretação)
-    metar_analyses: List[Tuple[str, str, str, str]] = []
-    for icao in icaos_metar:
-        metar_raw = fetch_metar_now(icao) or ""
-        taf_raw   = fetch_taf_now(icao) or ""
-        analysis  = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis neste momento."
-        metar_analyses.append((icao, metar_raw, taf_raw, analysis))
-
-    # SIGMET (usar o texto do editor; se vazio, cair para Gist; sem fetch automático)
-    sigmet_for_pdf = (sigmet_text or _sigmet_initial or "").strip()
-    sigmet_analysis = analyze_sigmet_pt(sigmet_for_pdf) if sigmet_for_pdf else ""
-
-    # GAMET (usar o texto do editor; se vazio, cair para Gist)
-    gamet_for_pdf = (gamet_text or _gamet_initial or "").strip()
-    gamet_analysis = analyze_gamet_pt(gamet_for_pdf) if gamet_for_pdf else ""
-
-    # Build PDF Detalhado **sem cover** e **sem NOTAMs**
-    det_pdf = DetailedPDF()
-    det_pdf.metar_taf_block(metar_analyses)
-    if sigmet_for_pdf:
-        det_pdf.sigmet_block(sigmet_for_pdf, sigmet_analysis)
-    if gamet_for_pdf:
-        det_pdf.gamet_block(gamet_for_pdf, gamet_analysis)
-
-    # Charts com analise IA (por omissao ON)
-    for ch in sorted(charts, key=lambda c: c.get("order", 0)):
-        title, subtitle, img_png, kind, fname = ch["title"], ch["subtitle"], ch["img_png"], ch["kind"], ch.get("filename","")
-        analysis_txt = ""
-        if use_ai_for_charts:
-            try:
-                analysis_txt = analyze_chart_pt(kind, base64.b64encode(img_png.getvalue()).decode("utf-8"), filename_hint=fname)
-            except Exception:
-                analysis_txt = "Analise indisponivel."
-        det_pdf.chart_block(title, subtitle, img_png, analysis_txt)
-
-    det_name = f"Briefing Detalhado - Missao {mission_no or 'X'}.pdf"
-    det_pdf.output(det_name)
-    with open(det_name, "rb") as f:
-        st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
-
-# ---------- Optional Flight Plan & M&B PDFs ----------
+# ---------- Novos uploads exclusivamente para o Final ----------
 st.markdown("#### Flight Plan (optional image/PDF/GIF)")
 fp_upload = st.file_uploader("Upload your flight plan (PDF/PNG/JPG/JPEG/GIF)", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=False)
 fp_img_png: io.BytesIO | None = None
@@ -803,8 +798,75 @@ if fp_upload:
         fp_img_png = ensure_png_from_bytes(raw, fp_upload.type or "")
         st.success("Flight plan sera incluido como pagina em orientacao retrato.")
 
+st.markdown("#### Navlog PDF (embed all pages)")
+navlog_upload = st.file_uploader("Upload Navlog (PDF)", type=["pdf"], accept_multiple_files=False)
+
+st.markdown("#### VFR Map PDF (embed all pages)")
+vfr_upload = st.file_uploader("Upload VFR Map (PDF)", type=["pdf"], accept_multiple_files=False)
+
 st.markdown("#### M&B / Performance PDF (from external app)")
 mb_upload = st.file_uploader("Upload M&B/Performance PDF to embed (todas as paginas)", type=["pdf"], accept_multiple_files=False)
+
+# ---------- Detailed (PT) gera aqui ----------
+if 'gen_det' in locals() and gen_det:
+    # METAR/TAF (RAW + interpretacao)
+    metar_analyses: List[Tuple[str, str, str, str]] = []
+    for icao in icaos_metar:
+        metar_raw = fetch_metar_now(icao) or ""
+        taf_raw   = fetch_taf_now(icao) or ""
+        analysis  = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis neste momento."
+        metar_analyses.append((icao, metar_raw, taf_raw, analysis))
+
+    # SIGMET (usar o texto do editor; se vazio, cair para Gist; sem fetch automatico)
+    sigmet_for_pdf = (sigmet_text or _sigmet_initial or "").strip()
+    sigmet_analysis = analyze_sigmet_pt(sigmet_for_pdf) if sigmet_for_pdf else ""
+
+    # GAMET (usar o texto do editor; se vazio, cair para Gist)
+    gamet_for_pdf = (gamet_text or _gamet_initial or "").strip()
+    gamet_analysis = analyze_gamet_pt(gamet_for_pdf) if gamet_for_pdf else ""
+
+    # Build PDF Detalhado **sem cover** e **sem NOTAMs** e **sem Navlog/VFR**
+    det_pdf = DetailedPDF()
+    det_pdf.metar_taf_block(metar_analyses)
+    if sigmet_for_pdf:
+        det_pdf.sigmet_block(sigmet_for_pdf, sigmet_analysis)
+    if gamet_for_pdf:
+        det_pdf.gamet_block(gamet_for_pdf, gamet_analysis)
+
+    # Charts com analise IA — organizados por sectoes
+    if charts:
+        # Agrupar por tipo segundo a ordem logica
+        grouped: Dict[str, List[Dict[str,Any]]] = {"SPC": [], "SIGWX": [], "Wind & Temp": [], "Other": []}
+        for c in charts:
+            grouped.setdefault(c["kind"], []).append(c)
+        for k in grouped:
+            grouped[k] = sorted(grouped[k], key=_chart_sort_key)
+
+        # Inserir secoes apenas quando existirem charts desse tipo
+        for kind, sec_title in [("SPC","Surface Pressure Charts (SPC)"),
+                                ("SIGWX","Significant Weather Charts (SIGWX)"),
+                                ("Wind & Temp","Wind & Temperature Charts"),
+                                ("Other","Other Charts")]:
+            items = grouped.get(kind, [])
+            if not items: continue
+            det_pdf.section_page(sec_title)
+            for ch in items:
+                title, subtitle, img_png, fname = ch["title"], ch["subtitle"], ch["img_png"], ch.get("filename","")
+                analysis_txt = ""
+                if use_ai_for_charts:
+                    try:
+                        analysis_txt = analyze_chart_pt(kind, base64.b64encode(img_png.getvalue()).decode("utf-8"), filename_hint=fname)
+                    except Exception:
+                        analysis_txt = "Analise indisponivel."
+                det_pdf.chart_block(title, subtitle, img_png, analysis_txt)
+
+    # Glossario final
+    det_pdf.glossary_page()
+
+    det_name = f"Briefing Detalhado - Missao {mission_no or 'X'}.pdf"
+    det_pdf.output(det_name)
+    with open(det_name, "rb") as f:
+        st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
 
 # ---------- Generate Final Briefing (EN) ----------
 with col_pdfs[1]:
@@ -814,7 +876,7 @@ if 'gen_final' in locals() and gen_final:
     fb = FinalBriefPDF()
     fb.cover(mission_no, pilot, aircraft_type, callsign, registration, str(flight_date), time_utc)
 
-    # Se flight plan vier como imagem, inclui como página (logo a seguir à cover)
+    # Se flight plan vier como imagem, inclui como pagina (logo a seguir a cover)
     fp_img_present = False
     if fp_img_png is not None:
         fb.flightplan_image_portrait("Flight Plan", fp_img_png)
@@ -822,44 +884,64 @@ if 'gen_final' in locals() and gen_final:
 
     # Charts (ordenados) — continuam a ser adicionados ao briefing base
     if 'charts' in locals():
-        ordered = [(c["title"], c["subtitle"], c["img_png"]) for c in sorted(charts, key=lambda c: c.get("order", 0))]
+        ordered = [(c["title"], c["subtitle"], c["img_png"]) for c in sorted(charts, key=_chart_sort_key)]
         fb.charts_only(ordered)
 
     # Exporta briefing base (robusto para fpdf/fpdf2)
     fb_bytes: bytes = fpdf_to_bytes(fb)
     final_bytes = fb_bytes
 
-    # Agregar/embeber PDFs originais garantindo ORDEM: Flight Plan PDF -> M&B PDF -> Charts
-    # (se Flight Plan foi imagem, M&B entra logo a seguir a essa pagina; se foi PDF, entra a seguir ao FP PDF)
+    # Agregar/embeber PDFs originais garantindo ORDEM:
+    # Cover -> Flight Plan (PDF se houver, senao ja entrou imagem) -> Navlog PDF -> VFR Map PDF -> M&B PDF -> Charts (ja estao no fb)
     try:
         main = fitz.open(stream=fb_bytes, filetype="pdf")
 
-        # Posicao onde inserir M&B (por omissao, imediatamente apos cover)
-        insert_pos_for_mb = 1  # 0-based cover, inserir apos cover
+        insert_pos = 1  # apos a cover por omissao
 
-        # Inserir Flight Plan PDF logo apos a cover (se existir)
+        # 1) Flight Plan PDF (se existir; se foi imagem, ja entrou antes no fb)
         if fp_is_pdf and fp_pdf_bytes:
             try:
                 fp_doc = fitz.open(stream=fp_pdf_bytes, filetype="pdf")
-                main.insert_pdf(fp_doc, start_at=1)  # imediatamente apos a cover
-                # M&B deve entrar apos o bloco do Flight Plan PDF:
-                insert_pos_for_mb = 1 + fp_doc.page_count
+                main.insert_pdf(fp_doc, start_at=insert_pos)
+                insert_pos += fp_doc.page_count
                 fp_doc.close()
             except Exception:
-                # se falhar, pelo menos tenta inserir M&B apos cover
-                insert_pos_for_mb = 1
+                pass
         elif fp_img_present:
-            # Se o flight plan foi inserido como imagem, esta na pagina 1
-            insert_pos_for_mb = 2  # apos cover (0) e FP imagem (1)
+            insert_pos += 1  # cover(0) + FP imagem(1)
 
-        # Inserir M&B (todas as paginas) imediatamente a seguir ao Flight Plan
+        # 2) Navlog PDF
+        if navlog_upload is not None:
+            try:
+                nav_bytes = navlog_upload.getvalue() if hasattr(navlog_upload, "getvalue") else navlog_upload.read()
+                nav_doc = fitz.open(stream=nav_bytes, filetype="pdf")
+                if nav_doc.page_count > 0:
+                    main.insert_pdf(nav_doc, start_at=insert_pos)
+                    insert_pos += nav_doc.page_count
+                nav_doc.close()
+            except Exception:
+                pass
+
+        # 3) VFR Map PDF
+        if vfr_upload is not None:
+            try:
+                vfr_bytes = vfr_upload.getvalue() if hasattr(vfr_upload, "getvalue") else vfr_upload.read()
+                vfr_doc = fitz.open(stream=vfr_bytes, filetype="pdf")
+                if vfr_doc.page_count > 0:
+                    main.insert_pdf(vfr_doc, start_at=insert_pos)
+                    insert_pos += vfr_doc.page_count
+                vfr_doc.close()
+            except Exception:
+                pass
+
+        # 4) M&B PDF
         if mb_upload is not None:
             try:
-                # Atenção: ler apenas uma vez
                 mb_bytes = mb_upload.getvalue() if hasattr(mb_upload, "getvalue") else mb_upload.read()
                 mb_doc = fitz.open(stream=mb_bytes, filetype="pdf")
                 if mb_doc.page_count > 0:
-                    main.insert_pdf(mb_doc, start_at=insert_pos_for_mb)
+                    main.insert_pdf(mb_doc, start_at=insert_pos)
+                    insert_pos += mb_doc.page_count
                 mb_doc.close()
             except Exception:
                 pass
@@ -867,11 +949,12 @@ if 'gen_final' in locals() and gen_final:
         final_bytes = main.tobytes()
         main.close()
     except Exception:
-        pass  # fallback: fica só o briefing base
+        pass  # fallback: fica so o briefing base
 
     final_name = f"Briefing - Missao {mission_no or 'X'}.pdf"
     st.download_button("Download Final Briefing (EN)", data=final_bytes, file_name=final_name, mime="application/pdf", use_container_width=True)
 
 st.divider()
+
 
 
