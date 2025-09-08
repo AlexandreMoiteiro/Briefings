@@ -1,5 +1,8 @@
 
-# app.py — Briefings: NOTAM/GAMET/SIGMET (Gist) + Weather Charts + PDFs + PowerPoint + Navlog↔VFR por Rota
+# app.py — Briefings com editor de NOTAMs, GAMET e SIGMET (via Gist)
+# + Weather CHARTS + METAR/TAF (interpretação curta) + PDFs
+# + Emparelhamento Navlog↔VFR por ROTA (VFR embutido “tal como é”)
+
 from typing import Dict, Any, List, Tuple, Optional
 import io, os, re, base64, tempfile, unicodedata, json, datetime as dt
 import streamlit as st
@@ -8,12 +11,6 @@ from fpdf import FPDF
 import fitz  # PyMuPDF
 import requests
 from openai import OpenAI
-
-# PowerPoint
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import PP_ALIGN
 
 # ---------- External pages ----------
 APP_WEATHER_URL = "https://briefings.streamlit.app/Weather"
@@ -39,70 +36,55 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
 .kv{display:grid;grid-template-columns:140px 1fr; gap:.35rem .8rem}
 .kv .k{color:#374151}
 .kv .v{color:#111827}
+.btnbar a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:8px;text-decoration:none;font-weight:600;color:#111827;background:#f8fafc}
+.btnbar a:hover{background:#f1f5f9}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- OpenAI client ----------
 client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
-# ---------- Constantes ----------
-PASTEL = (90,127,179)  # azul
+# ---------- Constantes úteis ----------
 LPSO_ARP = (39.211667, -8.057778)  # LPSO (ARP)
-_KIND_RANK = {"SPC": 1, "SIGWX": 2, "Wind & Temp": 3, "Other": 9}
+PASTEL = (90, 127, 179)  # azul suave
 
 # ---------- Utils ----------
-def ascii_safe(x) -> str:
-    """String segura (sem Ellipsis), ascii-friendly para PDFs/FPDF."""
-    if x is None or x is Ellipsis:
-        return ""
-    t = unicodedata.normalize("NFKD", str(x)).encode("ascii", "ignore").decode("ascii")
-    return (t.replace("\u00A0", " ")
-              .replace("\u2009", " ")
-              .replace("\u2013", "-")
-              .replace("\u2014", "-")
-              .replace("\uFEFF", ""))
+def safe_str(x) -> str:
+    return "" if x is None or x is Ellipsis else str(x)
 
-def safe_bytes(x) -> bytes:
-    """Garante bytes, nunca Ellipsis."""
-    if isinstance(x, (bytes, bytearray)):
-        return bytes(x)
-    return ascii_safe(x).encode("latin-1", errors="ignore")
+def ascii_safe(text: str) -> str:
+    if text is None or text is Ellipsis:
+        return ""
+    t = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode("ascii")
+    return (
+        t.replace("\u00A0", " ")
+         .replace("\u2009", " ")
+         .replace("\u2013", "-")
+         .replace("\u2014", "-")
+         .replace("\uFEFF", "")
+    )
 
 def parse_icaos(s: str) -> List[str]:
     tokens = re.split(r"[,\s]+", (s or "").strip(), flags=re.UNICODE)
     return [t.upper() for t in tokens if t]
 
-def _chart_sort_key(c: Dict[str, Any]) -> Tuple[int, int]:
-    kind = c.get("kind", "Other")
-    rank = _KIND_RANK.get(kind, 9)
-    order = int(c.get("order", 9999) or 9999)
-    return (rank, order)
-
-# ---------- Imagem/PDF helpers ----------
+# ---------- Image helpers ----------
 def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 450) -> Image.Image:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     page = doc.load_page(0)
     png = page.get_pixmap(dpi=dpi).tobytes("png")
-    doc.close()
     return Image.open(io.BytesIO(png)).convert("RGB").copy()
 
-def pdf_to_png_pages(pdf_bytes: bytes, dpi: int = 300) -> List[bytes]:
-    """Renderiza TODAS as páginas do PDF para PNG (para PowerPoint)."""
-    out: List[bytes] = []
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for i in range(doc.page_count):
-        page = doc.load_page(i)
-        pix = page.get_pixmap(dpi=dpi)
-        out.append(pix.tobytes("png"))
-    doc.close()
-    return out
-
 def gif_first_frame(file_bytes: bytes) -> Image.Image:
-    im = Image.open(io.BytesIO(file_bytes)); im.seek(0)
+    im = Image.open(io.BytesIO(file_bytes))
+    im.seek(0)
     return im.convert("RGB").copy()
 
 def to_png_bytes(img: Image.Image) -> io.BytesIO:
-    out = io.BytesIO(); img.save(out, format="PNG"); out.seek(0); return out
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    out.seek(0)
+    return out
 
 def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
     """Aceita PDF/PNG/JPG/JPEG/GIF e devolve bytes PNG (ou placeholder)."""
@@ -116,12 +98,96 @@ def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
             img = Image.open(io.BytesIO(file_bytes)).convert("RGB").copy()
         return to_png_bytes(img)
     except Exception:
+        # fallback: tenta devolver original se for imagem
         try:
             Image.open(io.BytesIO(file_bytes))
             return io.BytesIO(file_bytes)
         except Exception:
             ph = Image.new("RGB", (800, 600), (245, 246, 248))
-            bio = io.BytesIO(); ph.save(bio, format="PNG"); bio.seek(0); return bio
+            bio = io.BytesIO()
+            ph.save(bio, format="PNG")
+            bio.seek(0)
+            return bio
+
+# ---------- GIST: GAMET / NOTAMs / SIGMET ----------
+def _get_gist(seckey_token, seckey_id, seckey_file, fallback_file="") -> Tuple[str,str,str]:
+    token = (st.secrets.get(seckey_token) or st.secrets.get("GIST_TOKEN") or "").strip()
+    gid   = (st.secrets.get(seckey_id)    or st.secrets.get("GIST_ID")    or "").strip()
+    fn    = (st.secrets.get(seckey_file)  or fallback_file).strip()
+    return token, gid, fn
+
+def _gist_ok(token, gid, fn) -> bool:
+    return all([token, gid, fn])
+
+@st.cache_data(ttl=90)
+def gist_load(token, gid, fn) -> Dict[str,Any]:
+    if not _gist_ok(token,gid,fn):
+        return {}
+    try:
+        r = requests.get(
+            f"https://api.github.com/gists/{gid}",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
+            timeout=12
+        ); r.raise_for_status()
+        files = r.json().get("files", {})
+        file_obj = files.get(fn) or {}
+        content = (file_obj.get("content") or "").strip()
+        return json.loads(content) if content else {}
+    except Exception:
+        return {}
+
+def gist_save(token,gid,fn,payload:Dict[str,Any]) -> Tuple[bool,str]:
+    if not _gist_ok(token,gid,fn):
+        return False, "Config Gist incompleta."
+    try:
+        body = {"files": {fn: {"content": json.dumps(payload, ensure_ascii=False, indent=2)}}}
+        r = requests.patch(
+            f"https://api.github.com/gists/{gid}",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
+            json=body, timeout=12
+        )
+        if r.status_code >= 400:
+            return False, f"GitHub respondeu {r.status_code}: {r.text}"
+        return True, "Guardado no Gist."
+    except Exception as e:
+        return False, f"Erro a gravar no Gist: {e}"
+
+# GAMET
+def _get_gamet_secrets(): return _get_gist("GAMET_GIST_TOKEN","GAMET_GIST_ID","GAMET_GIST_FILENAME","gamet.json")
+def load_gamet_from_gist() -> Dict[str, Any]:
+    t,g,f = _get_gamet_secrets(); d = gist_load(t,g,f)
+    if not d: return {"text":"","updated_utc":None}
+    return d if isinstance(d,dict) else {"text":str(d),"updated_utc":None}
+def save_gamet_to_gist(text: str) -> Tuple[bool, str]:
+    t,g,f = _get_gamet_secrets()
+    payload = {"updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"), "text": (text or "").strip()}
+    return gist_save(t,g,f,payload)
+
+# NOTAMs
+def _get_notam_secrets(): return _get_gist("NOTAM_GIST_TOKEN","NOTAM_GIST_ID","NOTAM_GIST_FILENAME","notams.json")
+def load_notams_from_gist() -> Dict[str, Any]:
+    t,g,f = _get_notam_secrets(); d = gist_load(t,g,f)
+    if not d: return {"map": {}, "updated_utc": None}
+    if "map" in d: return {"map": d.get("map") or {}, "updated_utc": d.get("updated_utc")}
+    # retrocompat
+    m = {k:v for k,v in d.items() if isinstance(v,list)}
+    return {"map": m, "updated_utc": d.get("updated_utc")}
+def save_notams_to_gist(new_map: Dict[str, List[str]]) -> Tuple[bool, str]:
+    t,g,f = _get_notam_secrets()
+    payload = {"updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
+               "map": {k: [s for s in (v or []) if str(s).strip()] for k,v in new_map.items()}}
+    return gist_save(t,g,f,payload)
+
+# SIGMET
+def _get_sigmet_secrets(): return _get_gist("SIGMET_GIST_TOKEN","SIGMET_GIST_ID","SIGMET_GIST_FILENAME","sigmet.json")
+def load_sigmet_from_gist() -> Dict[str, Any]:
+    t,g,f = _get_sigmet_secrets(); d = gist_load(t,g,f)
+    if not d: return {"text":"","updated_utc":None}
+    return d if isinstance(d,dict) else {"text":str(d),"updated_utc":None}
+def save_sigmet_to_gist(text: str) -> Tuple[bool, str]:
+    t,g,f = _get_sigmet_secrets()
+    payload = {"updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"), "text": (text or "").strip()}
+    return gist_save(t,g,f,payload)
 
 # ---------- METAR/TAF (CheckWX) ----------
 def cw_headers() -> Dict[str, str]:
@@ -156,142 +222,47 @@ def fetch_taf_now(icao: str) -> str:
     except Exception:
         return ""
 
-# ---------- Gist helpers: GAMET & NOTAMs ----------
-def _get_gamet_secrets() -> Tuple[str, str, str]:
-    token = (st.secrets.get("GAMET_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-    gid   = (st.secrets.get("GAMET_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
-    fn    = (st.secrets.get("GAMET_GIST_FILENAME") or st.secrets.get("GIST_FILENAME") or "").strip()
-    return token, gid, fn
-
-def gamet_gist_config_ok() -> bool:
-    token, gid, fn = _get_gamet_secrets()
-    return all([token, gid, fn])
-
-@st.cache_data(ttl=90)
-def load_gamet_from_gist() -> Dict[str, Any]:
-    if not gamet_gist_config_ok():
-        return {"text": "", "updated_utc": None}
-    try:
-        token, gid, fn = _get_gamet_secrets()
-        r = requests.get(
-            f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
-            timeout=12
-        ); r.raise_for_status()
-        files = r.json().get("files", {})
-        file_obj = files.get(fn)
-        if not file_obj: return {"text": "", "updated_utc": None}
-        content = file_obj.get("content", "")
-        try:
-            return json.loads(content)
-        except Exception:
-            return {"text": content, "updated_utc": None}
-    except Exception:
-        return {"text": "", "updated_utc": None}
-
-def save_gamet_to_gist(text: str) -> Tuple[bool, str]:
-    token, gid, fn = _get_gamet_secrets()
-    if not all([token, gid, fn]): return False, "Faltam segredos do GAMET (TOKEN/ID/FILENAME)."
-    try:
-        payload = {"updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"), "text": (text or "").strip()}
-        body = {"files": {fn: {"content": json.dumps(payload, ensure_ascii=False, indent=2)}}}
-        r = requests.patch(
-            f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
-            json=body, timeout=12
-        )
-        if r.status_code >= 400: return False, f"GitHub respondeu {r.status_code}: {r.text}"
-        return True, "GAMET guardado no Gist."
-    except Exception as e:
-        return False, f"Erro a gravar GAMET no Gist: {e}"
-
-def notam_gist_config_ok() -> bool:
-    token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-    gid   = (st.secrets.get("NOTAM_GIST_ID")    or st.secrets.get("GIST_ID")    or "").strip()
-    fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
-    return bool(token and gid and fn)
-
-@st.cache_data(ttl=90)
-def load_notams_from_gist() -> Dict[str, Any]:
-    if not notam_gist_config_ok():
-        return {"map": {}, "updated_utc": None}
-    try:
-        token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-        gid   = (st.secrets.get("NOTAM_GIST_ID") or st.secrets.get("GIST_ID") or "").strip()
-        fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
-        r = requests.get(
-            f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
-            timeout=10
-        ); r.raise_for_status()
-        files = r.json().get("files", {})
-        obj = files.get(fn) or {}
-        content = (obj.get("content") or "").strip()
-        if not content: return {"map": {}, "updated_utc": None}
-        js = json.loads(content)
-        if isinstance(js, dict) and "map" in js:
-            return {"map": js.get("map") or {}, "updated_utc": js.get("updated_utc")}
-        if isinstance(js, dict):
-            upd = js.get("updated_utc") if "updated_utc" in js else None
-            m = {k: v for k, v in js.items() if isinstance(v, list)}
-            return {"map": m, "updated_utc": upd}
-        return {"map": {}, "updated_utc": None}
-    except Exception:
-        return {"map": {}, "updated_utc": None}
-
-def save_notams_to_gist(new_map: Dict[str, List[str]]) -> Tuple[bool, str]:
-    if not notam_gist_config_ok(): return False, "Segredos NOTAM_GIST_* em falta."
-    try:
-        token = (st.secrets.get("NOTAM_GIST_TOKEN") or st.secrets.get("GIST_TOKEN") or "").strip()
-        gid   = (st.secrets.get("NOTAM_GIST_ID") or st.secrets.get("GIST_ID") or "").strip()
-        fn    = (st.secrets.get("NOTAM_GIST_FILENAME") or "").strip()
-        payload = {
-            "updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
-            "map": {k: [s for s in v if str(s).strip()] for k, v in new_map.items()}
-        }
-        body = {"files": {fn: {"content": json.dumps(payload, ensure_ascii=False, indent=2)}}}
-        r = requests.patch(
-            f"https://api.github.com/gists/{gid}",
-            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
-            json=body, timeout=12
-        )
-        if r.status_code >= 400: return False, f"GitHub respondeu {r.status_code}: {r.text}"
-        return True, "NOTAMs guardados no Gist."
-    except Exception as e:
-        return False, f"Erro a gravar no Gist: {e}"
-
-# ---------- GPT wrappers (resumidos) ----------
-def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 700) -> str:
-    model_name = (st.secrets.get("OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini").strip()
+# ---------- GPT wrapper ----------
+def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str:
+    model_name = safe_str(st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")).strip() or "gpt-4o-mini"
     try:
         r2 = client.chat.completions.create(
             model=model_name,
-            messages=[{"role": "system", "content": prompt_system},
-                      {"role": "user", "content": prompt_user}],
+            messages=[{"role":"system","content":prompt_system},
+                      {"role":"user","content":prompt_user}],
             max_tokens=max_tokens, temperature=0.15
         )
         content = (r2.choices[0].message.content or "").strip()
-        return ascii_safe(content)
+        return ascii_safe(content) if content else ""
     except Exception as e2:
         return ascii_safe(f"Analise indisponivel (erro IA: {e2})")
 
+# ---------- Prompts (PT-PT) ----------
 def analyze_chart_pt(kind: str, img_b64: str, filename_hint: str = "") -> str:
-    model_name = (st.secrets.get("OPENAI_MODEL_VISION", "gpt-4o") or "gpt-4o").strip()
+    """Analisa chart com 5 blocos curtos, apenas com info visível."""
+    model_name = safe_str(st.secrets.get("OPENAI_MODEL_VISION", "gpt-4o")).strip() or "gpt-4o"
     sys = (
         "Es meteorologista aeronautico senior. Escreve em PT-PT, conciso e rigoroso, "
-        "em texto corrido (sem listas). Usa apenas informacao visivel no chart."
-        " Em 4-5 blocos curtos: 1) Quadro sinoptico; 2) Portugal continental (vento/vis/tecto/precip/nuvens/0C/gelo/turb/WS/CB); "
-        "3) Alentejo/LPSO — recomendacoes operacionais; 4) Simbologia-chave; 5) Nuvens & Fenomenos. "
-        "Se algo nao estiver no chart, escreve 'nao indicado'."
+        "em texto corrido (sem listas), com 5 blocos curtos usando apenas o chart:\n"
+        "1) Quadro sinoptico — centros/gradientes, jatos (eixo/FL/isotacas), frentes (tipo/mov), validades.\n"
+        "2) Portugal — vento SFC/altitudes usuais, vis/tecto, precipitacao/fase, nuvens c/bases-tops, 0°C, gelo/turb/cisalh., CB/TCU.\n"
+        "3) Alentejo (incl. LPSO) — recomendacoes operacionais (altitudes/rotas a preferir/evitar, riscos).\n"
+        "4) Simbologia — marcadores-chave e limites.\n"
+        "5) Nuvens & Fenomenos — cadeia por frente, gelo/turb, impacto VFR/IFR. Se algo nao estiver no chart, 'nao indicado'."
     )
+    if not (st.secrets.get("OPENAI_API_KEY") or "").strip():
+        return "Analise de imagem desativada (OPENAI_API_KEY em falta)."
     try:
         r = client.chat.completions.create(
             model=model_name,
-            messages=[{"role": "system", "content": sys},
-                      {"role": "user", "content": [
-                          {"type": "text", "text": f"Tipo de chart: {kind}. Ficheiro: {filename_hint}"},
-                          {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}]}],
-            max_tokens=1000, temperature=0.1
+            messages=[
+                {"role": "system", "content": sys},
+                {"role": "user", "content": [
+                    {"type": "text", "text": f"Tipo de chart: {kind}. Ficheiro: {filename_hint}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}" }}
+                ]}
+            ],
+            max_tokens=1100, temperature=0.1
         )
         out = (r.choices[0].message.content or "").strip()
         return ascii_safe(out) if out else "Analise indisponivel."
@@ -299,65 +270,91 @@ def analyze_chart_pt(kind: str, img_b64: str, filename_hint: str = "") -> str:
         return ascii_safe(f"Analise indisponivel (erro IA: {e})")
 
 def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
+    """Interpretação curta/telegráfica (sem 'palha')."""
     sys = (
-        "Es meteorologista aeronautico senior. PT-PT. Resumo telegráfico, max 8 linhas, sem glossarios."
-        " Inclui: hora, vento (dir/vel/raj), vis, fenomenos, nuvens com alturas (oktas entre parenteses), T/Td, QNH."
-        " TAF: validade e cada segmento BECMG/TEMPO/PROB em 1 frase. Se algo faltar: 'nao presente'."
-        " Termina com 'Impacto' (VFR/IFR + 2-3 riscos)."
+        "Es meteorologista aeronautico senior. PT-PT. Responde de forma telegráfica e concisa (max ~8 linhas). "
+        "Usa apenas informacao presente nos reports; sem glossarios. "
+        "Inclui: hora, vento (dir/vel/raj), visibilidade, fenomenos, nuvens+alturas (oktas entre parenteses), T/Td, QNH. "
+        "No TAF: validade e cada BECMG/TEMPO/PROB com efeito pratico (1 frase/segmento). "
+        "Se algo nao existir, 'nao presente'. Termina com 'Impacto' (VFR/IFR + 2-3 riscos)."
     )
     user = f"Aerodromo {icao}\n\nMETAR (RAW):\n{metar}\n\nTAF (RAW):\n{taf}"
-    return gpt_text(sys, user, max_tokens=650)
+    return gpt_text(prompt_system=sys, prompt_user=user, max_tokens=700)
 
-# ---------- PDF/helpers ----------
+def analyze_sigmet_pt(sigmet_text: str) -> str:
+    if not (sigmet_text or "").strip(): return ""
+    sys = ("Es meteorologista aeronautico senior. PT-PT. Interpreta o SIGMET LPPC: fenomeno, area/limites, niveis/FL, "
+           "validade, movimento/intensidade e impacto operacional (VFR/IFR). Explica abreviaturas essenciais apenas se usadas.")
+    return gpt_text(prompt_system=sys, prompt_user=sigmet_text, max_tokens=700)
+
+def analyze_gamet_pt(gamet_text: str) -> str:
+    if not (gamet_text or "").strip(): return ""
+    lat, lon = LPSO_ARP
+    sys = ("Es meteorologista aeronautico senior. PT-PT. Interpreta o GAMET LPPC: fenomenos, niveis, areas, validade/horas e PROB/TEMPO/BECMG. "
+           f"Indica se abrange LPSO (≈ {lat:.6f}, {lon:.6f}). Conclui com: 'Abrange LPSO' / 'Nao abrange LPSO' / 'Indeterminado'.")
+    user = f"Texto integral do GAMET:\n{gamet_text}\n\nReferencia: LPSO."
+    return gpt_text(prompt_system=sys, prompt_user=user, max_tokens=1000)
+
+# ---------- PDF helpers ----------
 def draw_header(pdf: FPDF, text: str) -> None:
-    pdf.set_draw_color(229, 231, 235); pdf.set_line_width(0.3)
+    pdf.set_draw_color(229, 231, 235)
+    pdf.set_line_width(0.3)
     pdf.set_font("Helvetica", "B", 18)
     pdf.cell(0, 12, ascii_safe(text), ln=True, align="C", border="B")
 
-def place_image_full_bleed(pdf: FPDF, img_png: io.BytesIO) -> None:
-    """Insere imagem em página cheia (sem cabeçalho), preservando proporções."""
-    max_w = pdf.w - 0; max_h = pdf.h - 0
-    img = Image.open(img_png); iw, ih = img.size
-    r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
-    x = (pdf.w - w) // 2; y = (pdf.h - h) // 2
+def place_image_full(pdf: FPDF, img_png: io.BytesIO, max_h_pad: int = 58) -> None:
+    max_w = pdf.w - 22
+    max_h = pdf.h - max_h_pad
+    img = Image.open(img_png)
+    iw, ih = img.size
+    r = min(max_w / iw, max_h / ih)
+    w, h = int(iw * r), int(ih * r)
+    x = (pdf.w - w) // 2
+    y = pdf.get_y() + 6
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        img.save(tmp, format="PNG"); path = tmp.name
-    pdf.image(path, x=x, y=y, w=w, h=h); os.remove(path)
+        img.save(tmp, format="PNG")
+        path = tmp.name
+    pdf.image(path, x=x, y=y, w=w, h=h)
+    os.remove(path)
+    pdf.ln(h + 10)
 
-def image_bytes_to_pdf_page_bytes(img_png: io.BytesIO, orientation: str = "P") -> bytes:
-    """Cria 1 página PDF sem cabeçalho a partir de uma imagem (full-bleed)."""
+def image_bytes_to_pdf_bytes_fullbleed(img_bytes: bytes, mime: str, orientation: str = "P") -> bytes:
+    """Converte uma imagem *sem cabeçalho* para uma página PDF full-bleed (sem títulos)."""
     doc = FPDF(orientation=orientation, unit="mm", format="A4")
     doc.add_page(orientation=orientation)
-    place_image_full_bleed(doc, img_png)
+    max_w = doc.w - 0  # sem margens para “tal como é”
+    max_h = doc.h - 0
+    img = Image.open(io.BytesIO(img_bytes))
+    iw, ih = img.size
+    r = min(max_w / iw, max_h / ih)
+    w, h = int(iw * r), int(ih * r)
+    x, y = (doc.w - w) / 2, (doc.h - h) / 2
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        img.convert("RGB").save(tmp, format="PNG")
+        path = tmp.name
+    doc.image(path, x=x, y=y, w=w, h=h)
+    os.remove(path)
     data = doc.output(dest="S")
-    return data if isinstance(data, (bytes, bytearray)) else safe_bytes(data)
+    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
 
 def fpdf_to_bytes(doc: FPDF) -> bytes:
     data = doc.output(dest="S")
-    return data if isinstance(data, (bytes, bytearray)) else safe_bytes(data)
+    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
+
+# ---------- Ordenação lógica de charts ----------
+_KIND_RANK = {"SPC": 1, "SIGWX": 2, "Wind & Temp": 3, "Other": 9}
+def _chart_sort_key(c: Dict[str, Any]) -> Tuple[int, int]:
+    kind = c.get("kind", "Other")
+    rank = _KIND_RANK.get(kind, 9)
+    order = int(c.get("order", 9999) or 9999)
+    return (rank, order)
 
 # ---------- PDF classes ----------
 class DetailedPDF(FPDF):
     def header(self) -> None: pass
     def footer(self) -> None: pass
 
-    def chart_block(self, title: str, subtitle: str, img_png: io.BytesIO, analysis_pt: str) -> None:
-        self.add_page(orientation="P")
-        draw_header(self, ascii_safe(title))
-        if subtitle:
-            self.set_font("Helvetica", "I", 12); self.cell(0, 9, ascii_safe(subtitle), ln=True, align="C")
-        # metade superior = imagem
-        max_w = self.w - 22; max_h = (self.h // 2) - 18
-        img = Image.open(img_png); iw, ih = img.size
-        r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            img.save(tmp, format="PNG"); path = tmp.name
-        self.image(path, x=(self.w - w)//2, y=self.get_y() + 6, w=w, h=h); os.remove(path); self.ln(h + 12)
-        # metade inferior = análise
-        self.set_font("Helvetica", "", 12); self.multi_cell(0, 7, ascii_safe(analysis_pt or " "))
-
     def metar_taf_block(self, analyses: List[Tuple[str, str, str, str]]) -> None:
-        if not analyses: return
         self.add_page(orientation="P")
         draw_header(self, "METAR / TAF — Interpretacao (PT, resumida)")
         self.set_font("Helvetica", "", 12); self.ln(2)
@@ -388,15 +385,18 @@ class DetailedPDF(FPDF):
         self.set_font("Helvetica", "B", 12); self.cell(0, 8, "Interpretacao:", ln=True)
         self.set_font("Helvetica", "", 12); self.multi_cell(0, 7, ascii_safe(analysis_pt))
 
-    def glossary_page(self) -> None:
-        self.add_page(orientation="P"); draw_header(self, "Glossario — Simbologia, Nuvens & Fenomenos")
-        self.set_font("Helvetica", "", 12)
-        txt = ("Cobertura (oktas): FEW 1–2; SCT 3–4; BKN 5–7; OVC 8.\n"
-               "Frentes: fria (triangulos); quente (semicirculos); oclusao (mix); estacionaria (pouco movimento).\n"
-               "Sequencias tipicas: quente → CI/CS/AS→NS; fria rapida → AC/TCU/CB; oclusao → AS/NS+CB/TCU.\n"
-               "SIGWX: jatos, turbulencia (serrilhado/sombreado), gelo (ICE), CB/TCU com tops/bases, EMBD/OCNL/FRQ.\n"
-               "Abreviaturas: BECMG/TEMPO/PROB, VRB, G, CAVOK, RVR, QNH/QFE, NSC/NCD, TOP/BASE, BTN, MOV.\n")
-        self.multi_cell(0, 7, ascii_safe(txt))
+    def chart_block(self, title: str, subtitle: str, img_png: io.BytesIO, analysis_pt: str) -> None:
+        self.add_page(orientation="P")
+        draw_header(self, ascii_safe(title))
+        if subtitle:
+            self.set_font("Helvetica", "I", 12); self.cell(0, 9, ascii_safe(subtitle), ln=True, align="C")
+        max_w = self.w - 22; max_h = (self.h // 2) - 18
+        img = Image.open(img_png); iw, ih = img.size
+        r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            img.save(tmp, format="PNG"); path = tmp.name
+        self.image(path, x=(self.w - w)//2, y=self.get_y() + 6, w=w, h=h); os.remove(path); self.ln(h + 12)
+        self.set_font("Helvetica", "", 12); self.multi_cell(0, 7, ascii_safe(analysis_pt or " "))
 
 class FinalBriefPDF(FPDF):
     def header(self) -> None: pass
@@ -411,28 +411,36 @@ class FinalBriefPDF(FPDF):
             self.cell(0, 8, ascii_safe(f"Pilot: {pilot}   Aircraft: {aircraft}   Callsign: {callsign}   Reg: {reg}"), ln=True, align="C")
         if date_str or time_utc:
             self.cell(0, 8, ascii_safe(f"Date: {date_str}   UTC: {time_utc}"), ln=True, align="C")
-        self.ln(6); self.set_text_color(*PASTEL); self.set_font("Helvetica", "", 12)
+        self.ln(4); self.set_text_color(*PASTEL); self.set_font("Helvetica","",12)
         self.cell(0, 8, ascii_safe("Weather page: ") + APP_WEATHER_URL, ln=True, align="C", link=APP_WEATHER_URL)
         self.cell(0, 8, ascii_safe("NOTAMs page: ") + APP_NOTAMS_URL, ln=True, align="C", link=APP_NOTAMS_URL)
         self.set_text_color(0, 0, 0)
 
+    def flightplan_image_portrait(self, title: str, img_png: io.BytesIO) -> None:
+        self.add_page(orientation="P"); draw_header(self, ascii_safe(title)); place_image_full(self, img_png)
+
     def charts_only(self, charts: List[Tuple[str, str, io.BytesIO]]) -> None:
         for (title, subtitle, img_png) in charts:
-            self.add_page(orientation="L")
-            # sem cabeçalho de secção — inserir imagem full-bleed
-            place_image_full_bleed(self, img_png)
+            self.add_page(orientation="L"); draw_header(self, ascii_safe(title))
+            if subtitle:
+                self.set_font("Helvetica", "I", 12); self.cell(0, 9, ascii_safe(subtitle), ln=True, align="C")
+            place_image_full(self, img_png)
 
-# ---------- UI topo ----------
-col_btns = st.columns(4)
-with col_btns[0]: st.link_button("Weather", APP_WEATHER_URL)
-with col_btns[1]: st.link_button("NOTAMs", APP_NOTAMS_URL)
-with col_btns[2]: st.link_button("VFR Map", APP_VFRMAP_URL)
-with col_btns[3]: st.link_button("Mass & Balance", APP_MNB_URL)
-st.markdown('<div class="app-title">Briefings</div>', unsafe_allow_html=True)
+# ---------- UI: header + botões ----------
+st.markdown(
+    f'''<div class="app-top"><div class="app-title">Briefings</div>
+    <span class="btnbar">
+      <a href="{APP_WEATHER_URL}" target="_blank">Weather</a>
+      <a href="{APP_NOTAMS_URL}" target="_blank">NOTAMs</a>
+      <a href="{APP_VFRMAP_URL}" target="_blank">VFR Map</a>
+      <a href="{APP_MNB_URL}" target="_blank">Mass & Balance</a>
+    </span></div>''',
+    unsafe_allow_html=True,
+)
 
 # ---------- Abas ----------
 tab_mission, tab_notams, tab_sigmet_gamet, tab_charts, tab_pairs, tab_generate = st.tabs(
-    ["Missão", "NOTAMs", "SIGMET & GAMET", "Charts (Weather)", "Navlog ↔ VFR (Rotas)", "Gerar"]
+    ["Missão", "NOTAMs", "SIGMET & GAMET", "Charts", "Navlog ↔ VFR (Rotas)", "Gerar PDFs"]
 )
 
 # ---------- Missão ----------
@@ -453,10 +461,10 @@ with tab_mission:
     st.markdown("#### Aerodromes")
     c1, c2 = st.columns(2)
     with c1:
-        icaos_metar_str = st.text_input("ICAO list for METAR/TAF", value="LPPT LPBJ LEBZ")
+        icaos_metar_str = st.text_input("ICAO list for METAR/TAF (comma / space / newline)", value="LPPT LPBJ LEBZ")
         icaos_metar = parse_icaos(icaos_metar_str)
     with c2:
-        icaos_notam_str = st.text_input("ICAO list for NOTAMs", value="LPPC(Enroute) LPSO LPCB LPEV")
+        icaos_notam_str = st.text_input("ICAO list for NOTAMs (comma / space / newline)", value="LPPC(Enroute) LPSO LPCB LPEV")
         icaos_notam = parse_icaos(icaos_notam_str)
 
 # ---------- NOTAMs ----------
@@ -479,69 +487,68 @@ with tab_notams:
                 f"{icao} — NOTAMs",
                 value=initial_text,
                 placeholder=("Ex.: AERODROME BEACON ONLY FLASH-GREEN LIGHT OPERATIVE.\n"
-                             "FROM: 29th Jul 2025 15:10 TO: 29th Sep 2025 18:18 EST\n\nOutro NOTAM aqui..."),
-                key=f"ed_notam_{icao}", height=160
+                             "FROM: 29th Jul 2025 15:10 TO: 29th Sep 2025 18:18 EST\n\n"
+                             "Outro NOTAM aqui..."),
+                key=f"ed_notam_{i}",
+                height=160
             )
 
     if st.button("Guardar NOTAMs no Gist"):
         new_map: Dict[str, List[str]] = {}
-        new_map.update(existing_map)  # merge
+        new_map.update(existing_map)  # merge com existente
         for icao in (icaos_notam if 'icaos_notam' in locals() else []):
             new_map[icao] = parse_block_to_list(editors_notam.get(icao, ""))
         ok, msg = save_notams_to_gist(new_map)
         if ok:
-            st.success(msg); st.cache_data.clear()
+            st.success(msg)
+            st.cache_data.clear()
         else:
             st.error(msg)
 
 # ---------- SIGMET & GAMET ----------
 with tab_sigmet_gamet:
     st.markdown("### SIGMET & GAMET")
-    _gamet_obj = load_gamet_from_gist()
-    _gamet_initial = (_gamet_obj.get("text") or "").strip()
-    gamet_text = st.text_area("GAMET — texto integral", value=_gamet_initial, height=220, key="gamet_editor")
+    _gamet_obj = load_gamet_from_gist(); _gamet_initial = safe_str((_gamet_obj.get("text") or "").strip())
+    gamet_text = st.text_area("GAMET — texto integral", value=_gamet_initial, height=220, key="gamet_editor",
+                              placeholder="Ex.: LPPC FIR GAMET VALID 12/06Z-12/12Z\n...")
     if st.button("Guardar GAMET no Gist"):
         ok, msg = save_gamet_to_gist(gamet_text)
-        (st.success if ok else st.error)(msg)
+        st.success(msg) if ok else st.error(msg)
         try: st.cache_data.clear()
         except Exception: pass
 
     st.divider()
 
-    _sigmet_obj = load_sigmet_from_gist()
-    _sigmet_initial = (_sigmet_obj.get("text") or "").strip()
-    sigmet_text = st.text_area("SIGMET (LPPC) — texto integral", value=_sigmet_initial, height=160, key="sigmet_editor")
+    _sigmet_obj = load_sigmet_from_gist(); _sigmet_initial = safe_str((_sigmet_obj.get("text") or "").strip())
+    sigmet_text = st.text_area("SIGMET (LPPC) — texto integral", value=_sigmet_initial, height=160, key="sigmet_editor",
+                               placeholder="Ex.: LPPC SIGMET 2 VALID 12/09Z-12/13Z LPPC-\nSEV TURB FCST BTN FL080/FL200 MOV NE 20KT ...")
     if st.button("Guardar SIGMET no Gist"):
         ok, msg = save_sigmet_to_gist(sigmet_text)
-        (st.success if ok else st.error)(msg)
+        st.success(msg) if ok else st.error(msg)
         try: st.cache_data.clear()
         except Exception: pass
 
-# ---------- Charts (Weather) ----------
+# ---------- Charts ----------
 with tab_charts:
     st.markdown("### Charts (SIGWX / SPC / Wind & Temp / Other)")
-    st.caption("Aceita PDF/PNG/JPG/JPEG/GIF (para PDF, lemos a 1.ª página no preview).")
+    st.caption("Aceita PDF/PNG/JPG/JPEG/GIF (para PDF lemos a 1.ª página).")
     use_ai_for_charts = st.toggle("Analisar charts com IA", value=True, help="Marcado por omissao")
     preview_w = st.slider("Largura da pré-visualização (px)", min_value=240, max_value=640, value=420, step=10)
     uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=True, label_visibility="collapsed")
 
     def _base_title_for_kind(k: str) -> str:
-        return {
-            "SIGWX": "Significant Weather Chart (SIGWX)",
-            "SPC": "Surface Pressure Chart (SPC)",
-            "Wind & Temp": "Wind and Temperature Chart",
-        }.get(k, "Weather Chart")
+        return {"SIGWX":"Significant Weather Chart (SIGWX)","SPC":"Surface Pressure Chart (SPC)","Wind & Temp":"Wind and Temperature Chart"}.get(k, "Weather Chart")
 
     charts: List[Dict[str,Any]] = []
     if uploads:
         for idx, f in enumerate(uploads):
             raw = f.read(); mime = f.type or ""
             img_png = ensure_png_from_bytes(raw, mime)
-            name = getattr(f, "name", "") or "(sem nome)"
+            name = safe_str(getattr(f, "name", "")) or "(sem nome)"
             col_img, col_meta = st.columns([0.35, 0.65])
             with col_img:
-                try: st.image(img_png.getvalue(), caption=ascii_safe(name), width=preview_w)
-                except Exception: st.write(ascii_safe(name))
+                try: st.image(img_png.getvalue(), caption=name, width=preview_w)
+                except Exception: st.write(name)
             with col_meta:
                 kind = st.selectbox(f"Tipo do chart #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"], index=0, key=f"kind_{idx}")
                 title_default = _base_title_for_kind(kind)
@@ -550,15 +557,16 @@ with tab_charts:
                 order_val = st.number_input("Ordem", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
             charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png, "order": order_val, "filename": name})
 
-# ---------- Navlog ↔ VFR (por ROTA) ----------
+# ---------- Navlog ↔ VFR (pares por ROTA) ----------
 with tab_pairs:
     st.markdown("### Emparelhamento Navlog ↔ VFR por ROTA")
     st.caption("Para cada ROTA (ex.: LPSO-LPCB, LPSO-LPEV) carrega um Navlog e o respetivo mapa VFR. Aceita PDF/PNG/JPG/JPEG/GIF.")
+
     num_pairs = st.number_input("Número de pares (Rotas)", min_value=0, max_value=8, value=0, step=1)
     pairs: List[Dict[str, Any]] = []
     for i in range(int(num_pairs)):
         with st.expander(f"Rota #{i+1}", expanded=False):
-            route = st.text_input("ROTA (ex.: LPSO-LPCB)", key=f"pair_route_{i}").upper().strip()
+            route = safe_str(st.text_input(f"ROTA (ex.: LPSO-LPCB)", key=f"pair_route_{i}")).upper().strip()
             c1, c2 = st.columns(2)
             with c1:
                 nav_file = st.file_uploader(f"Navlog ({route or 'ROTA'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_nav_{i}")
@@ -566,26 +574,34 @@ with tab_pairs:
                 vfr_file = st.file_uploader(f"VFR Map ({route or 'ROTA'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_vfr_{i}")
             pairs.append({"route": route, "nav": nav_file, "vfr": vfr_file})
 
-# ---------- Gerar ----------
+# ---------- Gerar PDFs ----------
 with tab_generate:
-    st.markdown("### Export")
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    st.markdown("### PDFs")
+    col_pdfs = st.columns(2)
+    with col_pdfs[0]:
         gen_det = st.button("Generate Detailed (PT)")
-    with c2:
+    with col_pdfs[1]:
         gen_final = st.button("Generate Final Briefing (EN)")
-    with c3:
-        gen_ppt = st.button("Generate PowerPoint")
 
 # ---------- Detailed (PT) ----------
 if 'gen_det' in locals() and gen_det:
-    # CHARTS PRIMEIRO
-    det_pdf = DetailedPDF()
+    # Textos SIGMET/GAMET
+    sigmet_text_local = locals().get("sigmet_text","")
+    _sigmet_initial_local = locals().get("_sigmet_initial","")
+    gamet_text_local = locals().get("gamet_text","")
+    _gamet_initial_local = locals().get("_gamet_initial","")
+    icaos_metar_local = locals().get("icaos_metar", [])
+
+    det = DetailedPDF()
+
+    # CHARTS PRIMEIRO (Weather=charts)
     charts_local: List[Dict[str,Any]] = locals().get("charts", [])
     if charts_local:
         grouped: Dict[str, List[Dict[str,Any]]] = {"SPC": [], "SIGWX": [], "Wind & Temp": [], "Other": []}
-        for c in charts_local: grouped.setdefault(c["kind"], []).append(c)
-        for k in list(grouped.keys()): grouped[k] = sorted(grouped[k], key=_chart_sort_key)
+        for c in charts_local:
+            grouped.setdefault(c["kind"], []).append(c)
+        for k in list(grouped.keys()):
+            grouped[k] = sorted(grouped[k], key=_chart_sort_key)
         for kind in ["SPC","SIGWX","Wind & Temp","Other"]:
             for ch in grouped.get(kind, []):
                 title, subtitle, img_png, fname = ch["title"], ch["subtitle"], ch["img_png"], ch.get("filename","")
@@ -595,37 +611,43 @@ if 'gen_det' in locals() and gen_det:
                         analysis_txt = analyze_chart_pt(kind, base64.b64encode(img_png.getvalue()).decode("utf-8"), filename_hint=fname)
                     except Exception:
                         analysis_txt = "Analise indisponivel."
-                det_pdf.chart_block(title, subtitle, img_png, analysis_txt)
+                det.chart_block(title, subtitle, img_png, analysis_txt)
 
-    # METAR/TAF (curto)
-    icaos_metar_local = locals().get("icaos_metar", [])
+    # METAR/TAF (interpretação curta)
     if icaos_metar_local:
         metar_analyses: List[Tuple[str, str, str, str]] = []
         for icao in icaos_metar_local:
             metar_raw = fetch_metar_now(icao) or ""
             taf_raw   = fetch_taf_now(icao) or ""
-            analysis  = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis."
+            analysis  = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis neste momento."
             metar_analyses.append((icao, metar_raw, taf_raw, analysis))
-        det_pdf.metar_taf_block(metar_analyses)
+        det.metar_taf_block(metar_analyses)
 
-    # SIGMET / GAMET
-    sigmet_for_pdf = (locals().get("sigmet_text","") or locals().get("_sigmet_initial","") or "").strip()
+    # SIGMET
+    sigmet_for_pdf = (sigmet_text_local or _sigmet_initial_local or "").strip()
     if sigmet_for_pdf:
-        det_pdf.sigmet_block(sigmet_for_pdf, gpt_text(
-            "Es meteorologista aeronautico senior. PT-PT; curto e operacional.",
-            sigmet_for_pdf, max_tokens=600
-        ))
-    gamet_for_pdf = (locals().get("gamet_text","") or locals().get("_gamet_initial","") or "").strip()
-    if gamet_for_pdf:
-        lat, lon = LPSO_ARP
-        det_pdf.gamet_block(gamet_for_pdf, gpt_text(
-            f"Es meteorologista aeronautico senior. PT-PT; curto e operacional. Indica se abrange LPSO (~{lat:.6f},{lon:.6f}).",
-            f"Texto GAMET:\n{gamet_for_pdf}", max_tokens=900
-        ))
+        det.sigmet_block(sigmet_for_pdf, analyze_sigmet_pt(sigmet_for_pdf))
 
-    det_pdf.glossary_page()
+    # GAMET
+    gamet_for_pdf = (gamet_text_local or _gamet_initial_local or "").strip()
+    if gamet_for_pdf:
+        det.gamet_block(gamet_for_pdf, analyze_gamet_pt(gamet_for_pdf))
+
+    # Glossário
+    det.add_page(orientation="P")
+    draw_header(det, "Glossario — Simbologia, Nuvens & Fenomenos")
+    det.set_font("Helvetica", "", 12)
+    txt = (
+        "Cobertura (oktas): FEW 1–2; SCT 3–4; BKN 5–7; OVC 8.\n"
+        "Frentes: fria (triangulos); quente (semicirculos); oclusao (mix); estacionaria (pouco movimento).\n"
+        "Sequencias tipicas: quente → CI/CS/AS→NS; fria rapida → AC/TCU/CB; oclusao → AS/NS+CB/TCU.\n"
+        "SIGWX: jatos, turbulencia (serrilhado/sombreado), gelo (ICE), CB/TCU com tops/bases, EMBD/OCNL/FRQ.\n"
+        "Abreviaturas: BECMG/TEMPO/PROB, VRB, G, CAVOK, RVR, QNH/QFE, NSC/NCD, TOP/BASE, BTN, MOV.\n"
+    )
+    det.multi_cell(0, 7, ascii_safe(txt))
+
     det_name = f"Briefing Detalhado - Missao {locals().get('mission_no') or 'X'}.pdf"
-    det_pdf.output(det_name)
+    det.output(det_name)
     with open(det_name, "rb") as f:
         st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
 
@@ -642,37 +664,39 @@ if 'gen_final' in locals() and gen_final:
         time_utc=locals().get("time_utc","")
     )
 
-    # CHARTS first (Weather=charts). Sem páginas de título; full-bleed.
+    # CHARTS FIRST (Weather=charts). Sem páginas só de títulos.
     charts_local: List[Dict[str,Any]] = locals().get("charts", [])
     if charts_local:
         ordered = [(c["title"], c["subtitle"], c["img_png"]) for c in sorted(charts_local, key=_chart_sort_key)]
         fb.charts_only(ordered)
 
-    # Flight Plan opcional (se imagem; PDF entra no merge)
+    # Flight Plan (imagem entra já; PDF será inserido mais abaixo via merge)
     fp_upload = locals().get("fp_upload", None)
+    fp_img_png: Optional[io.BytesIO] = None
     fp_pdf_bytes: Optional[bytes] = None
+    fp_is_pdf = False
     if fp_upload:
         raw = fp_upload.read()
         if (fp_upload.type or "").lower() == "application/pdf":
-            fp_pdf_bytes = raw
+            fp_pdf_bytes = raw; fp_is_pdf = True
         else:
-            img_png = ensure_png_from_bytes(raw, fp_upload.type or "")
-            fb.add_page(orientation="P"); place_image_full_bleed(fb, img_png)
+            fp_img_png = ensure_png_from_bytes(raw, fp_upload.type or "")
+            fb.flightplan_image_portrait("Flight Plan", fp_img_png)
 
-    # Export base
+    # Exporta base
     fb_bytes: bytes = fpdf_to_bytes(fb)
     final_bytes = fb_bytes
 
-    # Merge com: Flight Plan PDF -> Pares Navlog/VFR (embed exato) -> Mass & Balance PDF
+    # Merge com: Flight Plan PDF -> Pares Navlog/VFR por ROTA (VFR embutido tal como é) -> M&B PDF (opcional)
     nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
     mb_upload = locals().get("mb_upload", None)
 
     try:
         main = fitz.open(stream=fb_bytes, filetype="pdf")
-        insert_pos = main.page_count
+        insert_pos = main.page_count  # inserir no fim
 
-        # 1) Flight Plan PDF (as-is)
-        if fp_pdf_bytes:
+        # 1) Flight Plan PDF
+        if fp_is_pdf and fp_pdf_bytes:
             try:
                 fp_doc = fitz.open(stream=fp_pdf_bytes, filetype="pdf")
                 main.insert_pdf(fp_doc, start_at=insert_pos)
@@ -681,45 +705,55 @@ if 'gen_final' in locals() and gen_final:
             except Exception:
                 pass
 
-        # 2) Pares Navlog ↔ VFR (as-is). Imagens viram páginas full-bleed sem cabeçalho.
+        # 2) Pares Navlog↔VFR (por ROTA) — embutidos tal como são
         for p in (nav_pairs or []):
             route = (p.get("route") or "").upper()
 
             # Navlog
             nv = p.get("nav")
             if nv is not None:
-                raw = nv.read(); m = (nv.type or "").lower()
-                if m == "application/pdf":
+                raw = nv.read()
+                if (nv.type or "").lower() == "application/pdf":
                     try:
                         nv_doc = fitz.open(stream=raw, filetype="pdf")
                         main.insert_pdf(nv_doc, start_at=insert_pos)
-                        insert_pos += nv_doc.page_count; nv_doc.close()
-                    except Exception: pass
+                        insert_pos += nv_doc.page_count
+                        nv_doc.close()
+                    except Exception:
+                        pass
                 else:
-                    img_png = ensure_png_from_bytes(raw, m)
-                    nv_bytes = image_bytes_to_pdf_page_bytes(img_png, orientation="P")
+                    # imagem -> full-bleed sem headers/títulos
+                    img_bytes = raw if raw else b""
+                    nv_bytes = image_bytes_to_pdf_bytes_fullbleed(img_bytes, nv.type or "", orientation="P")
                     nv_doc = fitz.open(stream=nv_bytes, filetype="pdf")
                     main.insert_pdf(nv_doc, start_at=insert_pos)
-                    insert_pos += nv_doc.page_count; nv_doc.close()
+                    insert_pos += nv_doc.page_count
+                    nv_doc.close()
 
             # VFR
             vf = p.get("vfr")
             if vf is not None:
-                raw = vf.read(); m = (vf.type or "").lower()
-                if m == "application/pdf":
+                raw = vf.read()
+                if (vf.type or "").lower() == "application/pdf":
                     try:
                         vf_doc = fitz.open(stream=raw, filetype="pdf")
+                        # inserir as páginas originais (tal como são)
                         main.insert_pdf(vf_doc, start_at=insert_pos)
-                        insert_pos += vf_doc.page_count; vf_doc.close()
-                    except Exception: pass
+                        insert_pos += vf_doc.page_count
+                        vf_doc.close()
+                    except Exception:
+                        pass
                 else:
-                    img_png = ensure_png_from_bytes(raw, m)
-                    vf_bytes = image_bytes_to_pdf_page_bytes(img_png, orientation="L")
+                    # imagem -> full-bleed sem headers/títulos
+                    img_bytes = raw if raw else b""
+                    # usar orientação paisagem por norma para mapas
+                    vf_bytes = image_bytes_to_pdf_bytes_fullbleed(img_bytes, vf.type or "", orientation="L")
                     vf_doc = fitz.open(stream=vf_bytes, filetype="pdf")
                     main.insert_pdf(vf_doc, start_at=insert_pos)
-                    insert_pos += vf_doc.page_count; vf_doc.close()
+                    insert_pos += vf_doc.page_count
+                    vf_doc.close()
 
-        # 3) Mass & Balance PDF
+        # 3) M&B PDF
         if mb_upload is not None:
             try:
                 mb_bytes = mb_upload.getvalue() if hasattr(mb_upload, "getvalue") else mb_upload.read()
@@ -728,99 +762,13 @@ if 'gen_final' in locals() and gen_final:
                     main.insert_pdf(mb_doc, start_at=insert_pos)
                     insert_pos += mb_doc.page_count
                 mb_doc.close()
-            except Exception: pass
+            except Exception:
+                pass
 
-        final_bytes = main.tobytes(); main.close()
+        final_bytes = main.tobytes()
+        main.close()
     except Exception:
         pass
 
     final_name = f"Briefing - Missao {locals().get('mission_no') or 'X'}.pdf"
     st.download_button("Download Final Briefing (EN)", data=final_bytes, file_name=final_name, mime="application/pdf", use_container_width=True)
-
-# ---------- PowerPoint ----------
-if 'gen_ppt' in locals() and gen_ppt:
-    prs = Presentation()
-    # Slide 1: Cover
-    title_slide_layout = prs.slide_layouts[6]  # blank
-    slide = prs.slides.add_slide(title_slide_layout)
-    left, top, width, height = Inches(0.5), Inches(0.5), Inches(9), Inches(0.8)
-    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
-    shape.fill.solid(); shape.fill.fore_color.rgb = shape.fill.fore_color.from_string("FFFFFF")
-    shape.line.color.rgb = shape.line.color.from_string("000000")
-    tx = slide.shapes.add_textbox(Inches(0.5), Inches(0.5), Inches(12), Inches(1.2))
-    tf = tx.text_frame; tf.clear(); p = tf.paragraphs[0]
-    p.text = f"Briefing — Mission {ascii_safe(locals().get('mission_no') or 'X')}"
-    p.font.size = Pt(36); p.font.bold = True; p.alignment = PP_ALIGN.LEFT
-    sub = tf.add_paragraph()
-    sub.text = f"Pilot: {ascii_safe(locals().get('pilot',''))}   Aircraft: {ascii_safe(locals().get('aircraft_type',''))}   Callsign: {ascii_safe(locals().get('callsign',''))}   Reg: {ascii_safe(locals().get('registration',''))}"
-    sub.font.size = Pt(16)
-    sub2 = tf.add_paragraph()
-    sub2.text = f"Date: {ascii_safe(locals().get('flight_date',''))}   UTC: {ascii_safe(locals().get('time_utc',''))}"
-    sub2.font.size = Pt(16)
-
-    def add_full_bleed_image_slide(png_bytes: bytes):
-        slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
-        # PowerPoint standard 13.33" x 7.5" -> set image to cover slide maintaining aspect.
-        stream = io.BytesIO(png_bytes)
-        pic = slide.shapes.add_picture(stream, Inches(0), Inches(0), width=prs.slide_width, height=prs.slide_height)
-
-    # CHARTS (Weather) — cada upload vira slide full-bleed
-    charts_local: List[Dict[str,Any]] = locals().get("charts", [])
-    if charts_local:
-        ordered = sorted(charts_local, key=_chart_sort_key)
-        for c in ordered:
-            img_png = c["img_png"].getvalue()
-            add_full_bleed_image_slide(img_png)
-
-    # Pares Navlog ↔ VFR — embutidos exatamente como são
-    nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
-    for p in (nav_pairs or []):
-        # Navlog
-        nv = p.get("nav")
-        if nv is not None:
-            raw = nv.read(); m = (nv.type or "").lower()
-            if m == "application/pdf":
-                for page_png in pdf_to_png_pages(raw, dpi=250):
-                    add_full_bleed_image_slide(page_png)
-            else:
-                add_full_bleed_image_slide(ensure_png_from_bytes(raw, m).getvalue())
-        # VFR
-        vf = p.get("vfr")
-        if vf is not None:
-            raw = vf.read(); m = (vf.type or "").lower()
-            if m == "application/pdf":
-                for page_png in pdf_to_png_pages(raw, dpi=250):
-                    add_full_bleed_image_slide(page_png)
-            else:
-                add_full_bleed_image_slide(ensure_png_from_bytes(raw, m).getvalue())
-
-    # Flight Plan (opcional)
-    fp_upload = locals().get("fp_upload", None)
-    if fp_upload:
-        raw = fp_upload.read(); m = (fp_upload.type or "").lower()
-        if m == "application/pdf":
-            for page_png in pdf_to_png_pages(raw, dpi=250):
-                add_full_bleed_image_slide(page_png)
-        else:
-            add_full_bleed_image_slide(ensure_png_from_bytes(raw, m).getvalue())
-
-    # Mass & Balance (opcional)
-    mb_upload = locals().get("mb_upload", None)
-    if mb_upload is not None:
-        mb_bytes = mb_upload.getvalue() if hasattr(mb_upload, "getvalue") else mb_upload.read()
-        try:
-            for page_png in pdf_to_png_pages(mb_bytes, dpi=250):
-                add_full_bleed_image_slide(page_png)
-        except Exception:
-            try:
-                add_full_bleed_image_slide(ensure_png_from_bytes(mb_bytes, "image/png").getvalue())
-            except Exception:
-                pass
-
-    ppt_bytes = io.BytesIO()
-    prs.save(ppt_bytes); ppt_bytes.seek(0)
-    ppt_name = f"Briefing - Missao {locals().get('mission_no') or 'X'}.pptx"
-    st.download_button("Download PowerPoint", data=ppt_bytes.getvalue(),
-                       file_name=ppt_name,
-                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                       use_container_width=True)
