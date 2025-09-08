@@ -1,5 +1,5 @@
 
-# app.py — NAVLOG PDF Filler + Cálculos (TC→TH/MH, GS, ETE, Burn via tabelas)
+# app.py — NAVLOG PDF Filler + Wind Triangle (TC→TH/MH, GS, ETE, Burn, EFOB)
 # Reqs: streamlit, pytz, pypdf
 
 import streamlit as st
@@ -11,16 +11,17 @@ import unicodedata
 from typing import List, Dict, Optional
 from math import sin, cos, asin, radians, degrees, fmod
 
-# ===================== PDF helpers =====================
+# ============ PDF helpers ============
 try:
     from pypdf import PdfReader, PdfWriter
-    from pypdf.generic import NameObject, BooleanObject, createStringObject
+    from pypdf.generic import NameObject
     PYPDF_OK = True
 except Exception:
     PYPDF_OK = False
 
 def ascii_safe(text: str) -> str:
-    return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
+    if text is None: return ""
+    return unicodedata.normalize('NFKD', str(text)).encode('ascii', 'ignore').decode('ascii')
 
 def read_pdf_bytes(paths: List[str]) -> bytes:
     for pstr in paths:
@@ -34,8 +35,7 @@ def get_field_names(template_bytes: bytes) -> set:
     reader = PdfReader(io.BytesIO(template_bytes))
     try:
         fd = reader.get_fields()
-        if fd:
-            names.update(fd.keys())
+        if fd: names.update(fd.keys())
     except Exception:
         pass
     try:
@@ -43,8 +43,7 @@ def get_field_names(template_bytes: bytes) -> set:
             if "/Annots" in page:
                 for a in page["/Annots"]:
                     obj = a.get_object()
-                    if obj.get("/T"):
-                        names.add(str(obj["/T"]))
+                    if obj.get("/T"): names.add(str(obj["/T"]))
     except Exception:
         pass
     return names
@@ -62,13 +61,15 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     writer._root_object.update({NameObject("/AcroForm"): root["/AcroForm"]})
     try:
         writer._root_object["/AcroForm"].update({
-            NameObject("/NeedAppearances"): BooleanObject(True),
-            NameObject("/DA"): createStringObject("/Helv 0 Tf 0 g"),
+            NameObject("/NeedAppearances"): True,
+            NameObject("/DA"): "/Helv 0 Tf 0 g"
         })
     except Exception:
         pass
+    # garantes que tudo é string antes de escrever
+    str_fields = {k: ("" if v is None else str(v)) for k, v in fields.items()}
     for page in writer.pages:
-        writer.update_page_form_field_values(page, fields)
+        writer.update_page_form_field_values(page, str_fields)
     bio = io.BytesIO()
     writer.write(bio)
     return bio.getvalue()
@@ -77,9 +78,9 @@ def put_any(out: dict, fieldset: set, keys, value: str):
     if isinstance(keys, str): keys = [keys]
     for k in keys:
         if k in fieldset:
-            out[k] = value
+            out[k] = "" if value is None else str(value)
 
-# ===================== Tempo =====================
+# ============ Time helpers ============
 def parse_hhmm(s: str) -> Optional[dt.time]:
     s = (s or "").strip()
     if not s: return None
@@ -90,17 +91,18 @@ def parse_hhmm(s: str) -> Optional[dt.time]:
             pass
     return None
 
-def minutes_to_hhmm(m: int) -> str:
-    m = max(0, int(round(m)))
+def minutes_to_hhmm(m: float) -> str:
+    m = max(0, int(round(float(m or 0))))
     h, mm = divmod(m, 60)
     return f"{h:02d}:{mm:02d}"
 
 def add_minutes_to_time(t: dt.time, minutes: int, tzinfo=pytz.timezone("Europe/Lisbon")) -> dt.time:
     today = dt.date.today()
     base = tzinfo.localize(dt.datetime.combine(today, t))
-    return (base + dt.timedelta(minutes=minutes)).timetz().replace(tzinfo=None)
+    new_dt = base + dt.timedelta(minutes=int(minutes or 0))
+    return new_dt.timetz().replace(tzinfo=None)
 
-# ===================== Triângulo do vento =====================
+# ============ Wind triangle ============
 def wrap360(x):
     x = fmod(x, 360.0)
     return x + 360.0 if x < 0 else x
@@ -110,7 +112,9 @@ def angle_diff(a, b):
 
 def wind_triangle(true_course_deg, tas_kt, wind_dir_from_deg, wind_kt):
     """
-    Output: (WCA_deg, TH_deg, GS_kt)
+    Devolve (WCA_deg, TH_deg, GS_kt)
+    Entradas:
+      TC (°TRUE), TAS (kt), Vento FROM (°TRUE), Vento (kt)
     """
     if tas_kt <= 0:
         return 0.0, wrap360(true_course_deg), 0.0
@@ -123,328 +127,258 @@ def wind_triangle(true_course_deg, tas_kt, wind_dir_from_deg, wind_kt):
     th  = wrap360(true_course_deg + wca)
     return wca, th, max(0.0, gs)
 
-def apply_variation(true_deg, variation_deg, east_variation: bool):
-    """MH = TH - Var(E) / + Var(W) — 'East is least, West is best'."""
-    return wrap360(true_deg - variation_deg if east_variation else true_deg + variation_deg)
+def apply_variation(true_deg, variation_deg, east_is_negative: bool):
+    """MH = TH - Var(E) / + Var(W)."""
+    return wrap360(true_deg - variation_deg if east_is_negative else true_deg + variation_deg)
 
-# ===================== Tabelas de Cruzeiro (650 kg do AFM) =====================
-# Cada nível de PA (ft) tem entradas por RPM: (KTAS, Fuel L/h)
-CRUISE_650 = {
-    0:    {2250:(118,26.9), 2100:(101,20.7), 2000:(95,18.7), 1900:(89,17.0), 1800:(83,15.6)},
-    2000: {2250:(110,24.6), 2100:(100,19.2), 2000:(94,17.5), 1900:(88,16.2), 1800:(82,15.1)},
-    4000: {2250:(108,22.4), 2100:(100,19.2), 2000:(94,17.5), 1900:(88,16.2), 1800:(82,15.1)},
-    6000: {2250:(106,21.3), 2100:(99,18.5), 2000:(93,17.1), 1900:(87,15.9), 1800:(81,14.9)},
-    8000: {2250:(107,20.4), 2100:(98,18.0), 2000:(92,16.7), 1900:(86,15.6), 1800:(80,15.4)},
-    10000:{2250:(106,19.7), 2100:(97,17.5), 2000:(91,16.4), 1900:(85,15.4)},  # 1800 ausente; omitido
-}
-CRUISE_RPMS = sorted({rpm for d in CRUISE_650.values() for rpm in d.keys()})
-CRUISE_PAS  = sorted(CRUISE_650.keys())
-
-def interp1(x, x0, x1, y0, y1):
-    if x1 == x0: return y0
-    t = (x - x0) / (x1 - x0)
-    return y0 + t * (y1 - y0)
-
-def cruise_lookup(pa_ft: float, rpm: float):
-    """Interpola KTAS e L/h por PA e RPM (tabela 650 kg)."""
-    # PA
-    pas = CRUISE_PAS
-    pa_c = max(pas[0], min(pas[-1], pa_ft))
-    p0 = max([p for p in pas if p <= pa_c])
-    p1 = min([p for p in pas if p >= pa_c])
-    # RPM (seleciona vizinhos existentes em ambos p0 e p1)
-    rpms0 = sorted(CRUISE_650[p0].keys())
-    rpms1 = sorted(CRUISE_650[p1].keys())
-    rpms = sorted(set(rpms0).intersection(rpms1))
-    rpm_c = max(rpms[0], min(rpms[-1], rpm))
-    r0 = max([r for r in rpms if r <= rpm_c])
-    r1 = min([r for r in rpms if r >= rpm_c])
-
-    def val(pa, r):
-        return CRUISE_650[pa][r]
-
-    # interpola em RPM dentro de cada PA
-    tas_p0 = interp1(rpm_c, r0, r1, val(p0,r0)[0], val(p0,r1)[0])
-    ff_p0  = interp1(rpm_c, r0, r1, val(p0,r0)[1], val(p0,r1)[1])
-    tas_p1 = interp1(rpm_c, r0, r1, val(p1,r0)[0], val(p1,r1)[0])
-    ff_p1  = interp1(rpm_c, r0, r1, val(p1,r0)[1], val(p1,r1)[1])
-
-    # interpola entre PAs
-    tas = interp1(pa_c, p0, p1, tas_p0, tas_p1)
-    ff  = interp1(pa_c, p0, p1, ff_p0,  ff_p1)
+# ============ AFM cruise corrections (tabela de correções) ============
+# A partir da página de Cruise Performance (que enviaste):
+#  +15 °C OAT  → TAS −2%, Fuel −2.5%
+#  −15 °C OAT  → TAS +1%, Fuel +3%
+def apply_oat_corrections(tas_base, ff_base, oat_dev_c):
+    # oat_dev_c: diferença para ISA/OAT de referência do quadro (aproximação)
+    tas = tas_base
+    ff  = ff_base
+    if oat_dev_c > 0:
+        tas *= 1.0 - 0.02 * (oat_dev_c / 15.0)
+        ff  *= 1.0 - 0.025 * (oat_dev_c / 15.0)
+    elif oat_dev_c < 0:
+        tas *= 1.0 + 0.01 * (abs(oat_dev_c) / 15.0)
+        ff  *= 1.0 + 0.03 * (abs(oat_dev_c) / 15.0)
     return tas, ff
 
-def isa_at(pa_ft: float):
-    return 15.0 - 2.0*(pa_ft/1000.0)  # aproximação ISA
-
-def cruise_oat_corrections(tas_kt: float, ff_lph: float, pa_ft: float, oat_c: float):
-    """
-    AFM (650 kg): KTAS: −2% por +15°C ; +1% por −15°C
-                   FF: −2.5% por +15°C ; +3% por −15°C
-    Fazemos linear por deg e assimétrico.
-    """
-    isa = isa_at(pa_ft)
-    d = oat_c - isa
-    # KTAS
-    if d >= 0:
-        tas_corr = tas_kt * (1.0 - 0.02*(d/15.0))
-        ff_corr  = ff_lph * (1.0 - 0.025*(d/15.0))
-    else:
-        tas_corr = tas_kt * (1.0 + 0.01*(-d/15.0))
-        ff_corr  = ff_lph * (1.0 + 0.03*(-d/15.0))
-    return max(0.0, tas_corr), max(0.0, ff_corr)
-
-# ===================== Defaults (frequências e aeródromos) =====================
-# Fonte: eAIP Portugal (AIS NAV Portugal)
-FREQS = {
-    "LPSO": "PONTE DE SOR INFORMATION 119.805",
-    "LPEV": "ÉVORA INFORMATION 122.705",
-    "LPCO": "COIMBRA INFORMATION 122.905",
-    "LPCB": "CASTELO BRANCO INFORMATION 122.555",
-    "LPVZ": "VISEU INFORMATION 122.710",
-    "ENR":  "LISBOA INFORMATION 123.755",
-}
-
-# ===================== App =====================
+# ============ App ============
 st.set_page_config(page_title="NAVLOG – Navigation Plan & Inflight Log", layout="wide", initial_sidebar_state="collapsed")
 st.title("Navigation Plan & Inflight Log – PDF Filler")
 
-# Carrega template e nomes de campos (para só mostrar aquilo que existe no PDF)
-PDF_TEMPLATE_PATHS = ["/mnt/data/NAVLOG - FORM.pdf", "NAVLOG - FORM.pdf"]
-try:
-    TEMPLATE_BYTES = read_pdf_bytes(PDF_TEMPLATE_PATHS)
-    FIELDSET = get_field_names(TEMPLATE_BYTES)
-except Exception as e:
-    TEMPLATE_BYTES = None
-    FIELDSET = set()
-    st.error(f"Não foi possível ler o template do PDF: {e}")
-
-# ===== Cabeçalho (apenas campos que existem no PDF) =====
-st.header("Cabeçalho do voo")
-
-def field_exists(name: str) -> bool:
-    return name in FIELDSET
+# Caminho do template
+PDF_TEMPLATE_PATHS = [
+    "/mnt/data/NAVLOG - FORM.pdf",
+    "NAVLOG - FORM.pdf",
+]
 
 # Defaults pedidos
-DEFAULT_STUDENT = "A. Moiteiro"   # és aluno
+DEFAULT_STUDENT  = "A. Moiteiro"
 DEFAULT_AIRCRAFT = "Tecnam P2008"
-DEFAULT_REG = "CS-ECC"            # podes mudar
-DEFAULT_DEPT = "LPSO"
-DEFAULT_ARR  = "LPEV"
+SEVENAIR_P2008_REGS = ["CS-ECC", "CS-ECD", "CS-DHS", "CS-DHT", "CS-DHU", "CS-DHV", "CS-DHW"]
 
-# Alguns templates usam variações de nomes — vamos suportar os mais prováveis
-def txt(label, keys, default=""):
-    # só mostra se algum dos nomes existe
-    names = [k for k in (keys if isinstance(keys, list) else [keys]) if field_exists(k)]
-    if not names: 
-        return ""  # não mostrar campo que não existe no PDF
-    return st.text_input(label, default)
+# Frequências por aeródromo (AIP/PT AIS + FIS)
+FREQ_DB = {
+    "LPSO": ["119.805 (Ponte de Sor INFO)", "123.755 (Lisboa Information)"],   # AIP AD 2.18
+    "LPEV": ["122.705 (Évora INFO)", "123.755 (Lisboa Information)", "131.055 (Lisboa Information)"],  # AIP AD 2.18
+    "LPCB": ["130.905 (Lisboa Information)", "132.305 (Lisboa Control HN)", "123.755 (Lisboa Information)"],  # AIP eVFR
+    "LPCO": ["130.905 (Lisboa Information)", "132.305 (Lisboa Control HN)"],   # AIP eVFR
+    "LPVZ": ["130.905 (Lisboa Information)", "132.305 (Lisboa Control HN)"],   # AIP eVFR
+}
 
-aircraft     = txt("Aircraft", ["Aircraft","Aircraf","Aircraft_Type"], DEFAULT_AIRCRAFT)
-registration = txt("Registration", ["Registration","REG"], DEFAULT_REG)
-callsign     = txt("Callsign", ["Callsign","CALLSIGN"], "")
-lesson       = txt("Lesson", ["Lesson","LESSON"], "")
-student      = txt("Student", ["Student","STUDENT"], DEFAULT_STUDENT)
-logbook      = txt("Logbook", ["Logbook","LOGBOOK"], "")
-grading      = txt("Grading", ["GRADING","Grading"], "")
+# ====== Cabeçalho (apenas campos que existem no NAVLOG típico) ======
+st.subheader("Cabeçalho")
+c1, c2, c3 = st.columns([1,1,1])
+with c1:
+    aircraft = st.text_input("Aircraft", DEFAULT_AIRCRAFT)
+    registration = st.selectbox("Registration", SEVENAIR_P2008_REGS, index=0)
+    callsign = st.text_input("Callsign", "")
+with c2:
+    student = st.text_input("Student", DEFAULT_STUDENT)
+    dept_airfield = st.text_input("Departure (ICAO)", "LPSO")
+    arr_airfield = st.selectbox("Arrival (ICAO)", ["", "LPSO","LPEV","LPCB","LPCO","LPVZ"], index=1)
+with c3:
+    alternate_airfield = st.selectbox("Alternate (ICAO)", ["", "LPSO","LPEV","LPCB","LPCO","LPVZ"], index=2)
+    etd_str = st.text_input("ETD (HH:MM)", "")
+    eta_str = st.text_input("ETA (HH:MM) (opcional)", "")
 
-dept_airfield = txt("Departure Airfield (ICAO)", ["Dept_Airfield","Departure","Dept"], DEFAULT_DEPT)
-arr_airfield  = txt("Arrival Airfield (ICAO)",  ["Arrival_Airfield","Arrival"], DEFAULT_ARR)
-leg_number    = txt("Leg Number", ["Leg_Number","LegNumber"], "")
-alternate     = txt("Alternate (ICAO)", ["Alternate","Alternate_Airfield"], "LPCO")
+# Comms default
+def default_comms_for(aero: str) -> str:
+    if not aero: return ""
+    freqs = FREQ_DB.get(aero.upper(), [])
+    return " / ".join(freqs)
 
-etd_str  = txt("ETD (HH:MM)", "ETD/ETA", "").split("/")[0].strip() if field_exists("ETD/ETA") else st.text_input("ETD (HH:MM)", "")
-eta_str  = ""  # ETA opcional (não forçamos campo se não existir)
-startup  = txt("Startup (HH:MM)", "Startup", "")
-takeoff  = txt("Takeoff (HH:MM)", "Takeoff", "")
-landing  = txt("Landing (HH:MM)", "Landing", "")
-shutdown = txt("Shutdown (HH:MM)", "Shutdown", "")
+dept_comm = st.text_input("Departure Comms/Freq", default_comms_for(dept_airfield))
+enroute_comm = st.text_input("Enroute Comms/Freq", "Lisboa Information 123.755")
+arrival_comm = st.text_input("Arrival Comms/Freq", default_comms_for(arr_airfield))
 
-# Comms – valores por defeito pedidos
-st.subheader("Comms")
-dept_comm    = txt("Departure Comms/Freq", ["Dept_Comm","Departure_Comms"], FREQS.get(dept_airfield or "LPSO", FREQS["LPSO"]))
-enroute_comm = txt("Enroute Comms/Freq", ["Enroute_comm","Enroute_Comms"], FREQS["ENR"])
-arrival_comm = txt("Arrival Comms/Freq", ["Arrival_comm","Arrival_Comms"], FREQS.get(arr_airfield or "LPEV", FREQS["LPEV"]))
+# ====== Variação e Vento globais (sem sidebar) ======
+st.subheader("Condições (var/vento globais; podes sobrepor por leg)")
+colv, colw1, colw2 = st.columns([1,1,1])
+with colv:
+    var_deg = st.number_input("Magnetic variation (°)", min_value=0.0, max_value=30.0, value=1.0, step=0.1)
+    var_is_east = st.selectbox("Var E/W", ["W", "E"], index=0) == "E"  # por defeito 1W
+with colw1:
+    default_wdir = st.number_input("Wind direction FROM (°TRUE)", min_value=0.0, max_value=360.0, value=0.0, step=1.0)
+with colw2:
+    default_wspd = st.number_input("Wind speed (kt)", min_value=0.0, max_value=200.0, value=0.0, step=1.0)
 
-# ===== Secção de Cálculo (não exporta para o PDF) =====
-st.header("Cálculo (não exporta para o PDF)")
-colA, colB, colC, colD, colE = st.columns(5)
-with colA:
-    wind_from_deg = st.number_input("Wind FROM (°TRUE)", 0.0, 360.0, 0.0, 1.0)
-with colB:
-    wind_kt = st.number_input("Wind (kt)", 0.0, 200.0, 0.0, 1.0)
-with colC:
-    variation_deg = st.number_input("Magnetic variation (°)", 0.0, 30.0, 1.0, 0.1)  # default 1
-with colD:
-    var_is_east = st.selectbox("Variation East / West", ["West (+)", "East (−)"], index=0) == "East (−)"  # default 1W
-with colE:
-    start_fuel_l = st.number_input("Fuel inicial (EFOB_START) [L]", min_value=0.0, value=0.0, step=1.0)
+# ====== Legs (inputs compactos) ======
+st.subheader("Legs — Entradas")
+st.caption("Preenche Name/Ident/Alt/Freq, **TC (°T)**, **TAS (kt)** e **Dist (nm)**. Podes sobrepor vento/OAT por leg; caso contrário usa os valores globais.")
+N = st.number_input("Nº de legs (1–11)", min_value=1, max_value=11, value=6, step=1)
 
-colF, colG = st.columns(2)
-with colF:
-    cruise_pa_ft = st.number_input("Cruise Pressure Altitude (ft)", 0.0, 12000.0, 4000.0, 100.0)
-with colG:
-    cruise_rpm = st.number_input("Cruise RPM", 1800.0, 2250.0, 2000.0, 10.0)
+if "legs_in" not in st.session_state:
+    st.session_state.legs_in = [
+        {"Name":"", "Ident":"", "Alt/FL":"", "Freq":"",
+         "TC":0.0, "TAS":0.0, "Dist":0.0,
+         "WindFROM":default_wdir, "Wind":default_wspd, "OAT":15.0}
+        for _ in range(int(N))
+    ]
 
-oat_global = st.number_input("OAT (°C)", -50.0, 60.0, 15.0, 0.5)
+# ajustar tamanho se N mudar
+cur = st.session_state.legs_in
+if len(cur) != int(N):
+    if len(cur) < int(N):
+        cur += [{"Name":"", "Ident":"", "Alt/FL":"", "Freq":"",
+                 "TC":0.0, "TAS":0.0, "Dist":0.0,
+                 "WindFROM":default_wdir, "Wind":default_wspd, "OAT":15.0}
+                for _ in range(int(N)-len(cur))]
+    else:
+        st.session_state.legs_in = cur[:int(N)]
+
+legs_in = st.data_editor(
+    st.session_state.legs_in,
+    num_rows="fixed",
+    use_container_width=True,
+    column_config={
+        "Name": st.column_config.TextColumn("Name / Lat,Long"),
+        "Ident": st.column_config.TextColumn("Ident"),
+        "Alt/FL": st.column_config.TextColumn("Alt / FL"),
+        "Freq": st.column_config.TextColumn("Freq."),
+        "TC": st.column_config.NumberColumn("TC (°T)", step=0.1, min_value=0.0, max_value=359.9),
+        "TAS": st.column_config.NumberColumn("TAS (kt) (0=auto*)", step=1.0, min_value=0.0),
+        "Dist": st.column_config.NumberColumn("Dist (nm)", step=0.1, min_value=0.0),
+        "WindFROM": st.column_config.NumberColumn("Wind FROM (°T)", step=1.0, min_value=0.0, max_value=360.0),
+        "Wind": st.column_config.NumberColumn("Wind (kt)", step=1.0, min_value=0.0),
+        "OAT": st.column_config.NumberColumn("OAT (°C)", step=0.5, min_value=-60.0, max_value=60.0),
+    },
+    hide_index=True,
+    key="legs_editor_inputs"
+)
+
+# ====== Cálculos ======
+st.subheader("Resultados por leg")
+start_fuel_l = st.number_input("Fuel inicial (EFOB_START) [L]", min_value=0.0, value=0.0, step=1.0)
 auto_compute_eto = st.checkbox("Calcular ETO (ETD + ETE)", value=True)
-compute_efob     = st.checkbox("Calcular EFOB cumulativo", value=True)
-
-# ===== Legs (apenas campos que existem no PDF) =====
-st.header("Legs (1–11)")
-
-# Vamos construir uma tabela compacta apenas com campos do formulário
-# Campos típicos do template: Namei, TCRSi, THDGi, MHDGi, GSi, Disti, ETEi, ETOi, PL_BOi, EFOBi, FREQi
-# Inputs do utilizador (mínimos): Name, Dist, TC, TAS (opcional; se vazio, usamos tabela), FREQ (opcional)
-ROWS = []
-for i in range(1, 12):
-    st.markdown(f"**Leg {i}**")
-    c1, c2, c3, c4, c5 = st.columns([2,1,1,1,2])
-    with c1:
-        name = st.text_input("Name / Ident", key=f"name{i}", value="")
-    with c2:
-        dist = st.number_input("Dist (nm)", min_value=0.0, value=0.0, step=0.1, key=f"dist{i}")
-    with c3:
-        tc = st.number_input("TC (°TRUE)", min_value=0.0, max_value=359.9, value=0.0, step=0.1, key=f"tc{i}")
-    with c4:
-        tas_user = st.number_input("TAS (kt) (deixa 0 p/ auto)", min_value=0.0, value=0.0, step=1.0, key=f"tas{i}")
-    with c5:
-        freq = st.text_input("FREQ (opcional)", key=f"freq{i}", value="")
-
-    # TAS/FF via tabela se não fornecido
-    if tas_user > 0:
-        tas_eff = tas_user
-        ff_eff = cruise_lookup(cruise_pa_ft, cruise_rpm)[1]
-        tas_eff, ff_eff = cruise_oat_corrections(tas_eff, ff_eff, cruise_pa_ft, oat_global)
-    else:
-        tas_base, ff_base = cruise_lookup(cruise_pa_ft, cruise_rpm)
-        tas_eff, ff_eff = cruise_oat_corrections(tas_base, ff_base, cruise_pa_ft, oat_global)
-
-    wca, th, gs = wind_triangle(tc, tas_eff, wind_from_deg, wind_kt)
-    mh = apply_variation(th, variation_deg, var_is_east)
-
-    ete = (60.0 * dist / gs) if gs > 0 else 0.0
-    burn = ff_eff * (ete/60.0)
-
-    # Mostrar resultados do leg (compacto)
-    st.caption(f"WCA {wca:+.1f}° • TH {th:06.2f}° • MH {mh:06.2f}° • GS {gs:.0f} kt • ETE {int(round(ete))} min • Burn {burn:.1f} L")
-
-    ROWS.append({
-        "Name": name, "Dist": dist, "TC": tc, "TAS": tas_eff,
-        "TH": th, "MH": mh, "GS": gs, "ETE": ete, "Burn": burn, "Freq": freq
-    })
-    st.divider()
-
-# Totais + ETO/EFOB
-total_dist = sum(r["Dist"] for r in ROWS)
-total_ete  = sum(r["ETE"]  for r in ROWS)
-total_burn = sum(r["Burn"] for r in ROWS)
-
+compute_efob = st.checkbox("Calcular EFOB cumulativo", value=True)
 etd_time = parse_hhmm(etd_str)
-curr_time_for_eto = etd_time
-for r in ROWS:
-    if auto_compute_eto and curr_time_for_eto:
-        curr_time_for_eto = add_minutes_to_time(curr_time_for_eto, int(round(r["ETE"])))
-        r["ETO_str"] = curr_time_for_eto.strftime("%H:%M")
-    else:
-        r["ETO_str"] = ""
+t_clock = etd_time
 
-efob_running = start_fuel_l
-for r in ROWS:
+# Base (aprox.) para FF/TAS se TAS=0 → usamos “tabela” (valores típicos 2000RPM SL) + correções AFM por OAT
+BASE_TAS = 95.0   # kt @ 2000 RPM, SL (aprox do quadro)
+BASE_FF  = 18.7   # L/h @ 2000 RPM, SL (aprox do quadro)
+
+def isa_at(pa_ft: float) -> float:
+    # ISA: 15°C - 2°C/1000ft * altitude pressão (aprox linear baixa altitude)
+    return 15.0 - 2.0 * (float(pa_ft)/1000.0)
+
+total_dist = total_ete = total_burn = 0.0
+efob = start_fuel_l
+legs_out = []
+
+for i, r in enumerate(legs_in, start=1):
+    name = r.get("Name","")
+    ident = r.get("Ident","")
+    altfl = r.get("Alt/FL","")
+    freq = r.get("Freq","")
+
+    tc   = float(r.get("TC") or 0.0)
+    tas  = float(r.get("TAS") or 0.0)
+    dist = float(r.get("Dist") or 0.0)
+    wdir = float(r.get("WindFROM") or default_wdir)
+    wspd = float(r.get("Wind") or default_wspd)
+    oat  = float(r.get("OAT") or 15.0)
+
+    # Se TAS=0 → calcula automaticamente com base + correção OAT (tabela de correções do AFM)
+    pa_ft = 0.0  # por agora assumimos PA≈0 se não fornecido
+    if tas <= 0:
+        tas_auto, ff_auto = apply_oat_corrections(BASE_TAS, BASE_FF, oat - isa_at(pa_ft))
+        tas = tas_auto
+        ff_lph = ff_auto
+    else:
+        # Se o utilizador fornece TAS, FF base ajusta por OAT
+        _, ff_lph = apply_oat_corrections(BASE_TAS, BASE_FF, oat - isa_at(pa_ft))
+
+    wca, th, gs = wind_triangle(tc, tas, wdir, wspd)
+    mh = apply_variation(th, var_deg, var_is_east)
+    ete_min = (60.0 * dist / gs) if gs > 0 else 0.0
+    burn = ff_lph * (ete_min/60.0)
+
+    eto_str = ""
+    if auto_compute_eto and t_clock:
+        t_clock = add_minutes_to_time(t_clock, int(round(ete_min)))
+        eto_str = t_clock.strftime("%H:%M")
+
+    total_dist += dist
+    total_ete += ete_min
+    total_burn += burn
     if compute_efob:
-        efob_running = max(0.0, efob_running - r["Burn"])
-        r["EFOB"] = efob_running
-    else:
-        r["EFOB"] = 0.0
+        efob = max(0.0, efob - burn)
 
-st.markdown(f"**Totais:** Dist {total_dist:.1f} nm • ETE {int(total_ete)//60}h{int(total_ete)%60:02d} • Burn {total_burn:.1f} L")
+    legs_out.append({
+        "Name": name, "Ident": ident, "Alt/FL": altfl, "Freq": freq,
+        "TC": f"{tc:.1f}", "TAS": f"{tas:.0f}", "Dist": f"{dist:.1f}",
+        "TH": f"{th:06.2f}", "MH": f"{mh:06.2f}", "WCA": f"{wca:+.1f}",
+        "GS": f"{gs:.0f}", "ETE(min)": f"{ete_min:.0f}", "ETO": eto_str,
+        "PL_B/O (L)": f"{burn:.1f}", "EFOB (L)": f"{efob:.1f}"
+    })
 
-# ===== Observações (se existir no PDF) =====
-observations = st.text_area("OBSERVATIONS", "", height=120) if field_exists("OBSERVATIONS") else ""
+st.dataframe(legs_out, use_container_width=True)
 
-# ===== Export PDF =====
-st.header("PDF export")
+st.markdown(f"**Totais** — Dist: {total_dist:.1f} nm • ETE: {int(total_ete)//60}h{int(total_ete)%60:02d} • Burn: {total_burn:.1f} L • EFOB final: {efob:.1f} L")
 
-if TEMPLATE_BYTES is None:
-    st.warning("Carrega o template primeiro para poderes exportar.")
-else:
+# ====== PDF export (apenas campos que existem no template) ======
+st.subheader("PDF export")
+safe_reg = ascii_safe(registration or "REG")
+safe_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%Y-%m-%d")
+filename = f"{safe_date}_{safe_reg}_NAVLOG.pdf"
+
+try:
+    template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
+    fieldset = get_field_names(template_bytes)
+
     named_map: Dict[str, str] = {}
 
-    # Cabeçalho
-    put_any(named_map, FIELDSET, ["Aircraft","Aircraf","Aircraft_Type"], aircraft)
-    put_any(named_map, FIELDSET, ["Registration","REG"], registration)
-    put_any(named_map, FIELDSET, ["Callsign","CALLSIGN"], callsign)
-    put_any(named_map, FIELDSET, ["Lesson","LESSON"], lesson)
-    put_any(named_map, FIELDSET, ["Student","STUDENT"], student)
-    put_any(named_map, FIELDSET, ["Logbook","LOGBOOK"], logbook)
-    put_any(named_map, FIELDSET, ["GRADING","Grading"], grading)
-    put_any(named_map, FIELDSET, ["Dept_Airfield","Departure","Dept"], dept_airfield)
-    put_any(named_map, FIELDSET, ["Arrival_Airfield","Arrival"], arr_airfield)
-    put_any(named_map, FIELDSET, ["Leg_Number","LegNumber"], leg_number)
-    put_any(named_map, FIELDSET, ["Alternate","Alternate_Airfield"], alternate)
-    if field_exists("ETD/ETA"):
-        put_any(named_map, FIELDSET, "ETD/ETA", f"{etd_str} / ")
-    put_any(named_map, FIELDSET, "Startup", startup)
-    put_any(named_map, FIELDSET, "Takeoff", takeoff)
-    put_any(named_map, FIELDSET, "Landing", landing)
-    put_any(named_map, FIELDSET, "Shutdown", shutdown)
+    # Cabeçalho – só escrevemos se existir
+    put_any(named_map, fieldset, ["Aircraft","Aircraf","Aircraft_Type"], aircraft)
+    put_any(named_map, fieldset, ["Registration","REG"], registration)
+    put_any(named_map, fieldset, ["Callsign","CALLSIGN"], callsign)
+    put_any(named_map, fieldset, ["Student","STUDENT"], student)
+    put_any(named_map, fieldset, ["Dept_Airfield","Departure","Dept"], dept_airfield)
+    put_any(named_map, fieldset, ["Arrival_Airfield","Arrival"], arr_airfield)
+    put_any(named_map, fieldset, ["Alternate","Alternate_Airfield"], alternate_airfield)
+    put_any(named_map, fieldset, ["ETD/ETA","ETD_ETA"], f"{etd_str} / {eta_str}")
+    put_any(named_map, fieldset, ["Dept_Comm","Departure_Comms"], dept_comm)
+    put_any(named_map, fieldset, ["Enroute_comm","Enroute_Comms"], enroute_comm)
+    put_any(named_map, fieldset, ["Arrival_comm","Arrival_Comms"], arrival_comm)
 
-    put_any(named_map, FIELDSET, ["Dept_Comm","Departure_Comms"], dept_comm or FREQS["LPSO"])
-    put_any(named_map, FIELDSET, ["Enroute_comm","Enroute_Comms"], enroute_comm or FREQS["ENR"])
-    put_any(named_map, FIELDSET, ["Arrival_comm","Arrival_Comms"], arrival_comm or FREQS["LPEV"])
-
-    put_any(named_map, FIELDSET, "OBSERVATIONS", observations)
-
-    # Legs → campos típicos do PDF (Namei, TCRSi, THDGi, MHDGi, GSi, Disti, ETEi, ETOi, PL_BOi, EFOBi, FREQi)
-    for i, r in enumerate(ROWS, start=1):
+    # Legs 1..11 — nomes típicos do NAVLOG
+    # Namei, Alti, TCRSi, THDGi, MHDGi, GSi, Disti, ETEi, ETOi, PL_BOi, EFOBi, FREQi
+    for i, r in enumerate(legs_out, start=1):
         suf = str(i)
-        put_any(named_map, FIELDSET, [f"Name{suf}","Name_"+suf], r["Name"])
-        put_any(named_map, FIELDSET, [f"TCRS{suf}","TCRS_"+suf], f"{r['TC']:.1f}")
-        put_any(named_map, FIELDSET, [f"THDG{suf}","THDG_"+suf], f"{r['TH']:.2f}")
-        put_any(named_map, FIELDSET, [f"MHDG{suf}","MHDG_"+suf], f"{r['MH']:.2f}")
-        put_any(named_map, FIELDSET, [f"GS{suf}","GS_"+suf],   f"{r['GS']:.0f}")
-        put_any(named_map, FIELDSET, [f"Dist{suf}","Dist_"+suf], f"{r['Dist']:.1f}")
-        put_any(named_map, FIELDSET, [f"ETE{suf}","ETE_"+suf],  f"{int(round(r['ETE']))}")
-        put_any(named_map, FIELDSET, [f"ETO{suf}","ETO_"+suf],  r.get("ETO_str",""))
-        put_any(named_map, FIELDSET, [f"PL_BO{suf}","PL_BO_"+suf], f"{r['Burn']:.1f}")
-        put_any(named_map, FIELDSET, [f"EFOB{suf}","EFOB_"+suf], f"{r.get('EFOB',0.0):.1f}")
-        put_any(named_map, FIELDSET, [f"FREQ{suf}","FREQ_"+suf], r["Freq"])
+        put_any(named_map, fieldset, [f"Name{suf}","Name_"+suf], r["Name"])
+        put_any(named_map, fieldset, [f"Alt{suf}","Alt_"+suf], r["Alt/FL"])
+        put_any(named_map, fieldset, [f"TCRS{suf}","TCRS_"+suf], r["TC"])
+        put_any(named_map, fieldset, [f"THDG{suf}","THDG_"+suf], r["TH"])
+        put_any(named_map, fieldset, [f"MHDG{suf}","MHDG_"+suf], r["MH"])
+        put_any(named_map, fieldset, [f"GS{suf}","GS_"+suf],   r["GS"])
+        put_any(named_map, fieldset, [f"Dist{suf}","Dist_"+suf], r["Dist"])
+        put_any(named_map, fieldset, [f"ETE{suf}","ETE_"+suf],  r["ETE(min)"])
+        put_any(named_map, fieldset, [f"ETO{suf}","ETO_"+suf],  r["ETO"])
+        put_any(named_map, fieldset, [f"PL_BO{suf}","PL_BO_"+suf], r["PL_B/O (L)"])
+        put_any(named_map, fieldset, [f"EFOB{suf}","EFOB_"+suf], r["EFOB (L)"])
+        put_any(named_map, fieldset, [f"FREQ{suf}","FREQ_"+suf], legs_in[i-1].get("Freq",""))
 
     # Totais (se existirem no template)
-    put_any(named_map, FIELDSET, ["ETE_Total","ETE_TOTAL"], f"{int(round(total_ete))}")
-    put_any(named_map, FIELDSET, ["Dist_Total","DIST_TOTAL"], f"{total_dist:.1f}")
-    put_any(named_map, FIELDSET, ["PL_BO_TOTAL","PLBO_TOTAL"], f"{total_burn:.1f}")
-    put_any(named_map, FIELDSET, ["EFOB_TOTAL","EFOB_TOTAL_"], f"{efob_running:.1f}")
-
-    safe_reg = ascii_safe(registration or "REG")
-    safe_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%Y-%m-%d")
-    filename = f"{safe_date}_{safe_reg}_NAVLOG.pdf"
+    put_any(named_map, fieldset, ["ETE_Total","ETE_TOTAL"], str(int(round(total_ete))))
+    put_any(named_map, fieldset, ["Dist_Total","DIST_TOTAL"], f"{total_dist:.1f}")
+    put_any(named_map, fieldset, ["PL_BO_TOTAL","PLBO_TOTAL"], f"{total_burn:.1f}")
+    put_any(named_map, fieldset, ["EFOB_TOTAL","EFOB_TOTAL_"], f"{efob:.1f}")
 
     if st.button("Gerar PDF preenchido", type="primary"):
         try:
-            out_bytes = fill_pdf(TEMPLATE_BYTES, named_map)
+            out_bytes = fill_pdf(template_bytes, named_map)
             st.download_button("Download PDF", data=out_bytes, file_name=filename, mime="application/pdf")
             st.success("PDF gerado. Revê antes do voo.")
         except Exception as e:
             st.error(f"Erro ao gerar PDF: {e}")
 
-# ===================== Extras: seleção rápida de Arrival/Alternates (auto-frequências) =====================
-st.header("Seleção rápida de Arrival/Alternates (auto-frequências)")
-col1, col2, col3, col4, col5 = st.columns(5)
-with col1:
-    sel_dept = st.selectbox("Departure", ["LPSO","LPEV","LPCO","LPCB","LPVZ"], index=0)
-with col2:
-    sel_arr = st.selectbox("Arrival", ["LPEV","LPCO","LPCB","LPVZ","LPSO"], index=0)
-with col3:
-    sel_alt1 = st.selectbox("Alternate 1", ["LPCO","LPCB","LPVZ","LPEV","LPSO"], index=0)
-with col4:
-    sel_alt2 = st.selectbox("Alternate 2", ["LPCB","LPVZ","LPEV","LPCO","LPSO"], index=1)
-with col5:
-    if st.button("Aplicar seleção e frequências"):
-        # Atualiza campos de texto se existirem
-        if field_exists("Dept_Airfield"): st.session_state["Dept_Airfield"] = sel_dept
-        if field_exists("Arrival_Airfield"): st.session_state["Arrival_Airfield"] = sel_arr
-        # Preenche comms
-        if field_exists("Dept_Comm"): st.session_state["Dept_Comm"] = FREQS.get(sel_dept, "")
-        if field_exists("Arrival_comm"): st.session_state["Arrival_comm"] = FREQS.get(sel_arr, "")
-        st.success("Aplicado. Edita acima se quiseres afinar.")
+except Exception as e:
+    st.error(f"Não foi possível preparar o mapeamento do PDF: {e}\n"
+             "Confere se o ficheiro existe em /mnt/data ou no diretório atual.")
