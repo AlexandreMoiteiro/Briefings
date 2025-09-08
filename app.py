@@ -17,6 +17,7 @@ APP_WEATHER_URL = "https://briefings.streamlit.app/Weather"
 APP_NOTAMS_URL  = "https://briefings.streamlit.app/NOTAMs"
 APP_VFRMAP_URL  = "https://briefings.streamlit.app/VFRMap"
 APP_MNB_URL     = "https://briefings.streamlit.app/MassBalance"
+APP_NAV_LOG_URL = "https://briefings.streamlit.app/NavLog"
 
 # ---------- Página & estilos ----------
 st.set_page_config(page_title="Briefings", layout="wide")
@@ -434,6 +435,7 @@ st.markdown(
       <a href="{APP_NOTAMS_URL}" target="_blank">NOTAMs</a>
       <a href="{APP_VFRMAP_URL}" target="_blank">VFR Map</a>
       <a href="{APP_MNB_URL}" target="_blank">Mass & Balance</a>
+      <a href="{APP_NAV_LOG_URL}" target="_blank">NavLog</a>
     </span></div>''',
     unsafe_allow_html=True,
 )
