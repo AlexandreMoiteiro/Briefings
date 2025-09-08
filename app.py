@@ -1,3 +1,4 @@
+# app.py — Briefings com editor de NOTAMs, GAMET e SIGMET (via Gist) + METAR/TAF + Charts + PDFs + Emparelhamento Navlog↔VFR
 from typing import Dict, Any, List, Tuple, Optional
 import io, os, re, base64, tempfile, unicodedata, json, datetime as dt
 import streamlit as st
@@ -605,16 +606,6 @@ class FinalBriefPDF(FPDF):
 
 # ---------- UI: header ----------
 st.markdown('<div class="app-title">Briefings</div>', unsafe_allow_html=True)
-# Botões rápidos para as outras páginas
-btn_cols = st.columns(4)
-with btn_cols[0]:
-    st.link_button("Weather", APP_WEATHER_URL, use_container_width=True)
-with btn_cols[1]:
-    st.link_button("NOTAMs", APP_NOTAMS_URL, use_container_width=True)
-with btn_cols[2]:
-    st.link_button("VFR Map", APP_VFRMAP_URL, use_container_width=True)
-with btn_cols[3]:
-    st.link_button("Mass & Balance", APP_MNB_URL, use_container_width=True)
 
 # ---------- Abas (estrutura melhorada) ----------
 tab_mission, tab_notams, tab_sigmet_gamet, tab_charts, tab_pairs, tab_generate = st.tabs(
@@ -642,8 +633,7 @@ with tab_mission:
         icaos_metar_str = st.text_input("ICAO list for METAR/TAF (comma / space / newline)", value="LPPT LPBJ LEBZ")
         icaos_metar = parse_icaos(icaos_metar_str)
     with c2:
-        # Inclui LPPC(Enroute) por omissão
-        icaos_notam_str = st.text_input("Lista para NOTAMs (aceita LPPC(Enroute))", value="LPPC(Enroute) LPSO LPCB LPEV")
+        icaos_notam_str = st.text_input("ICAO list for NOTAMs (comma / space / newline)", value="LPSO LPCB LPEV")
         icaos_notam = parse_icaos(icaos_notam_str)
 
 # ---------- NOTAMs ----------
@@ -660,31 +650,35 @@ with tab_notams:
 
     edit_cols = st.columns(3)
     editors_notam: Dict[str, str] = {}
-    for i, code in enumerate(icaos_notam if 'icaos_notam' in locals() else []):
+    for i, icao in enumerate(icaos_notam if 'icaos_notam' in locals() else []):
         with edit_cols[i % 3]:
-            initial_text = "\n\n".join(existing_map.get(code, [])) if existing_map.get(code) else ""
-            editors_notam[code] = st.text_area(
-                f"{code} — NOTAMs",
+            initial_text = "\n\n".join(existing_map.get(icao, [])) if existing_map.get(icao) else ""
+            editors_notam[icao] = st.text_area(
+                f"{icao} — NOTAMs",
                 value=initial_text,
                 placeholder=("Ex.: AERODROME BEACON ONLY FLASH-GREEN LIGHT OPERATIVE.\n"
                              "FROM: 29th Jul 2025 15:10 TO: 29th Sep 2025 18:18 EST\n\n"
                              "Outro NOTAM aqui..."),
-                key=f"ed_notam_{code}",
+                key=f"ed_notam_{icao}",
                 height=160
             )
 
-    # Guardar (SEM 'substituir todos'): atualiza apenas os que editaste, preservando o resto
-    if st.button("Guardar NOTAMs no Gist"):
-        new_map: Dict[str, List[str]] = {}
-        new_map.update(existing_map)  # preserva
-        for code in (icaos_notam if 'icaos_notam' in locals() else []):
-            new_map[code] = parse_block_to_list(editors_notam.get(code, ""))
-        ok, msg = save_notams_to_gist(new_map)
-        if ok:
-            st.success(msg)
-            st.cache_data.clear()
-        else:
-            st.error(msg)
+    col_save_n = st.columns([0.4, 0.3, 0.3])
+    with col_save_n[0]:
+        overwrite_all_n = st.checkbox("Substituir TODOS os aerodromos do Gist (NOTAMs)", value=False)
+    with col_save_n[1]:
+        if st.button("Guardar NOTAMs no Gist"):
+            new_map: Dict[str, List[str]] = {}
+            if not overwrite_all_n:
+                new_map.update(existing_map)
+            for icao in (icaos_notam if 'icaos_notam' in locals() else []):
+                new_map[icao] = parse_block_to_list(editors_notam.get(icao, ""))
+            ok, msg = save_notams_to_gist(new_map)
+            if ok:
+                st.success(msg)
+                st.cache_data.clear()
+            else:
+                st.error(msg)
 
 # ---------- SIGMET & GAMET ----------
 with tab_sigmet_gamet:
@@ -763,271 +757,235 @@ with tab_charts:
                 order_val = st.number_input("Ordem", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
             charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png, "order": order_val, "filename": name})
 
-# ---------- Navlog ↔ VFR (pares por ROTA) ----------
+# ---------- Navlog ↔ VFR (pares por ICAO) ----------
 with tab_pairs:
-    st.markdown("### Emparelhamento Navlog ↔ VFR por Rota")
-    st.caption("Para cada rota (ex.: LPSO-LPCB, LPSO-LPEV) carrega um Navlog e o respetivo mapa VFR. Aceita PDF/PNG/JPG/JPEG/GIF.")
+    st.markdown("### Emparelhamento Navlog ↔ VFR por ICAO")
+    st.caption("Para cada aeródromo (ex.: LPCB, LPEV) carrega um Navlog e o respetivo mapa VFR. Aceita PDF/PNG/JPG/JPEG/GIF.")
 
-    num_pairs = st.number_input("Número de pares (Rotas)", min_value=0, max_value=8, value=0, step=1)
+    num_pairs = st.number_input("Número de pares (ICAO)", min_value=0, max_value=8, value=0, step=1)
     pairs: List[Dict[str, Any]] = []
     for i in range(int(num_pairs)):
         with st.expander(f"Par #{i+1}", expanded=False):
-            route = st.text_input(f"Rota do par #{i+1} (ex.: LPSO-LPCB)", key=f"pair_route_{i}").strip()
+            icao = st.text_input(f"ICAO do par #{i+1}", key=f"pair_icao_{i}").upper().strip()
             c1, c2 = st.columns(2)
             with c1:
-                nav_file = st.file_uploader(f"Navlog ({route or 'Rota'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_nav_{i}")
+                nav_file = st.file_uploader(f"Navlog ({icao or 'ICAO'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_nav_{i}")
             with c2:
-                vfr_file = st.file_uploader(f"VFR Map ({route or 'Rota'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_vfr_{i}")
+                vfr_file = st.file_uploader(f"VFR Map ({icao or 'ICAO'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_vfr_{i}")
 
-            pairs.append({"route": route, "nav": nav_file, "vfr": vfr_file})
+            pairs.append({"icao": icao, "nav": nav_file, "vfr": vfr_file})
 
 # ---------- Gerar PDFs ----------
 with tab_generate:
     st.markdown("### PDFs")
     col_pdfs = st.columns(2)
     with col_pdfs[0]:
-        det_click = st.button("Generate Detailed (PT)", key="btn_det")
+        gen_det = st.button("Generate Detailed (PT)")
     with col_pdfs[1]:
-        fin_click = st.button("Generate Final Briefing (EN)", key="btn_fin")
-
-    if det_click:
-        st.session_state["do_det"] = True
-    if fin_click:
-        st.session_state["do_fin"] = True
+        gen_final = st.button("Generate Final Briefing (EN)")
 
 # ---------- Detailed (PT) ----------
-if st.session_state.get("do_det"):
-    with st.spinner("A gerar Detailed (PT)..."):
-        try:
-            # Aeródromos METAR/TAF da aba Missão
-            icaos_metar_local = locals().get("icaos_metar", [])
-            # Textos SIGMET/GAMET
-            sigmet_text_local = locals().get("sigmet_text","")
-            _sigmet_initial_local = locals().get("_sigmet_initial","")
-            gamet_text_local = locals().get("gamet_text","")
-            _gamet_initial_local = locals().get("_gamet_initial","")
+if 'gen_det' in locals() and gen_det:
+    # Aeródromos METAR/TAF da aba Missão
+    icaos_metar_local = locals().get("icaos_metar", [])
+    # Textos SIGMET/GAMET
+    sigmet_text_local = locals().get("sigmet_text","")
+    _sigmet_initial_local = locals().get("_sigmet_initial","")
+    gamet_text_local = locals().get("gamet_text","")
+    _gamet_initial_local = locals().get("_gamet_initial","")
 
-            # METAR/TAF (RAW + interpretação) — WEATHER PRIMEIRO
-            metar_analyses: List[Tuple[str, str, str, str]] = []
-            for icao in icaos_metar_local:
-                metar_raw = fetch_metar_now(icao) or ""
-                taf_raw   = fetch_taf_now(icao) or ""
-                analysis  = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis neste momento."
-                metar_analyses.append((icao, metar_raw, taf_raw, analysis))
+    # METAR/TAF (RAW + interpretação)
+    metar_analyses: List[Tuple[str, str, str, str]] = []
+    for icao in icaos_metar_local:
+        metar_raw = fetch_metar_now(icao) or ""
+        taf_raw   = fetch_taf_now(icao) or ""
+        analysis  = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis neste momento."
+        metar_analyses.append((icao, metar_raw, taf_raw, analysis))
 
-            # SIGMET (texto manual/Gist; sem fetch automático)
-            sigmet_for_pdf = (sigmet_text_local or _sigmet_initial_local or "").strip()
-            sigmet_analysis = analyze_sigmet_pt(sigmet_for_pdf) if sigmet_for_pdf else ""
+    # SIGMET (texto manual/Gist; sem fetch automático)
+    sigmet_for_pdf = (sigmet_text_local or _sigmet_initial_local or "").strip()
+    sigmet_analysis = analyze_sigmet_pt(sigmet_for_pdf) if sigmet_for_pdf else ""
 
-            # GAMET
-            gamet_for_pdf = (gamet_text_local or _gamet_initial_local or "").strip()
-            gamet_analysis = analyze_gamet_pt(gamet_for_pdf) if gamet_for_pdf else ""
+    # GAMET
+    gamet_for_pdf = (gamet_text_local or _gamet_initial_local or "").strip()
+    gamet_analysis = analyze_gamet_pt(gamet_for_pdf) if gamet_for_pdf else ""
 
-            # Build Detailed (sem cover, sem NOTAMs, sem Navlog/VFR)
-            det_pdf = DetailedPDF()
-            det_pdf.section_page("Observação")
-            det_pdf.metar_taf_block(metar_analyses)
-            if sigmet_for_pdf:
-                det_pdf.section_page("SIGMET")
-                det_pdf.sigmet_block(sigmet_for_pdf, sigmet_analysis)
-            if gamet_for_pdf:
-                det_pdf.section_page("GAMET")
-                det_pdf.gamet_block(gamet_for_pdf, gamet_analysis)
+    # Build Detailed (sem cover, sem NOTAMs, sem Navlog/VFR)
+    det_pdf = DetailedPDF()
+    det_pdf.section_page("Observação")
+    det_pdf.metar_taf_block(metar_analyses)
+    if sigmet_for_pdf:
+        det_pdf.section_page("SIGMET")
+        det_pdf.sigmet_block(sigmet_for_pdf, sigmet_analysis)
+    if gamet_for_pdf:
+        det_pdf.section_page("GAMET")
+        det_pdf.gamet_block(gamet_for_pdf, gamet_analysis)
 
-            # Charts com IA — por seções (SPC → SIGWX → Wind & Temp → Other)
-            charts_local: List[Dict[str,Any]] = locals().get("charts", [])
-            if charts_local:
-                grouped: Dict[str, List[Dict[str,Any]]] = {"SPC": [], "SIGWX": [], "Wind & Temp": [], "Other": []}
-                for c in charts_local:
-                    grouped.setdefault(c["kind"], []).append(c)
-                for k in list(grouped.keys()):
-                    grouped[k] = sorted(grouped[k], key=_chart_sort_key)
+    # Charts com IA — por seções (SPC → SIGWX → Wind & Temp → Other)
+    charts_local: List[Dict[str,Any]] = locals().get("charts", [])
+    if charts_local:
+        grouped: Dict[str, List[Dict[str,Any]]] = {"SPC": [], "SIGWX": [], "Wind & Temp": [], "Other": []}
+        for c in charts_local:
+            grouped.setdefault(c["kind"], []).append(c)
+        for k in list(grouped.keys()):
+            grouped[k] = sorted(grouped[k], key=_chart_sort_key)
 
-                for kind, sec_title in [
-                    ("SPC","Surface Pressure Charts (SPC)"),
-                    ("SIGWX","Significant Weather Charts (SIGWX)"),
-                    ("Wind & Temp","Wind & Temperature Charts"),
-                    ("Other","Other Charts"),
-                ]:
-                    items = grouped.get(kind, [])
-                    if not items: continue
-                    det_pdf.section_page(sec_title)
-                    for ch in items:
-                        title, subtitle, img_png, fname = ch["title"], ch["subtitle"], ch["img_png"], ch.get("filename","")
-                        analysis_txt = ""
-                        if locals().get("use_ai_for_charts", False):
-                            try:
-                                analysis_txt = analyze_chart_pt(kind, base64.b64encode(img_png.getvalue()).decode("utf-8"), filename_hint=fname)
-                            except Exception:
-                                analysis_txt = "Analise indisponivel."
-                        det_pdf.chart_block(title, subtitle, img_png, analysis_txt)
+        for kind, sec_title in [
+            ("SPC","Surface Pressure Charts (SPC)"),
+            ("SIGWX","Significant Weather Charts (SIGWX)"),
+            ("Wind & Temp","Wind & Temperature Charts"),
+            ("Other","Other Charts"),
+        ]:
+            items = grouped.get(kind, [])
+            if not items: continue
+            det_pdf.section_page(sec_title)
+            for ch in items:
+                title, subtitle, img_png, fname = ch["title"], ch["subtitle"], ch["img_png"], ch.get("filename","")
+                analysis_txt = ""
+                if locals().get("use_ai_for_charts", False):
+                    try:
+                        analysis_txt = analyze_chart_pt(kind, base64.b64encode(img_png.getvalue()).decode("utf-8"), filename_hint=fname)
+                    except Exception:
+                        analysis_txt = "Analise indisponivel."
+                det_pdf.chart_block(title, subtitle, img_png, analysis_txt)
 
-            # Glossário final (inclui equivalências e simbologia)
-            det_pdf.glossary_page()
+    # Glossário final (inclui equivalências e simbologia)
+    det_pdf.glossary_page()
 
-            det_name = f"Briefing Detalhado - Missao {locals().get('mission_no') or 'X'}.pdf"
-            det_bytes = fpdf_to_bytes(det_pdf)
-            st.download_button("Download Detailed (PT)", data=det_bytes, file_name=det_name, mime="application/pdf", use_container_width=True)
-        except Exception as e:
-            st.error(f"Erro ao gerar Detailed: {e}")
-        finally:
-            st.session_state["do_det"] = False
+    det_name = f"Briefing Detalhado - Missao {locals().get('mission_no') or 'X'}.pdf"
+    det_pdf.output(det_name)
+    with open(det_name, "rb") as f:
+        st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
 
 # ---------- Final Briefing (EN) ----------
-if st.session_state.get("do_fin"):
-    with st.spinner("A gerar Final Briefing (EN)..."):
-        try:
-            fb = FinalBriefPDF()
-            fb.cover(
-                mission_no=locals().get("mission_no",""),
-                pilot=locals().get("pilot",""),
-                aircraft=locals().get("aircraft_type",""),
-                callsign=locals().get("callsign",""),
-                reg=locals().get("registration",""),
-                date_str=str(locals().get("flight_date","")),
-                time_utc=locals().get("time_utc","")
-            )
+if 'gen_final' in locals() and gen_final:
+    fb = FinalBriefPDF()
+    fb.cover(
+        mission_no=locals().get("mission_no",""),
+        pilot=locals().get("pilot",""),
+        aircraft=locals().get("aircraft_type",""),
+        callsign=locals().get("callsign",""),
+        reg=locals().get("registration",""),
+        date_str=str(locals().get("flight_date","")),
+        time_utc=locals().get("time_utc","")
+    )
 
-            # WEATHER FIRST also in Final
-            icaos_metar_local = locals().get("icaos_metar", [])
-            metar_analyses: List[Tuple[str, str, str, str]] = []
-            for icao in icaos_metar_local:
-                metar_raw = fetch_metar_now(icao) or ""
-                taf_raw   = fetch_taf_now(icao) or ""
-                analysis  = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis neste momento."
-                metar_analyses.append((icao, metar_raw, taf_raw, analysis))
+    # Flight Plan (imagem entra já; PDF mais tarde via merge)
+    fp_upload = locals().get("fp_upload", None)
+    fp_img_png: Optional[io.BytesIO] = None
+    fp_pdf_bytes: Optional[bytes] = None
+    fp_is_pdf = False
+    if fp_upload:
+        raw = fp_upload.read()
+        if (fp_upload.type or "").lower() == "application/pdf":
+            fp_pdf_bytes = raw; fp_is_pdf = True
+        else:
+            fp_img_png = ensure_png_from_bytes(raw, fp_upload.type or "")
+            fb.section_title("Flight Plan")
+            fb.flightplan_image_portrait("Flight Plan", fp_img_png)
 
-            weather_pdf = DetailedPDF()
-            weather_pdf.section_page("Weather — METAR/TAF (PT)")
-            weather_pdf.metar_taf_block(metar_analyses)
-            weather_bytes: bytes = fpdf_to_bytes(weather_pdf)
+    # Charts (ordenados)
+    charts_local: List[Dict[str,Any]] = locals().get("charts", [])
+    if charts_local:
+        ordered = [(c["title"], c["subtitle"], c["img_png"]) for c in sorted(charts_local, key=_chart_sort_key)]
+        fb.section_title("Charts")
+        fb.charts_only(ordered)
 
-            # Flight Plan (imagem entra já; PDF mais tarde via merge)
-            fp_upload = locals().get("fp_upload", None)
-            fp_img_png: Optional[io.BytesIO] = None
-            fp_pdf_bytes: Optional[bytes] = None
-            fp_is_pdf = False
-            if fp_upload:
-                raw = fp_upload.read()
-                if (fp_upload.type or "").lower() == "application/pdf":
-                    fp_pdf_bytes = raw; fp_is_pdf = True
-                else:
-                    fp_img_png = ensure_png_from_bytes(raw, fp_upload.type or "")
-                    fb.section_title("Flight Plan")
-                    fb.flightplan_image_portrait("Flight Plan", fp_img_png)
+    # Exporta base
+    fb_bytes: bytes = fpdf_to_bytes(fb)
+    final_bytes = fb_bytes
 
-            # Charts (ordenados)
-            charts_local: List[Dict[str,Any]] = locals().get("charts", [])
-            if charts_local:
-                ordered = [(c["title"], c["subtitle"], c["img_png"]) for c in sorted(charts_local, key=_chart_sort_key)]
-                fb.section_title("Charts")
-                fb.charts_only(ordered)
+    # Merge com: Flight Plan PDF (se existir) -> Pares Navlog/VFR por ICAO (na ordem listada) -> M&B PDF -> Resources
+    nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
+    mb_upload = locals().get("mb_upload", None)
 
-            # Exporta base
-            fb_bytes: bytes = fpdf_to_bytes(fb)
-            final_bytes = fb_bytes
+    try:
+        main = fitz.open(stream=fb_bytes, filetype="pdf")
+        insert_pos = main.page_count  # inserir no fim
 
-            # Merge com: WEATHER -> FP -> Pares ROTA -> M&B -> Resources
-            nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
-            mb_upload = locals().get("mb_upload", None)
-
+        # 1) Flight Plan PDF
+        if fp_is_pdf and fp_pdf_bytes:
             try:
-                main = fitz.open(stream=fb_bytes, filetype="pdf")
-                insert_pos = 1  # após a capa
-
-                # WEATHER
-                try:
-                    wdoc = fitz.open(stream=weather_bytes, filetype="pdf")
-                    main.insert_pdf(wdoc, start_at=insert_pos)
-                    insert_pos += wdoc.page_count
-                    wdoc.close()
-                except Exception:
-                    pass
-
-                # Flight Plan PDF
-                if fp_is_pdf and fp_pdf_bytes:
-                    try:
-                        fp_doc = fitz.open(stream=fp_pdf_bytes, filetype="pdf")
-                        main.insert_pdf(fp_doc, start_at=insert_pos)
-                        insert_pos += fp_doc.page_count
-                        fp_doc.close()
-                    except Exception:
-                        pass
-
-                # Pares Navlog↔VFR por ROTA
-                for p in (nav_pairs or []):
-                    route = (p.get("route") or "").strip()
-                    sec_pdf = FinalBriefPDF()
-                    sec_pdf.section_title(f"Navlog & VFR — {route or 'Route'}")
-                    sec_bytes = fpdf_to_bytes(sec_pdf)
-                    sec_doc = fitz.open(stream=sec_bytes, filetype="pdf")
-                    main.insert_pdf(sec_doc, start_at=insert_pos); insert_pos += sec_doc.page_count; sec_doc.close()
-
-                    nv = p.get("nav")
-                    if nv is not None:
-                        raw = nv.read()
-                        if (nv.type or "").lower() == "application/pdf":
-                            try:
-                                nv_doc = fitz.open(stream=raw, filetype="pdf")
-                                main.insert_pdf(nv_doc, start_at=insert_pos)
-                                insert_pos += nv_doc.page_count
-                                nv_doc.close()
-                            except Exception:
-                                pass
-                        else:
-                            img_png = ensure_png_from_bytes(raw, nv.type or "")
-                            nv_bytes = image_bytes_to_pdf_bytes(f"Navlog — {route or 'Route'}", img_png, orientation="P")
-                            nv_doc = fitz.open(stream=nv_bytes, filetype="pdf")
-                            main.insert_pdf(nv_doc, start_at=insert_pos)
-                            insert_pos += nv_doc.page_count
-                            nv_doc.close()
-
-                    vf = p.get("vfr")
-                    if vf is not None:
-                        raw = vf.read()
-                        if (vf.type or "").lower() == "application/pdf":
-                            try:
-                                vf_doc = fitz.open(stream=raw, filetype="pdf")
-                                main.insert_pdf(vf_doc, start_at=insert_pos)
-                                insert_pos += vf_doc.page_count
-                                vf_doc.close()
-                            except Exception:
-                                pass
-                        else:
-                            img_png = ensure_png_from_bytes(raw, vf.type or "")
-                            vf_bytes = image_bytes_to_pdf_bytes(f"VFR Map — {route or 'Route'}", img_png, orientation="L")
-                            vf_doc = fitz.open(stream=vf_bytes, filetype="pdf")
-                            main.insert_pdf(vf_doc, start_at=insert_pos)
-                            insert_pos += vf_doc.page_count
-                            vf_doc.close()
-
-                # M&B PDF
-                if mb_upload is not None:
-                    try:
-                        mb_bytes = mb_upload.getvalue() if hasattr(mb_upload, "getvalue") else mb_upload.read()
-                        mb_doc = fitz.open(stream=mb_bytes, filetype="pdf")
-                        if mb_doc.page_count > 0:
-                            main.insert_pdf(mb_doc, start_at=insert_pos)
-                            insert_pos += mb_doc.page_count
-                        mb_doc.close()
-                    except Exception:
-                        pass
-
-                # Resources page
-                res_pdf = FinalBriefPDF(); res_pdf.resources_page()
-                res_bytes = fpdf_to_bytes(res_pdf)
-                res_doc = fitz.open(stream=res_bytes, filetype="pdf")
-                main.insert_pdf(res_doc, start_at=insert_pos); insert_pos += res_doc.page_count; res_doc.close()
-
-                final_bytes = main.tobytes()
-                main.close()
+                fp_doc = fitz.open(stream=fp_pdf_bytes, filetype="pdf")
+                main.insert_pdf(fp_doc, start_at=insert_pos)
+                insert_pos += fp_doc.page_count
+                fp_doc.close()
             except Exception:
                 pass
 
-            final_name = f"Briefing - Missao {locals().get('mission_no') or 'X'}.pdf"
-            st.download_button("Download Final Briefing (EN)", data=final_bytes, file_name=final_name, mime="application/pdf", use_container_width=True)
-        except Exception as e:
-            st.error(f"Erro ao gerar Final Briefing: {e}")
-        finally:
-            st.session_state["do_fin"] = False
+        # 2) Pares Navlog↔VFR (por ICAO) — aceita PDF/Imagens
+        for p in (nav_pairs or []):
+            icao = (p.get("icao") or "").upper()
+            # título intermédio como página simples
+            sec_pdf = FinalBriefPDF()
+            sec_pdf.section_title(f"Navlog & VFR — {icao or 'ICAO'}")
+            sec_bytes = fpdf_to_bytes(sec_pdf)
+            sec_doc = fitz.open(stream=sec_bytes, filetype="pdf")
+            main.insert_pdf(sec_doc, start_at=insert_pos); insert_pos += sec_doc.page_count; sec_doc.close()
 
+            # Navlog
+            nv = p.get("nav")
+            if nv is not None:
+                raw = nv.read()
+                if (nv.type or "").lower() == "application/pdf":
+                    try:
+                        nv_doc = fitz.open(stream=raw, filetype="pdf")
+                        main.insert_pdf(nv_doc, start_at=insert_pos)
+                        insert_pos += nv_doc.page_count
+                        nv_doc.close()
+                    except Exception:
+                        pass
+                else:
+                    # imagem -> gerar PDF 1p
+                    img_png = ensure_png_from_bytes(raw, nv.type or "")
+                    nv_bytes = image_bytes_to_pdf_bytes(f"Navlog — {icao}", img_png, orientation="P")
+                    nv_doc = fitz.open(stream=nv_bytes, filetype="pdf")
+                    main.insert_pdf(nv_doc, start_at=insert_pos)
+                    insert_pos += nv_doc.page_count
+                    nv_doc.close()
+
+            # VFR
+            vf = p.get("vfr")
+            if vf is not None:
+                raw = vf.read()
+                if (vf.type or "").lower() == "application/pdf":
+                    try:
+                        vf_doc = fitz.open(stream=raw, filetype="pdf")
+                        main.insert_pdf(vf_doc, start_at=insert_pos)
+                        insert_pos += vf_doc.page_count
+                        vf_doc.close()
+                    except Exception:
+                        pass
+                else:
+                    img_png = ensure_png_from_bytes(raw, vf.type or "")
+                    vf_bytes = image_bytes_to_pdf_bytes(f"VFR Map — {icao}", img_png, orientation="L")
+                    vf_doc = fitz.open(stream=vf_bytes, filetype="pdf")
+                    main.insert_pdf(vf_doc, start_at=insert_pos)
+                    insert_pos += vf_doc.page_count
+                    vf_doc.close()
+
+        # 3) M&B PDF
+        if mb_upload is not None:
+            try:
+                mb_bytes = mb_upload.getvalue() if hasattr(mb_upload, "getvalue") else mb_upload.read()
+                mb_doc = fitz.open(stream=mb_bytes, filetype="pdf")
+                if mb_doc.page_count > 0:
+                    main.insert_pdf(mb_doc, start_at=insert_pos)
+                    insert_pos += mb_doc.page_count
+                mb_doc.close()
+            except Exception:
+                pass
+
+        # 4) Resources page (links deslocados da capa para aqui)
+        res_pdf = FinalBriefPDF(); res_pdf.resources_page()
+        res_bytes = fpdf_to_bytes(res_pdf)
+        res_doc = fitz.open(stream=res_bytes, filetype="pdf")
+        main.insert_pdf(res_doc, start_at=insert_pos); insert_pos += res_doc.page_count; res_doc.close()
+
+        final_bytes = main.tobytes()
+        main.close()
+    except Exception:
+        pass
+
+    final_name = f"Briefing - Missao {locals().get('mission_no') or 'X'}.pdf"
+    st.download_button("Download Final Briefing (EN)", data=final_bytes, file_name=final_name, mime="application/pdf", use_container_width=True)
