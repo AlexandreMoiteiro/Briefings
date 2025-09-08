@@ -1,5 +1,3 @@
-
-
 # app.py — NAVLOG completo (TOC/TOD na tabela) + AFM perf + export p/ "NAVLOG - FORM.pdf"
 # Reqs: streamlit, pypdf, pytz
 
@@ -10,20 +8,6 @@ from pathlib import Path
 import io, unicodedata
 from typing import Dict, List, Optional, Tuple
 from math import sin, cos, asin, radians, degrees, fmod
-import urllib.request, urllib.parse
-
-# ========================= CONFIG PDF (GitHub) =========================
-# Ajusta aqui se precisares:
-GITHUB_OWNER  = "AlexandreMoiteiro"
-GITHUB_REPO   = "NavLog"        # <-- repo
-GITHUB_BRANCH = "main"          # <-- branch
-GITHUB_FILE   = "NAVLOG - FORM.pdf"  # caminho relativo no repo (pode incluir subpastas)
-
-def github_raw_url(owner: str, repo: str, branch: str, relpath: str) -> str:
-    # Quote seguro para caminhos com espaços e acentos
-    return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{urllib.parse.quote(relpath)}"
-
-GITHUB_RAW_URL = github_raw_url(GITHUB_OWNER, GITHUB_REPO, GITHUB_BRANCH, GITHUB_FILE)
 
 # ========================= PDF helpers =========================
 try:
@@ -35,6 +19,11 @@ except Exception:
 
 def ascii_safe(x: str) -> str:
     return unicodedata.normalize("NFKD", str(x or "")).encode("ascii","ignore").decode("ascii")
+
+def read_pdf_bytes(paths: List[str]) -> bytes:
+    for p in paths:
+        if Path(p).exists(): return Path(p).read_bytes()
+    raise FileNotFoundError(paths)
 
 def get_fields_and_meta(template_bytes: bytes):
     reader = PdfReader(io.BytesIO(template_bytes))
@@ -69,7 +58,7 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     try:
         writer._root_object["/AcroForm"].update({
             NameObject("/NeedAppearances"): True,
-            NameObject("/DA"): TextStringObject("/Helv 0 Tf 0 g")
+            NameObject("/DA"): TextStringObject("/Helv 0 Tf 0 g")  # fonte automática 0 pt
         })
     except: pass
     str_fields = {k:(str(v) if v is not None else "") for k,v in fields.items()}
@@ -84,13 +73,6 @@ def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
             s = s[:maxlens[key]]
         out[key] = s
 
-def fetch_pdf_from_github(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 NAVLOG"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"GitHub HTTP {resp.status}")
-        return resp.read()
-
 # ========================= Wind & helpers =========================
 def wrap360(x): x=fmod(x,360.0); return x+360 if x<0 else x
 def angle_diff(a,b): return (a-b+180)%360-180
@@ -103,6 +85,7 @@ def wind_triangle(tc_deg,tas_kt,wind_from_deg,wind_kt):
     th=wrap360(tc_deg+wca)
     return wca,th,max(0.0,gs)
 def apply_var(true_deg,var_deg,east_is_negative=False):
+    # East is least (−), West is best (+)
     return wrap360(true_deg - var_deg if east_is_negative else true_deg + var_deg)
 
 def parse_hhmm(s:str):
@@ -122,6 +105,7 @@ def interp1(x,x0,x1,y0,y1):
     if x1==x0: return y0
     t=(x-x0)/(x1-x0); return y0+t*(y1-y0)
 
+# En-route ROC (flaps UP) @ 650 kg
 ROC = {
     650:{0:{-25:951,0:805,25:675,50:557},2000:{-25:840,0:696,25:568,50:453},4000:{-25:729,0:588,25:462,50:349},
          6000:{-25:619,0:480,25:357,50:245},8000:{-25:509,0:373,25:251,50:142},10000:{-25:399,0:266,25:146,50:39},
@@ -129,6 +113,7 @@ ROC = {
 }
 VY = {650:{0:70,2000:69,4000:68,6000:67,8000:65,10000:64,12000:63,14000:62}}
 
+# Cruise perf (PA → rpm → (TAS kt, FF L/h))
 CRUISE={
     0:{2000:(95,18.7),2100:(101,20.7),2250:(110,24.6)},
     2000:{2000:(94,17.5),2100:(100,19.9),2250:(109,23.5)},
@@ -154,6 +139,7 @@ def cruise_lookup(pa_ft: float, rpm: int, oat_c: Optional[float]) -> Tuple[float
         return (tas_lo + t*(tas_hi-tas_lo), ff_lo + t*(ff_hi-ff_lo))
     tas0,ff0=val(p0); tas1,ff1=val(p1)
     tas=interp1(pa_c,p0,p1,tas0,tas1); ff=interp1(pa_c,p0,p1,ff0,ff1)
+    # Correção simples por OAT vs ISA (±15°C → TAS −2/+1%; FF −2.5/+3%)
     if oat_c is not None:
         dev=oat_c - isa_temp(pa_c)
         if dev>0:
@@ -183,7 +169,7 @@ def vy_interp(pa):
     p0=max([p for p in pas if p<=pa_c]); p1=min([p for p in pas if p>=pa_c])
     return interp1(pa_c, p0, p1, table[p0], table[p1])
 
-# ========================= Aerodromes =========================
+# ========================= Aerodromes (freqs numéricas) =========================
 AEROS={
  "LPSO":{"elev":390,"freq":"119.805"},
  "LPEV":{"elev":807,"freq":"122.705"},
@@ -200,7 +186,9 @@ st.title("Navigation Plan & Inflight Log — Tecnam P2008")
 
 DEFAULT_STUDENT="AMOIT"; DEFAULT_AIRCRAFT="P208"; DEFAULT_CALLSIGN="RVP"
 REGS=["CS-ECC","CS-ECD","CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW"]
+PDF_TEMPLATE_PATHS=["/mnt/data/NAVLOG - FORM.pdf"]  # ficheiro local
 
+# Header
 c1,c2,c3=st.columns(3)
 with c1:
     aircraft=st.text_input("Aircraft",DEFAULT_AIRCRAFT)
@@ -208,15 +196,16 @@ with c1:
     callsign=st.text_input("Callsign",DEFAULT_CALLSIGN)
 with c2:
     student=st.text_input("Student",DEFAULT_STUDENT)
-    lesson = st.text_input("Lesson", "")            # NOVO
-    instructor = st.text_input("Instructor", "")    # NOVO
+    lesson = st.text_input("Lesson", "")
+    instructor = st.text_input("Instructor", "")
 with c3:
     dept=st.selectbox("Departure",list(AEROS.keys()),index=0)
     arr =st.selectbox("Arrival",list(AEROS.keys()),index=1)
     altn=st.selectbox("Alternate",list(AEROS.keys()),index=2)
+
 startup_str=st.text_input("Startup (HH:MM)","")
 
-# Atmosfera & navegação
+# Atmosfera & navegação (globais)
 c4,c5,c6=st.columns(3)
 with c4:
     qnh=st.number_input("QNH (hPa)",900,1050,1013,step=1)
@@ -230,7 +219,7 @@ with c6:
     wind_kt=st.number_input("Wind (kt)",0,120,0,step=1)
     enroute_comm=st.text_input("Enroute frequency", "123.755")
 
-# Performance
+# Performance set
 c7,c8,c9=st.columns(3)
 with c7:
     rpm_cruise=st.number_input("Cruise RPM",1800,2388,2000,step=10)
@@ -242,27 +231,29 @@ with c9:
     idle_ff=st.number_input("Idle FF (L/h) (if IDLE)", 0.0, 20.0, 5.0, step=0.1)
     start_fuel=st.number_input("Fuel inicial (EFOB_START) [L]",0.0,1000.0,0.0,step=1.0)
 
-# ===== Legs =====
+# ===== Legs (uma só tabela, inclui TOC/TOD) =====
 N=st.number_input("Nº de legs (sem contar TOC/TOD)",1,11,4)
 if "base_legs" not in st.session_state:
     st.session_state.base_legs=[{"Name":"","Alt/FL":"","Freq":"","TC":0.0,"Dist":0.0} for _ in range(N)]
 base=st.session_state.base_legs
+# ajustar tamanho
 if len(base)!=N:
     if len(base)<N:
         base += [{"Name":"","Alt/FL":"","Freq":"","TC":0.0,"Dist":0.0} for _ in range(N-len(base))]
     else:
         base[:] = base[:N]
 
+# Forçar 1º/último com aeródromos
 base[0]["Name"]=dept; base[0]["Alt/FL"]=str(aero_elev(dept)); base[0]["Freq"]=aero_freq(dept)
 base[-1]["Name"]=arr; base[-1]["Alt/FL"]=str(aero_elev(arr)); base[-1]["Freq"]=aero_freq(arr)
 
-# ===== Cálculos (TOC/TOD) =====
+# ===== Cálculos (inserindo TOC/TOD) =====
 def pressure_alt(elev_ft, qnh_hpa): return float(elev_ft) + (1013.0 - float(qnh_hpa))*30.0
 
 def compute_climb(dep_elev, cruise_alt, qnh, oat_c, tc_first):
     pa_dep = pressure_alt(dep_elev, qnh)
-    roc = roc_interp(pa_dep, oat_c)
-    vy  = vy_interp(pa_dep)
+    roc = roc_interp(pa_dep, oat_c)     # ft/min
+    vy  = vy_interp(pa_dep)             # kt ~ TAS de subida
     _,_, gs_climb = wind_triangle(float(tc_first), float(vy), wind_from, wind_kt)
     delta = max(0.0, cruise_alt - dep_elev)
     t_min = delta / max(roc,1e-6)
@@ -274,9 +265,11 @@ def compute_climb(dep_elev, cruise_alt, qnh, oat_c, tc_first):
 def compute_descent(arr_elev, cruise_alt, qnh, oat_c, tc_last, rod_fpm, rpm_desc, idle_mode, idle_ff):
     delta = max(0.0, cruise_alt - arr_elev)
     t_min = delta / max(rod_fpm,1e-6)
+    # TAS/GS no último rumo: usar TAS de cruzeiro (aproximação conservadora)
     tas_last,_ = cruise_lookup(pressure_alt(cruise_alt, qnh), rpm_cruise, oat_c)
     _,_, gs_des = wind_triangle(float(tc_last), float(tas_last), wind_from, wind_kt)
     d_nm = gs_des * (t_min/60.0)
+    # consumo
     if idle_mode:
         ff = float(idle_ff)
     else:
@@ -290,6 +283,7 @@ tc_last  = float(base[-1].get("TC") or 0.0)
 climb_min, climb_nm, climb_ff, tas_climb, gs_climb = compute_climb(dep_elev, cruise_alt, qnh, temp_c, tc_first)
 desc_min,  desc_nm,  desc_ff, tas_des,   gs_des   = compute_descent(arr_elev, cruise_alt, qnh, temp_c, tc_last, rod_fpm, rpm_descent, idle_mode, idle_ff)
 
+# ===== localizar posicoes e consumo por leg (climb e descent) =====
 # consumo de climb por leg (do início)
 climb_consumed = [0.0]*len(base)
 rem = float(climb_nm)
@@ -298,11 +292,14 @@ for i, r in enumerate(base):
     use = min(d, max(0.0, rem))
     climb_consumed[i] = use
     rem -= use
-idx_toc = None; running = 0.0
+# índice/leg onde TOC ocorre (último leg que ainda consome climb)
+idx_toc = None
+running = 0.0
 for i, r in enumerate(base):
     running += climb_consumed[i]
     if climb_consumed[i] > 0.0 and running >= climb_nm - 1e-6:
-        idx_toc = i; break
+        idx_toc = i
+        break
 
 # consumo de descent por leg (do fim)
 desc_consumed = [0.0]*len(base)
@@ -312,13 +309,16 @@ for j in range(len(base)-1, -1, -1):
     use = min(d, max(0.0, rem))
     desc_consumed[j] = use
     rem -= use
-idx_tod = None; running = 0.0
+# índice/leg onde TOD ocorre (primeiro leg a partir do fim que consome descent)
+idx_tod = None
+running = 0.0
 for j in range(len(base)-1, -1, -1):
     running += desc_consumed[j]
     if desc_consumed[j] > 0.0 and running >= desc_nm - 1e-6:
-        idx_tod = j; break
+        idx_tod = j
+        break
 
-# final com marcadores TOC/TOD
+# ===== construir "final" com TOC/TOD (apenas marcadores) =====
 final=[]
 for i, r in enumerate(base):
     final.append({**r})
@@ -327,32 +327,38 @@ for i, r in enumerate(base):
     if idx_tod is not None and i == idx_tod:
         final.append({"Name":"TOD","Alt/FL":str(arr_elev),"Freq":"", "TC":r.get("TC",0.0),"Dist":0.0})
 
-# ===== cálculos por linha (distância efetiva) =====
+# ===== cálculos por linha (com distância efetiva) =====
 startup = parse_hhmm(startup_str)
 takeoff = add_minutes(startup,15) if startup else None
 clock = takeoff
 
-total_dist = sum(float(r.get("Dist") or 0.0) for r in base)  # distância real
+# Dist total real = soma dos legs base (não inclui TOC/TOD)
+total_dist = sum(float(r.get("Dist") or 0.0) for r in base)
 total_ete = total_burn = 0.0
 efob = float(start_fuel)
 
 calc_rows=[]
+# ponteiro para index de base para sabermos consumos por leg
 k = 0
 for r in final:
     name=r.get("Name",""); alt_txt=r.get("Alt/FL",""); freq=r.get("Freq","")
     tc=float(r.get("TC") or 0.0); dist=float(r.get("Dist") or 0.0)
 
+    # determinar TAS/FF a usar
     if name=="TOC":
-        tas_leg = float(tas_climb); ff_leg  = float(climb_ff)
+        tas_leg = float(tas_climb)
+        ff_leg  = float(climb_ff)
     elif name=="TOD":
         tas_leg,_ = cruise_lookup(pressure_alt(cruise_alt, qnh), int(rpm_cruise), temp_c)
         ff_leg  = float(desc_ff)
     else:
         tas_leg, ff_leg = cruise_lookup(pressure_alt(cruise_alt, qnh), int(rpm_cruise), temp_c)
 
+    # headings e GS
     _, th, gs = wind_triangle(tc, tas_leg, wind_from, wind_kt)
     mh = apply_var(th, var_deg, var_is_e)
 
+    # dist efetiva: só para linhas de leg base
     if name in ("TOC","TOD"):
         effective_dist = 0.0
     else:
@@ -360,6 +366,7 @@ for r in final:
         d_use = desc_consumed[k] if k < len(desc_consumed) else 0.0
         effective_dist = max(0.0, dist - c_use - d_use)
 
+    # tempos/consumos
     if name=="TOC":
         ete_min = climb_min
     elif name=="TOD":
@@ -368,7 +375,8 @@ for r in final:
         ete_min = (60.0*effective_dist/max(gs,1e-6)) if effective_dist>0 else 0.0
 
     burn = ff_leg * (ete_min/60.0)
-    total_ete += ete_min; total_burn += burn
+    total_ete += ete_min
+    total_burn += burn
     efob = max(0.0, efob - burn)
 
     eto_str=""
@@ -377,17 +385,30 @@ for r in final:
         eto_str = clock.strftime("%H:%M")
 
     calc_rows.append({
-        "Name":name, "Alt/FL":alt_txt, "Freq":freq,
-        "TC":round(tc,0), "TH":round(th,0), "MH":round(mh,0),
-        "TAS":round(tas_leg,0), "GS":round(gs,0),
-        "Dist":round(dist,1), "ETE":round(ete_min,0), "ETO":eto_str,
-        "Burn":round(burn,1), "EFOB":round(efob,1),
+        "Name":name,
+        "Alt/FL":alt_txt,
+        "Freq":freq,
+        "TC":round(tc,0),
+        "TH":round(th,0),
+        "MH":round(mh,0),
+        "TAS":round(tas_leg,0),
+        "GS":round(gs,0),
+        "Dist":round(dist,1),               # mantém a Dist original visível
+        "ETE":round(ete_min,0),             # ETE usa distância efetiva
+        "ETO":eto_str,
+        "Burn":round(burn,1),
+        "EFOB":round(efob,1),
     })
-    if name not in ("TOC","TOD"): k += 1
 
-eta = clock; landing = eta; shutdown = add_minutes(eta,5) if eta else None
+    if name not in ("TOC","TOD"):
+        k += 1
 
-# ===== tabela =====
+# ETA/Landing/Shutdown
+eta = clock
+landing = eta
+shutdown = add_minutes(eta,5) if eta else None
+
+# ===== única tabela (editável) =====
 st.markdown("#### Flight plan (com TOC/TOD)")
 column_config={
     "Name":   st.column_config.TextColumn("Name / Lat,Long"),
@@ -395,6 +416,7 @@ column_config={
     "Freq":   st.column_config.TextColumn("Freq"),
     "TC":     st.column_config.NumberColumn("TC (°T)", step=0.1, min_value=0.0, max_value=359.9),
     "Dist":   st.column_config.NumberColumn("Dist (nm)", step=0.1, min_value=0.0),
+    # calculadas (readonly)
     "TH":     st.column_config.NumberColumn("TH (°T)", disabled=True),
     "MH":     st.column_config.NumberColumn("MH (°M)", disabled=True),
     "TAS":    st.column_config.NumberColumn("TAS (kt)", disabled=True),
@@ -407,7 +429,7 @@ column_config={
 edited = st.data_editor(calc_rows, hide_index=True, use_container_width=True,
                         num_rows="fixed", column_config=column_config, key="single_table")
 
-# Atualizar base_legs com edições (ignorar TOC/TOD)
+# Atualizar base_legs (ignorando TOC/TOD) com as edições do utilizador
 new_base=[]
 for row in edited:
     if row.get("Name") in ("TOC","TOD"): 
@@ -417,22 +439,25 @@ for row in edited:
                      "Freq":row.get("Freq",""),
                      "TC":row.get("TC",0.0),
                      "Dist":row.get("Dist",0.0)})
+# manter tamanho
 if len(new_base)>=1:
     for i in range(min(len(base), len(new_base))):
         base[i]=new_base[i]
 
+# Totais (Dist real = soma dos base legs; ETE/Burn já calculados)
 tot_line = f"**Totais** — Dist {total_dist:.1f} nm • ETE {int(total_ete)//60}h{int(total_ete)%60:02d} • Burn {total_burn:.1f} L • EFOB {efob:.1f} L"
 if eta:
     tot_line += f" • **ETA {eta.strftime('%H:%M')}** • **Landing {landing.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
 st.markdown(tot_line)
 
-# ====== PDF export (direto do GitHub) ======
+# ====== PDF export (apenas campos reais) ======
 st.markdown("### PDF export")
+
 try:
-    template_bytes = fetch_pdf_from_github(GITHUB_RAW_URL)
+    template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
 except Exception as e:
     template_bytes = None
-    st.error(f"Não foi possível obter o PDF do GitHub ({GITHUB_RAW_URL}): {e}")
+    st.error(f"Não foi possível ler o PDF do diretório local: {e}")
 
 if template_bytes:
     try:
@@ -444,8 +469,8 @@ if template_bytes:
         put(named, fieldset, "Registration", registration, maxlens)
         put(named, fieldset, "Callsign", callsign, maxlens)
         put(named, fieldset, "Student", student, maxlens)
-        put(named, fieldset, "Lesson", lesson, maxlens)         # NOVO
-        put(named, fieldset, "Instructor", instructor, maxlens) # NOVO
+        put(named, fieldset, "Lesson", lesson, maxlens)         # NEW
+        put(named, fieldset, "Instructor", instructor, maxlens) # NEW
 
         put(named, fieldset, "Dept_Airfield", dept, maxlens)
         put(named, fieldset, "Arrival_Airfield", arr, maxlens)
@@ -456,7 +481,7 @@ if template_bytes:
         put(named, fieldset, "Arrival_comm", aero_freq(arr), maxlens)
         put(named, fieldset, "Enroute_comm", enroute_comm, maxlens)
 
-        # Condições
+        # Condições (Temp / ISA Dev / QNH / Wind / Var / FL/ALT)
         pa_dep = pressure_alt(aero_elev(dept), qnh)
         isa_dev = round(temp_c - isa_temp(pa_dep))
         put(named, fieldset, "QNH", f"{int(round(qnh))}", maxlens)
@@ -502,6 +527,7 @@ if template_bytes:
         put(named, fieldset, "PL_BO_TOTAL", f"{total_burn:.1f}", maxlens)
         put(named, fieldset, "EFOB_TOTAL", f"{efob:.1f}", maxlens)
 
+        # Gerar
         if st.button("Gerar PDF preenchido", type="primary"):
             out = fill_pdf(template_bytes, named)
             safe_reg = ascii_safe(registration)
@@ -509,5 +535,7 @@ if template_bytes:
             filename = f"{safe_date}_{safe_reg}_NAVLOG.pdf"
             st.download_button("Download PDF", data=out, file_name=filename, mime="application/pdf")
             st.success("PDF gerado. Revê antes do voo.")
+
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
+
