@@ -1,4 +1,4 @@
-# app.py — Briefings com editor de NOTAMs, GAMET e SIGMET (via Gist) + METAR/TAF + Charts + PDFs + Emparelhamento Navlog↔VFR
+
 from typing import Dict, Any, List, Tuple, Optional
 import io, os, re, base64, tempfile, unicodedata, json, datetime as dt
 import streamlit as st
@@ -606,6 +606,16 @@ class FinalBriefPDF(FPDF):
 
 # ---------- UI: header ----------
 st.markdown('<div class="app-title">Briefings</div>', unsafe_allow_html=True)
+# Botões rápidos para as outras páginas
+btn_cols = st.columns(4)
+with btn_cols[0]:
+    st.link_button("Weather", APP_WEATHER_URL, use_container_width=True)
+with btn_cols[1]:
+    st.link_button("NOTAMs", APP_NOTAMS_URL, use_container_width=True)
+with btn_cols[2]:
+    st.link_button("VFR Map", APP_VFRMAP_URL, use_container_width=True)
+with btn_cols[3]:
+    st.link_button("Mass & Balance", APP_MNB_URL, use_container_width=True)
 
 # ---------- Abas (estrutura melhorada) ----------
 tab_mission, tab_notams, tab_sigmet_gamet, tab_charts, tab_pairs, tab_generate = st.tabs(
@@ -633,7 +643,8 @@ with tab_mission:
         icaos_metar_str = st.text_input("ICAO list for METAR/TAF (comma / space / newline)", value="LPPT LPBJ LEBZ")
         icaos_metar = parse_icaos(icaos_metar_str)
     with c2:
-        icaos_notam_str = st.text_input("ICAO list for NOTAMs (comma / space / newline)", value="LPSO LPCB LPEV")
+        # Inclui LPPC(Enroute) por omissão
+        icaos_notam_str = st.text_input("Lista para NOTAMs (aceita LPPC(Enroute))", value="LPPC(Enroute) LPSO LPCB LPEV")
         icaos_notam = parse_icaos(icaos_notam_str)
 
 # ---------- NOTAMs ----------
@@ -650,35 +661,31 @@ with tab_notams:
 
     edit_cols = st.columns(3)
     editors_notam: Dict[str, str] = {}
-    for i, icao in enumerate(icaos_notam if 'icaos_notam' in locals() else []):
+    for i, code in enumerate(icaos_notam if 'icaos_notam' in locals() else []):
         with edit_cols[i % 3]:
-            initial_text = "\n\n".join(existing_map.get(icao, [])) if existing_map.get(icao) else ""
-            editors_notam[icao] = st.text_area(
-                f"{icao} — NOTAMs",
+            initial_text = "\n\n".join(existing_map.get(code, [])) if existing_map.get(code) else ""
+            editors_notam[code] = st.text_area(
+                f"{code} — NOTAMs",
                 value=initial_text,
                 placeholder=("Ex.: AERODROME BEACON ONLY FLASH-GREEN LIGHT OPERATIVE.\n"
                              "FROM: 29th Jul 2025 15:10 TO: 29th Sep 2025 18:18 EST\n\n"
                              "Outro NOTAM aqui..."),
-                key=f"ed_notam_{icao}",
+                key=f"ed_notam_{code}",
                 height=160
             )
 
-    col_save_n = st.columns([0.4, 0.3, 0.3])
-    with col_save_n[0]:
-        overwrite_all_n = st.checkbox("Substituir TODOS os aerodromos do Gist (NOTAMs)", value=False)
-    with col_save_n[1]:
-        if st.button("Guardar NOTAMs no Gist"):
-            new_map: Dict[str, List[str]] = {}
-            if not overwrite_all_n:
-                new_map.update(existing_map)
-            for icao in (icaos_notam if 'icaos_notam' in locals() else []):
-                new_map[icao] = parse_block_to_list(editors_notam.get(icao, ""))
-            ok, msg = save_notams_to_gist(new_map)
-            if ok:
-                st.success(msg)
-                st.cache_data.clear()
-            else:
-                st.error(msg)
+    # Guardar (SEM 'substituir todos'): atualiza apenas os que editaste, preservando o resto
+    if st.button("Guardar NOTAMs no Gist"):
+        new_map: Dict[str, List[str]] = {}
+        new_map.update(existing_map)  # preserva
+        for code in (icaos_notam if 'icaos_notam' in locals() else []):
+            new_map[code] = parse_block_to_list(editors_notam.get(code, ""))
+        ok, msg = save_notams_to_gist(new_map)
+        if ok:
+            st.success(msg)
+            st.cache_data.clear()
+        else:
+            st.error(msg)
 
 # ---------- SIGMET & GAMET ----------
 with tab_sigmet_gamet:
@@ -757,23 +764,23 @@ with tab_charts:
                 order_val = st.number_input("Ordem", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
             charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png, "order": order_val, "filename": name})
 
-# ---------- Navlog ↔ VFR (pares por ICAO) ----------
+# ---------- Navlog ↔ VFR (pares por ROTA) ----------
 with tab_pairs:
-    st.markdown("### Emparelhamento Navlog ↔ VFR por ICAO")
-    st.caption("Para cada aeródromo (ex.: LPCB, LPEV) carrega um Navlog e o respetivo mapa VFR. Aceita PDF/PNG/JPG/JPEG/GIF.")
+    st.markdown("### Emparelhamento Navlog ↔ VFR por Rota")
+    st.caption("Para cada rota (ex.: LPSO-LPCB, LPSO-LPEV) carrega um Navlog e o respetivo mapa VFR. Aceita PDF/PNG/JPG/JPEG/GIF.")
 
-    num_pairs = st.number_input("Número de pares (ICAO)", min_value=0, max_value=8, value=0, step=1)
+    num_pairs = st.number_input("Número de pares (Rotas)", min_value=0, max_value=8, value=0, step=1)
     pairs: List[Dict[str, Any]] = []
     for i in range(int(num_pairs)):
         with st.expander(f"Par #{i+1}", expanded=False):
-            icao = st.text_input(f"ICAO do par #{i+1}", key=f"pair_icao_{i}").upper().strip()
+            route = st.text_input(f"Rota do par #{i+1} (ex.: LPSO-LPCB)", key=f"pair_route_{i}").strip()
             c1, c2 = st.columns(2)
             with c1:
-                nav_file = st.file_uploader(f"Navlog ({icao or 'ICAO'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_nav_{i}")
+                nav_file = st.file_uploader(f"Navlog ({route or 'Rota'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_nav_{i}")
             with c2:
-                vfr_file = st.file_uploader(f"VFR Map ({icao or 'ICAO'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_vfr_{i}")
+                vfr_file = st.file_uploader(f"VFR Map ({route or 'Rota'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_vfr_{i}")
 
-            pairs.append({"icao": icao, "nav": nav_file, "vfr": vfr_file})
+            pairs.append({"route": route, "nav": nav_file, "vfr": vfr_file})
 
 # ---------- Gerar PDFs ----------
 with tab_generate:
@@ -794,7 +801,7 @@ if 'gen_det' in locals() and gen_det:
     gamet_text_local = locals().get("gamet_text","")
     _gamet_initial_local = locals().get("_gamet_initial","")
 
-    # METAR/TAF (RAW + interpretação)
+    # METAR/TAF (RAW + interpretação) — WEATHER PRIMEIRO
     metar_analyses: List[Tuple[str, str, str, str]] = []
     for icao in icaos_metar_local:
         metar_raw = fetch_metar_now(icao) or ""
@@ -870,6 +877,20 @@ if 'gen_final' in locals() and gen_final:
         time_utc=locals().get("time_utc","")
     )
 
+    # WEATHER FIRST also in Final: build a small block (reuse DetailedPDF layout) and insert right after cover
+    icaos_metar_local = locals().get("icaos_metar", [])
+    metar_analyses: List[Tuple[str, str, str, str]] = []
+    for icao in icaos_metar_local:
+        metar_raw = fetch_metar_now(icao) or ""
+        taf_raw   = fetch_taf_now(icao) or ""
+        analysis  = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis neste momento."
+        metar_analyses.append((icao, metar_raw, taf_raw, analysis))
+
+    weather_pdf = DetailedPDF()
+    weather_pdf.section_page("Weather — METAR/TAF (PT)")
+    weather_pdf.metar_taf_block(metar_analyses)
+    weather_bytes: bytes = fpdf_to_bytes(weather_pdf)
+
     # Flight Plan (imagem entra já; PDF mais tarde via merge)
     fp_upload = locals().get("fp_upload", None)
     fp_img_png: Optional[io.BytesIO] = None
@@ -895,13 +916,22 @@ if 'gen_final' in locals() and gen_final:
     fb_bytes: bytes = fpdf_to_bytes(fb)
     final_bytes = fb_bytes
 
-    # Merge com: Flight Plan PDF (se existir) -> Pares Navlog/VFR por ICAO (na ordem listada) -> M&B PDF -> Resources
+    # Merge com: WEATHER (logo após capa) -> Flight Plan PDF (se existir) -> Pares Navlog/VFR por ROTA -> M&B PDF -> Resources
     nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
     mb_upload = locals().get("mb_upload", None)
 
     try:
         main = fitz.open(stream=fb_bytes, filetype="pdf")
-        insert_pos = main.page_count  # inserir no fim
+        insert_pos = 1  # inserir após a capa
+
+        # 0) WEATHER PRIMEIRO
+        try:
+            wdoc = fitz.open(stream=weather_bytes, filetype="pdf")
+            main.insert_pdf(wdoc, start_at=insert_pos)
+            insert_pos += wdoc.page_count
+            wdoc.close()
+        except Exception:
+            pass
 
         # 1) Flight Plan PDF
         if fp_is_pdf and fp_pdf_bytes:
@@ -913,12 +943,12 @@ if 'gen_final' in locals() and gen_final:
             except Exception:
                 pass
 
-        # 2) Pares Navlog↔VFR (por ICAO) — aceita PDF/Imagens
+        # 2) Pares Navlog↔VFR (por ROTA) — aceita PDF/Imagens
         for p in (nav_pairs or []):
-            icao = (p.get("icao") or "").upper()
+            route = (p.get("route") or "").strip()
             # título intermédio como página simples
             sec_pdf = FinalBriefPDF()
-            sec_pdf.section_title(f"Navlog & VFR — {icao or 'ICAO'}")
+            sec_pdf.section_title(f"Navlog & VFR — {route or 'Route'}")
             sec_bytes = fpdf_to_bytes(sec_pdf)
             sec_doc = fitz.open(stream=sec_bytes, filetype="pdf")
             main.insert_pdf(sec_doc, start_at=insert_pos); insert_pos += sec_doc.page_count; sec_doc.close()
@@ -938,7 +968,7 @@ if 'gen_final' in locals() and gen_final:
                 else:
                     # imagem -> gerar PDF 1p
                     img_png = ensure_png_from_bytes(raw, nv.type or "")
-                    nv_bytes = image_bytes_to_pdf_bytes(f"Navlog — {icao}", img_png, orientation="P")
+                    nv_bytes = image_bytes_to_pdf_bytes(f"Navlog — {route or 'Route'}", img_png, orientation="P")
                     nv_doc = fitz.open(stream=nv_bytes, filetype="pdf")
                     main.insert_pdf(nv_doc, start_at=insert_pos)
                     insert_pos += nv_doc.page_count
@@ -958,7 +988,7 @@ if 'gen_final' in locals() and gen_final:
                         pass
                 else:
                     img_png = ensure_png_from_bytes(raw, vf.type or "")
-                    vf_bytes = image_bytes_to_pdf_bytes(f"VFR Map — {icao}", img_png, orientation="L")
+                    vf_bytes = image_bytes_to_pdf_bytes(f"VFR Map — {route or 'Route'}", img_png, orientation="L")
                     vf_doc = fitz.open(stream=vf_bytes, filetype="pdf")
                     main.insert_pdf(vf_doc, start_at=insert_pos)
                     insert_pos += vf_doc.page_count
@@ -989,4 +1019,3 @@ if 'gen_final' in locals() and gen_final:
 
     final_name = f"Briefing - Missao {locals().get('mission_no') or 'X'}.pdf"
     st.download_button("Download Final Briefing (EN)", data=final_bytes, file_name=final_name, mime="application/pdf", use_container_width=True)
-
