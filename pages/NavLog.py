@@ -1,6 +1,4 @@
-
-
-# app.py — NAVLOG com Waypoints+Segmentos (TOC/TOD corretos) + AFM perf + export p/ "NAVLOG - FORM.pdf"
+# app.py — NAVLOG completo (TOC/TOD corretos + AFM perf + export p/ "NAVLOG - FORM.pdf")
 # Reqs: streamlit, pypdf, pytz
 
 import streamlit as st
@@ -9,7 +7,7 @@ import pytz
 import io, unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from math import sin, asin, radians, degrees, fmod
+from math import sin, cos, asin, radians, degrees, fmod
 
 # ========================= PDF helpers =========================
 try:
@@ -84,17 +82,22 @@ def wrap360(x): x=fmod(x,360.0); return x+360 if x<0 else x
 def angle_diff(a, b): return (a - b + 180) % 360 - 180
 
 def wind_triangle(tc_deg, tas_kt, wind_from_deg, wind_kt):
-    # Retorna (WCA, TH, GS). Fórmula robusta: usa relações trig p/ evitar cos() negativo mal condicionado.
+    """
+    Usa o método 'wind-from':
+      beta = ângulo entre vento (from) e TC
+      WCA = asin(W*sin(beta) / TAS)
+      GS  = TAS*cos(WCA) - W*cos(beta)
+      TH  = TC + WCA
+    """
     if tas_kt <= 0: return 0.0, wrap360(tc_deg), 0.0
     beta = radians(angle_diff(wind_from_deg, tc_deg))
-    cross = wind_kt * sin(beta)                 # componente transversal do vento
+    cross = wind_kt * sin(beta)
+    head  = wind_kt * cos(beta)
     s = max(-1.0, min(1.0, cross / max(tas_kt, 1e-9)))
     wca = degrees(asin(s))
-    # componente de frente/cauda = W * cos(beta) = W * sqrt(1 - sin^2(beta))
-    head = (wind_kt ** 2 - cross ** 2) ** 0.5 if wind_kt >= abs(cross) else 0.0
-    gs = max(0.0, tas_kt * (1 - s**2) ** 0.5 - head)
-    th = wrap360(tc_deg + wca)
-    return wca, th, gs
+    gs  = tas_kt * cos(radians(wca)) - head
+    th  = wrap360(tc_deg + wca)
+    return wca, th, max(0.0, gs)
 
 def apply_var(true_deg, var_deg, east_is_negative=False):
     # East is least (−), West is best (+)
@@ -135,7 +138,7 @@ ROC = {
 }
 VY = {650: {0:70, 2000:69, 4000:68, 6000:67, 8000:65, 10000:64, 12000:63, 14000:62}}
 
-# Cruise perf (PA → rpm → (TAS kt, FF L/h)) — usaremos só o FF; a TAS de cruzeiro será fixa = 80 kt
+# Cruise perf (PA → rpm → (TAS kt, FF L/h))
 CRUISE = {
     0: {2000:(95,18.7),2100:(101,20.7),2250:(110,24.6)},
     2000: {2000:(94,17.5),2100:(100,19.9),2250:(109,23.5)},
@@ -145,50 +148,30 @@ CRUISE = {
     10000:{2000:(91,16.4),2100:(97,17.5),2250:(106,19.7)},
 }
 def isa_temp(pa_ft): return 15.0 - 2.0 * (pa_ft / 1000.0)
-def cruise_lookup_ff(pa_ft: float, rpm: int, oat_c: Optional[float]) -> float:
-    # devolve apenas FF (L/h); TAS será fixada a 80 kt
+def cruise_lookup(pa_ft: float, rpm: int, oat_c: Optional[float]) -> Tuple[float, float]:
     pas = sorted(CRUISE.keys()); pa_c = clamp(pa_ft, pas[0], pas[-1])
     p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
-    def ff_at(pa):
+    def val(pa):
         table = CRUISE[pa]
-        if rpm in table: return table[rpm][1]
+        if rpm in table: return table[rpm]
         rpms = sorted(table.keys())
         if rpm < rpms[0]: lo, hi = rpms[0], rpms[1]
         elif rpm > rpms[-1]: lo, hi = rpms[-2], rpms[-1]
         else:
             lo = max([r for r in rpms if r <= rpm]); hi = min([r for r in rpms if r >= rpm])
-        ff_lo = table[lo][1]; ff_hi = table[hi][1]
+        (tas_lo, ff_lo), (tas_hi, ff_hi) = table[lo], table[hi]
         t = (rpm - lo) / (hi - lo) if hi != lo else 0.0
-        return ff_lo + t * (ff_hi - ff_lo)
-    ff0 = ff_at(p0); ff1 = ff_at(p1)
-    ff = interp1(pa_c, p0, p1, ff0, ff1)
-    # Correção simples por OAT vs ISA (±15°C → FF −2.5/+3%)
+        return (tas_lo + t*(tas_hi - tas_lo), ff_lo + t*(ff_hi - ff_lo))
+    tas0, ff0 = val(p0); tas1, ff1 = val(p1)
+    tas = interp1(pa_c, p0, p1, tas0, tas1); ff = interp1(pa_c, p0, p1, ff0, ff1)
+    # NOTA: Vamos ignorar o TAS daqui (usamos speed_ref), mas usamos o FF.
     if oat_c is not None:
         dev = oat_c - isa_temp(pa_c)
         if dev > 0:
-            ff *= 1.0 - 0.025 * (dev / 15.0)
+            ff  *= 1.0 - 0.025 * (dev / 15.0)
         elif dev < 0:
-            ff *= 1.0 + 0.03 * ((-dev) / 15.0)
-    return max(0.0, ff)
-
-def roc_interp(pa, temp_c):
-    tab = ROC[650]
-    pas = sorted(tab.keys()); pa_c = clamp(pa, pas[0], pas[-1])
-    p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
-    temps = [-25, 0, 25, 50]; t = clamp(temp_c, temps[0], temps[-1])
-    if t <= 0: t0, t1 = -25, 0
-    elif t <= 25: t0, t1 = 0, 25
-    else: t0, t1 = 25, 50
-    v00, v01 = tab[p0][t0], tab[p0][t1]
-    v10, v11 = tab[p1][t0], tab[p1][t1]
-    v0 = interp1(t, t0, t1, v00, v01); v1 = interp1(t, t0, t1, v10, v11)
-    return max(1.0, interp1(pa_c, p0, p1, v0, v1))
-
-def vy_interp(pa):
-    table = VY[650]; pas = sorted(table.keys())
-    pa_c = clamp(pa, pas[0], pas[-1])
-    p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
-    return interp1(pa_c, p0, p1, table[p0], table[p1])
+            ff  *= 1.0 + 0.03 * ((-dev) / 15.0)
+    return max(0.0, tas), max(0.0, ff)
 
 # ========================= Aerodromes (freqs numéricas) =========================
 AEROS = {
@@ -243,271 +226,272 @@ with c6:
 # Performance set
 c7, c8, c9 = st.columns(3)
 with c7:
-    rpm_cruise = st.number_input("Cruise RPM (para FF AFM)", 1800, 2388, 2000, step=10)
+    speed_ref = st.number_input("Cruise reference speed (kt)", 50, 140, 80, step=1)  # 80 kt por defeito
 with c8:
-    rpm_descent = st.number_input("Descent RPM (usado se não IDLE)", 1700, 2300, 1800, step=10)
+    rpm_descent = st.number_input("Descent RPM (se NÃO idle)", 1700, 2300, 1800, step=10)
     idle_mode = st.checkbox("Descent mostly IDLE", value=True)
 with c9:
-    rod_fpm = st.number_input("ROD (ft/min)", 200, 1500, 700, step=10)
-    idle_ff = st.number_input("Idle FF (L/h) (if IDLE)", 0.0, 20.0, 5.0, step=0.1)
+    rod_fpm = st.number_input("ROD (ft/min) (descent)", 200, 1500, 700, step=10)
+    idle_ff = st.number_input("Idle FF (L/h)", 0.0, 20.0, 5.0, step=0.1)
     start_fuel = st.number_input("Fuel inicial (EFOB_START) [L]", 0.0, 1000.0, 0.0, step=1.0)
 
-# ===== Waypoints & Segmentos =====
-# Nº de waypoints intermédios (entre Departure e Arrival)
-K = st.number_input("Nº de waypoints intermédios", 0, 10, 3)
+# ===== Legs (segmentos) =====
+N = st.number_input("Nº de legs (sem contar TOC/TOD)", 1, 11, 4)
 
-def blank_wp(): return {"Name":"", "Alt/FL":"", "Freq":""}
-if "wps" not in st.session_state:
-    st.session_state.wps = [blank_wp() for _ in range(K)]
+def blank_leg():
+    return {"To":"", "Freq":"", "TC":0.0, "Dist":0.0}
 
-# redimensionar lista de WPs intermédios mantendo conteúdo
-wps = st.session_state.wps
-if len(wps) < K: wps += [blank_wp() for _ in range(K - len(wps))]
-elif len(wps) > K: wps = wps[:K]
-st.session_state.wps = wps
+if "route_legs" not in st.session_state:
+    st.session_state.route_legs = [blank_leg() for _ in range(N)]
 
-# construir lista total de waypoints: [DEP] + intermédios + [ARR]
-def build_wp_list():
-    total = []
-    total.append({"Name":dept, "Alt/FL":str(aero_elev(dept)), "Freq":aero_freq(dept)})
-    total += st.session_state.wps
-    total.append({"Name":arr, "Alt/FL":str(aero_elev(arr)), "Freq":aero_freq(arr)})
-    return total
+# Ajustar nº de legs preservando última linha (vai forçosamente terminar em Arrival)
+def resize_legs(target_n: int):
+    legs = st.session_state.route_legs
+    if len(legs) < target_n:
+        legs += [blank_leg() for _ in range(target_n - len(legs))]
+    elif len(legs) > target_n:
+        legs = legs[:target_n]
+    st.session_state.route_legs = legs
 
-st.markdown("#### Waypoints (intermédios)")
-wp_editor_cols = {
-    "Name":   st.column_config.TextColumn("Name / Lat,Long"),
-    "Alt/FL": st.column_config.TextColumn("Alt/FL (num)"),
-    "Freq":   st.column_config.TextColumn("Freq"),
-}
-st.session_state.wps = st.data_editor(st.session_state.wps, hide_index=True, use_container_width=True,
-                                      num_rows="fixed", column_config=wp_editor_cols, key="wp_editor")
+resize_legs(N)
+legs = st.session_state.route_legs
 
-WPS_ALL = build_wp_list()
-M = len(WPS_ALL)                 # nº total de wps (inc. dep e arr)
-SEG_N = max(0, M - 1)            # nº de segmentos (legs operacionais) = M-1
+# Construir tabela editável de legs: From calculado, To editável (mas ultima To = Arrival)
+edit_rows = []
+from_name = dept
+for i in range(N):
+    row = legs[i].copy()
+    # força última To = Arrival
+    if i == N - 1:
+        row["To"] = arr
+    # Autofreq se for um icao conhecido e freq em branco
+    if not row.get("Freq") and row.get("To") in AEROS:
+        row["Freq"] = aero_freq(row["To"])
+    edit_rows.append({
+        "From": from_name,
+        "To": row.get("To",""),
+        "Freq": row.get("Freq",""),
+        "TC": float(row.get("TC") or 0.0),
+        "Dist": float(row.get("Dist") or 0.0),
+    })
+    from_name = row.get("To","")
 
-# Tabela de segmentos (From → To) com TC e Dist editáveis
-def blank_seg(_from, _to):
-    return {"From":_from, "To":_to, "TC":0.0, "Dist":0.0}
-
-if "segs" not in st.session_state:
-    st.session_state.segs = [blank_seg(WPS_ALL[i]["Name"], WPS_ALL[i+1]["Name"]) for i in range(SEG_N)]
-
-# reaplicar From/To com base nos WPs atuais e ajustar nº de linhas
-def rebuild_segs():
-    new = []
-    for i in range(max(0, len(WPS_ALL) - 1)):
-        _from = WPS_ALL[i]["Name"]; _to = WPS_ALL[i+1]["Name"]
-        # tentar reutilizar valores anteriores se existir linha equivalente pela posição
-        if i < len(st.session_state.segs):
-            prev = st.session_state.segs[i]
-            new.append({"From":_from, "To":_to, "TC":prev.get("TC",0.0), "Dist":prev.get("Dist",0.0)})
-        else:
-            new.append({"From":_from, "To":_to, "TC":0.0, "Dist":0.0})
-    st.session_state.segs = new
-
-rebuild_segs()
-
-st.markdown("#### Segmentos (From → To)")
-seg_editor_cols = {
+st.markdown("#### Route legs (edita **To**, **TC**, **Dist**, **Freq**)")
+colcfg = {
     "From": st.column_config.TextColumn("From", disabled=True),
-    "To":   st.column_config.TextColumn("To",   disabled=True),
+    "To":   st.column_config.TextColumn("To (WP/ICAO)"),
+    "Freq": st.column_config.TextColumn("Freq"),
     "TC":   st.column_config.NumberColumn("TC (°T)", step=0.1, min_value=0.0, max_value=359.9),
     "Dist": st.column_config.NumberColumn("Dist (nm)", step=0.1, min_value=0.0),
 }
-st.session_state.segs = st.data_editor(st.session_state.segs, hide_index=True, use_container_width=True,
-                                       num_rows="fixed", column_config=seg_editor_cols, key="seg_editor")
+edited_legs = st.data_editor(
+    edit_rows, hide_index=True, use_container_width=True,
+    num_rows="fixed", column_config=colcfg, key="legs_editor"
+)
 
-SEGS = st.session_state.segs  # lista de segmentos editada
+# Persistir alterações no estado (respeitando Arrival na última linha)
+new_from = dept
+for i, row in enumerate(edited_legs):
+    to_val = row.get("To","")
+    if i == N - 1:
+        to_val = arr  # força Arrival
+    st.session_state.route_legs[i] = {
+        "To": to_val,
+        "Freq": row.get("Freq",""),
+        "TC": float(row.get("TC") or 0.0),
+        "Dist": float(row.get("Dist") or 0.0),
+    }
+    new_from = to_val
 
-# ===== Cálculos (TOC/TOD por segmentos) =====
-def pressure_alt(elev_ft, qnh_hpa): return float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
-
-# TAS fixas pedidas
-TAS_CRUISE = 80.0
-TAS_DESCENT = 65.0
+# ========= Cálculos de performance / TOC & TOD =========
+def pressure_alt(elev_ft, qnh_hpa): return float(elev_ft) + (1013.0 - float(qnh_hpa))*30.0
 
 def compute_climb(dep_elev, cruise_alt, qnh, oat_c, tc_first):
     pa_dep = pressure_alt(dep_elev, qnh)
     roc = roc_interp(pa_dep, oat_c)     # ft/min
-    vy  = vy_interp(pa_dep)             # TAS de subida (kt)
+    vy  = vy_interp(pa_dep)             # kt ~ IAS ~ TAS para GS
     _,_, gs_climb = wind_triangle(float(tc_first), float(vy), wind_from, wind_kt)
     delta = max(0.0, cruise_alt - dep_elev)
-    t_min = delta / max(roc, 1e-6)
+    t_min = delta / max(roc,1e-6)
     d_nm  = gs_climb * (t_min/60.0)
-    # consumo na subida: usar FF a meio (aprox conservadora com 2250rpm) — podes ajustar
     pa_mid = dep_elev + 0.5*delta
-    ff = cruise_lookup_ff(pa_mid, 2250, oat_c)
+    _, ff = cruise_lookup(pa_mid, 2250, oat_c)  # FF em subida (aprox) @2250
     return t_min, d_nm, ff, vy, gs_climb
 
-def compute_descent(arr_elev, cruise_alt, qnh, oat_c, tc_last, rod_fpm, rpm_desc, idle_mode, idle_ff):
+def compute_descent(arr_elev, cruise_alt, qnh, oat_c, tc_descent, rod_fpm, rpm_desc, idle_mode, idle_ff):
     delta = max(0.0, cruise_alt - arr_elev)
     t_min = delta / max(rod_fpm,1e-6)
-    # GS de descida com TAS=65
-    _,_, gs_des = wind_triangle(float(tc_last), float(TAS_DESCENT), wind_from, wind_kt)
+    tas_desc = 65.0  # pedido: 65 kt na descida
+    _,_, gs_des = wind_triangle(float(tc_descent), tas_desc, wind_from, wind_kt)
     d_nm = gs_des * (t_min/60.0)
     # consumo
     if idle_mode:
         ff = float(idle_ff)
     else:
         pa_mid = arr_elev + 0.5*delta
-        ff = cruise_lookup_ff(pa_mid, int(rpm_desc), oat_c)
-    return t_min, d_nm, ff, TAS_DESCENT, gs_des
+        _, ff = cruise_lookup(pa_mid, int(rpm_desc), oat_c)
+    return t_min, d_nm, ff, tas_desc, gs_des
+
+# TC do 1º e último leg (para vento na climb/desc)
+tc_first = float(st.session_state.route_legs[0]["TC"] if N >= 1 else 0.0)
+tc_last  = float(st.session_state.route_legs[-1]["TC"] if N >= 1 else 0.0)
 
 dep_elev = aero_elev(dept); arr_elev = aero_elev(arr)
-tc_first = float(SEGS[0]["TC"]) if SEGS else 0.0
-tc_last  = float(SEGS[-1]["TC"]) if SEGS else 0.0
-
 climb_min, climb_nm, climb_ff, tas_climb, gs_climb = compute_climb(dep_elev, cruise_alt, qnh, temp_c, tc_first)
 desc_min,  desc_nm,  desc_ff, tas_des,   gs_des   = compute_descent(arr_elev, cruise_alt, qnh, temp_c, tc_last, rod_fpm, rpm_descent, idle_mode, idle_ff)
 
-# consumo de climb distribuído pelos segmentos (do início)
-climb_consumed = [0.0]*len(SEGS)
-rem = float(climb_nm)
-for i, seg in enumerate(SEGS):
-    d = float(seg.get("Dist") or 0.0)
-    use = min(d, max(0.0, rem))
+# consumo de climb por leg (do início)
+leg_dists = [float(st.session_state.route_legs[i]["Dist"] or 0.0) for i in range(N)]
+climb_consumed = [0.0]*N; rem = float(climb_nm)
+for i in range(N):
+    use = min(leg_dists[i], max(0.0, rem))
     climb_consumed[i] = use
     rem -= use
+# índice do leg onde termina a climb (TOC)
+idx_toc = None; run=0.0
+for i in range(N):
+    run += climb_consumed[i]
+    if climb_consumed[i] > 0.0 and run >= climb_nm - 1e-6:
+        idx_toc = i; break
 
-# índice de TOC = primeiro segmento onde se esgota climb_nm (ou o último que ainda consome)
-idx_toc = None; acc = 0.0
-for i, use in enumerate(climb_consumed):
-    acc += use
-    if use > 0.0 and acc >= climb_nm - 1e-6:
-        idx_toc = i
-        break
-
-# consumo de descent distribuído pelos segmentos (a partir do fim)
-desc_consumed = [0.0]*len(SEGS)
-rem = float(desc_nm)
-for j in range(len(SEGS)-1, -1, -1):
-    d = float(SEGS[j].get("Dist") or 0.0)
-    use = min(d, max(0.0, rem))
+# consumo de descent por leg (do fim)
+desc_consumed = [0.0]*N; rem = float(desc_nm)
+for j in range(N-1, -1, -1):
+    use = min(leg_dists[j], max(0.0, rem))
     desc_consumed[j] = use
     rem -= use
+# índice do leg onde começa a descent (TOD)
+idx_tod = None; run=0.0
+for j in range(N-1, -1, -1):
+    run += desc_consumed[j]
+    if desc_consumed[j] > 0.0 and run >= desc_nm - 1e-6:
+        idx_tod = j; break
 
-# índice de TOD = primeiro segmento a partir do fim onde se esgota desc_nm
-idx_tod = None; acc = 0.0
-for j in range(len(SEGS)-1, -1, -1):
-    acc += desc_consumed[j]
-    if desc_consumed[j] > 0.0 and acc >= desc_nm - 1e-6:
-        idx_tod = j
-        break
-
-# ===== construir linhas finais (inclui TOC/TOD) =====
+# ========= Construção da tabela calculada (com TOC/TOD) =========
 startup = parse_hhmm(startup_str)
 takeoff = add_minutes(startup, 15) if startup else None
 clock = takeoff
 
-# Dist total real = soma de Dist dos segmentos
-total_dist = sum(float(seg.get("Dist") or 0.0) for seg in SEGS)
+total_dist = sum(leg_dists)          # distância real (só legs)
 total_ete = total_burn = 0.0
 efob = float(start_fuel)
 
 calc_rows = []
 
-# LINHA: segmento i mapeado para o waypoint "To" i+1
-for i, seg in enumerate(SEGS):
-    from_wp = WPS_ALL[i]
-    to_wp   = WPS_ALL[i+1]
-    name = to_wp["Name"]; alt_txt = to_wp["Alt/FL"]; freq = to_wp["Freq"]
-    tc = float(seg.get("TC") or 0.0); dist = float(seg.get("Dist") or 0.0)
-
-    # inserir TOC antes de calcular o ETE do que sobra do segmento (se TOC cai neste segmento)
-    if idx_toc is not None and i == idx_toc:
-        # TOC row
-        _, th_toc, gs_toc = wind_triangle(tc, tas_climb, wind_from, wind_kt)
-        mh_toc = apply_var(th_toc, var_deg, var_is_e)
-        burn_toc = climb_ff * (climb_min/60.0)
-        total_ete += climb_min; total_burn += burn_toc; efob = max(0.0, efob - burn_toc)
-        eto_str = ""
-        if clock:
-            clock = add_minutes(clock, int(round(climb_min)))
-            eto_str = clock.strftime("%H:%M")
-        calc_rows.append({
-            "Name":"TOC","Alt/FL":str(int(round(cruise_alt))),"Freq":"",
-            "TC":round(tc,0),"TH":round(th_toc,0),"MH":round(mh_toc,0),
-            "TAS":round(tas_climb,0),"GS":round(gs_toc,0),
-            "Dist":0.0,"ETE":round(climb_min,0),"ETO":eto_str,
-            "Burn":round(burn_toc,1),"EFOB":round(efob,1)
-        })
-
-    # inserir TOD se cair neste segmento (NOTA: TOD costuma cair perto do final)
-    if idx_tod is not None and i == idx_tod:
-        tas_tod = tas_des
-        _, th_tod, gs_tod = wind_triangle(tc, tas_tod, wind_from, wind_kt)
-        mh_tod = apply_var(th_tod, var_deg, var_is_e)
-        burn_tod = desc_ff * (desc_min/60.0)
-        total_ete += desc_min; total_burn += burn_tod; efob = max(0.0, efob - burn_tod)
-        eto_str = ""
-        if clock:
-            clock = add_minutes(clock, int(round(desc_min)))
-            eto_str = clock.strftime("%H:%M")
-        calc_rows.append({
-            "Name":"TOD","Alt/FL":str(aero_elev(arr)), "Freq":"",
-            "TC":round(tc,0),"TH":round(th_tod,0),"MH":round(mh_tod,0),
-            "TAS":round(tas_tod,0),"GS":round(gs_tod,0),
-            "Dist":0.0,"ETE":round(desc_min,0),"ETO":eto_str,
-            "Burn":round(burn_tod,1),"EFOB":round(efob,1)
-        })
-
-    # parte efetiva do segmento (removendo climb/desc consumidos)
-    used_climb = climb_consumed[i] if i < len(climb_consumed) else 0.0
-    used_desc  = desc_consumed[i] if i < len(desc_consumed)  else 0.0
-    eff_dist = max(0.0, dist - used_climb - used_desc)
-
-    # Cruise TAS fixa 80 kt; FF de AFM
-    tas_seg = TAS_CRUISE
-    _, th, gs = wind_triangle(tc, tas_seg, wind_from, wind_kt)
-    mh = apply_var(th, var_deg, var_is_e)
-
-    ete_min = (60.0*eff_dist/max(gs,1e-6)) if eff_dist > 0 else 0.0
-    pa_cruise = pressure_alt(cruise_alt, qnh)
-    ff_cruise = cruise_lookup_ff(pa_cruise, int(rpm_cruise), temp_c)
-    burn = ff_cruise * (ete_min/60.0)
-
-    total_ete += ete_min; total_burn += burn; efob = max(0.0, efob - burn)
-
-    eto_str = ""
-    if clock:
-        clock = add_minutes(clock, int(round(ete_min)))
-        eto_str = clock.strftime("%H:%M")
-
+def add_row(name, from_nm, to_nm, tc, tas, gs, dist, ete_min, ff, eto_clock, mh):
     calc_rows.append({
-        "Name":name,"Alt/FL":alt_txt,"Freq":freq,
-        "TC":round(tc,0),"TH":round(th,0),"MH":round(mh,0),
-        "TAS":round(tas_seg,0),"GS":round(gs,0),
-        "Dist":round(dist,1),     # mostra a Dist original do segmento
-        "ETE":round(ete_min,0),"ETO":eto_str,
-        "Burn":round(burn,1),"EFOB":round(efob,1)
+        "Seg": name,
+        "From": from_nm,
+        "To": to_nm,
+        "TC": round(tc,0),
+        "TH": round(apply_var(mh, 0, False) if False else round(tc,0),0),  # placeholder; TH real posto abaixo
+        "MH": round(mh,0),
+        "TAS": round(tas,0),
+        "GS": round(gs,0),
+        "Dist": round(dist,1),
+        "ETE": round(ete_min,0),
+        "ETO": eto_clock,
+        "Burn": round(ff*(ete_min/60.0),1),
+        "EFOB": round(efob,1),  # atualizado depois
     })
+
+# Vamos gerar linhas por leg + marcadores TOC/TOD
+from_name = dept
+for i in range(N):
+    leg = st.session_state.route_legs[i]
+    to_name = leg["To"] if i < N-1 else arr
+    freq_to = leg.get("Freq","")
+    tc = float(leg.get("TC") or 0.0)
+    dist = float(leg.get("Dist") or 0.0)
+
+    # Velocidades por fase
+    tas_cruise = float(speed_ref)   # pedido: 80 kt por defeito
+    _, th_cru, gs_cru = wind_triangle(tc, tas_cruise, wind_from, wind_kt)
+    mh_cru = apply_var(th_cru, var_deg, var_is_e)
+
+    # Pedaços consumidos por climb/desc neste leg
+    c_use = climb_consumed[i]; d_use = desc_consumed[i]
+    effective = max(0.0, dist - c_use - d_use)
+
+    # 1) Se TOC cai neste leg, inserir linha TOC (ETE = climb_min, Dist=0)
+    if idx_toc is not None and i == idx_toc:
+        # TH/MH em subida segue o TC do leg onde termina a climb
+        _, th_cl, _ = wind_triangle(tc, tas_climb, wind_from, wind_kt)
+        mh_cl = apply_var(th_cl, var_deg, var_is_e)
+        ete_cl = climb_min
+        if clock: clock = add_minutes(clock, int(round(ete_cl)))
+        eto_str = clock.strftime("%H:%M") if clock else ""
+        burn_cl = climb_ff * (ete_cl/60.0)
+        total_ete += ete_cl; total_burn += burn_cl; efob = max(0.0, efob - burn_cl)
+        calc_rows.append({
+            "Seg":"TOC", "From":from_name, "To":to_name,
+            "TC": round(tc,0), "TH": round(th_cl,0), "MH": round(mh_cl,0),
+            "TAS": round(tas_climb,0), "GS": round(gs_climb,0),
+            "Dist": 0.0, "ETE": int(round(ete_cl)), "ETO": eto_str,
+            "Burn": round(burn_cl,1), "EFOB": round(efob,1)
+        })
+
+    # 2) Parte de cruzeiro efetiva do leg
+    ete_leg = (60.0*effective/max(gs_cru,1e-6)) if effective>0 else 0.0
+    # FF de cruzeiro: usamos lookup para FF (rpm ~ 2000 padrão de tabela; ou poderias adicionar rpm input)
+    pa_cru = pressure_alt(cruise_alt, qnh)
+    _, ff_cru = cruise_lookup(pa_cru, 2000, temp_c)  # FF aproximado em cruzeiro
+    burn_leg = ff_cru * (ete_leg/60.0)
+    if clock: clock = add_minutes(clock, int(round(ete_leg)))
+    eto_str = clock.strftime("%H:%M") if clock else ""
+    total_ete += ete_leg; total_burn += burn_leg; efob = max(0.0, efob - burn_leg)
+    calc_rows.append({
+        "Seg": f"{from_name}→{to_name}",
+        "From": from_name, "To": to_name,
+        "TC": round(tc,0), "TH": round(th_cru,0), "MH": round(mh_cru,0),
+        "TAS": round(tas_cruise,0), "GS": round(gs_cru,0),
+        "Dist": round(dist,1), "ETE": int(round(ete_leg)), "ETO": eto_str,
+        "Burn": round(burn_leg,1), "EFOB": round(efob,1)
+    })
+
+    # 3) Se TOD cai neste leg, inserir linha TOD (ETE = desc_min, Dist=0)
+    if idx_tod is not None and i == idx_tod:
+        _, th_des, _ = wind_triangle(tc, tas_des, wind_from, wind_kt)
+        mh_des = apply_var(th_des, var_deg, var_is_e)
+        ete_ds = desc_min
+        if clock: clock = add_minutes(clock, int(round(ete_ds)))
+        eto_str = clock.strftime("%H:%M") if clock else ""
+        burn_ds = desc_ff * (ete_ds/60.0)
+        total_ete += ete_ds; total_burn += burn_ds; efob = max(0.0, efob - burn_ds)
+        calc_rows.append({
+            "Seg":"TOD", "From":from_name, "To":to_name,
+            "TC": round(tc,0), "TH": round(th_des,0), "MH": round(mh_des,0),
+            "TAS": round(tas_des,0), "GS": round(gs_des,0),
+            "Dist": 0.0, "ETE": int(round(ete_ds)), "ETO": eto_str,
+            "Burn": round(burn_ds,1), "EFOB": round(efob,1)
+        })
+
+    from_name = to_name  # próximo leg
 
 # ETA/Landing/Shutdown
 eta = clock
 landing = eta
 shutdown = add_minutes(eta, 5) if eta else None
 
-# ===== Tabela final (read-only) =====
-st.markdown("#### Flight plan (com TOC/TOD e segmentos)")
-column_config={
-    "Name":   st.column_config.TextColumn("Destino / Marker"),
-    "Alt/FL": st.column_config.TextColumn("Alt/FL"),
-    "Freq":   st.column_config.TextColumn("Freq"),
-    "TC":     st.column_config.NumberColumn("TC (°T)", disabled=True),
-    "TH":     st.column_config.NumberColumn("TH (°T)", disabled=True),
-    "MH":     st.column_config.NumberColumn("MH (°M)", disabled=True),
-    "TAS":    st.column_config.NumberColumn("TAS (kt)", disabled=True),
-    "GS":     st.column_config.NumberColumn("GS (kt)", disabled=True),
-    "Dist":   st.column_config.NumberColumn("Dist (nm)", disabled=True),
-    "ETE":    st.column_config.NumberColumn("ETE (min)", disabled=True),
-    "ETO":    st.column_config.TextColumn("ETO", disabled=True),
-    "Burn":   st.column_config.NumberColumn("Burn (L)", disabled=True),
-    "EFOB":   st.column_config.NumberColumn("EFOB (L)", disabled=True),
+# ===== Tabela calculada =====
+st.markdown("#### Calculado (TOC/TOD incluídos; ETE usa distância efetiva)")
+calc_cfg = {
+    "Seg":  st.column_config.TextColumn("Segmento"),
+    "From": st.column_config.TextColumn("From", disabled=True),
+    "To":   st.column_config.TextColumn("To", disabled=True),
+    "TC":   st.column_config.NumberColumn("TC (°T)", disabled=True),
+    "TH":   st.column_config.NumberColumn("TH (°T)", disabled=True),
+    "MH":   st.column_config.NumberColumn("MH (°M)", disabled=True),
+    "TAS":  st.column_config.NumberColumn("TAS (kt)", disabled=True),
+    "GS":   st.column_config.NumberColumn("GS (kt)", disabled=True),
+    "Dist": st.column_config.NumberColumn("Dist (nm)", disabled=True),
+    "ETE":  st.column_config.NumberColumn("ETE (min)", disabled=True),
+    "ETO":  st.column_config.TextColumn("ETO", disabled=True),
+    "Burn": st.column_config.NumberColumn("Burn (L)", disabled=True),
+    "EFOB": st.column_config.NumberColumn("EFOB (L)", disabled=True),
 }
 st.data_editor(calc_rows, hide_index=True, use_container_width=True,
-               num_rows="fixed", column_config=column_config, key="final_table")
+               num_rows="fixed", column_config=calc_cfg, key="calc_table")
 
 # Totais
 tot_line = f"**Totais** — Dist {total_dist:.1f} nm • ETE {int(total_ete)//60}h{int(total_ete)%60:02d} • Burn {total_burn:.1f} L • EFOB {efob:.1f} L"
@@ -517,17 +501,16 @@ st.markdown(tot_line)
 
 # ====== PDF export ======
 st.markdown("### PDF export")
-
 template_bytes = None
 try:
     template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
 except Exception as e:
-    st.error(f"Não foi possível ler o PDF local: {e}")
+    st.error(f"Não foi possível ler o PDF do repositório: {e}")
 
 if template_bytes:
     try:
         fieldset, maxlens = get_fields_and_meta(template_bytes)
-        named: Dict[str,str] = {}
+        named: Dict[str, str] = {}
 
         # Globais
         put(named, fieldset, "Aircraft", aircraft, maxlens)
@@ -566,16 +549,34 @@ if template_bytes:
         put(named, fieldset, "Shutdown", shutdown_str, maxlens)
         put(named, fieldset, "ETD/ETA", f"{takeoff_str} / {eta_str}", maxlens)
 
-        # Leg number = nº de segmentos
-        put(named, fieldset, "Leg_Number", str(SEG_N), maxlens)
+        # Leg number (sem TOC/TOD)
+        put(named, fieldset, "Leg_Number", str(N), maxlens)
 
-        # Mapear linhas: primeiro exportamos TOC, depois o que houver (até 11 linhas no PDF)
-        export_rows = calc_rows[:11]
+        # Preparar até 11 linhas para o PDF (leg rows + TOC/TOD quando existirem)
+        pdf_rows = []
+        for row in calc_rows:
+            # Para PDF, "Name" será o destino do segmento, exceto TOC/TOD que mantêm o nome
+            nm = row["Seg"] if row["Seg"] in ("TOC","TOD") else row["To"]
+            pdf_rows.append({
+                "Name": nm,
+                "Freq": aero_freq(nm) if nm in AEROS else "",
+                "TC": row["TC"],
+                "TH": row["TH"],
+                "MH": row["MH"],
+                "TAS": row["TAS"],
+                "GS": row["GS"],
+                "Dist": row["Dist"],
+                "ETE": row["ETE"],
+                "ETO": row["ETO"],
+                "Burn": row["Burn"],
+                "EFOB": row["EFOB"],
+            })
+        pdf_rows = pdf_rows[:11]
 
-        for i, r in enumerate(export_rows, start=1):
-            s = str(i)
+        for i, r in enumerate(pdf_rows, start=1):
+            s=str(i)
             put(named, fieldset, f"Name{s}", r["Name"], maxlens)
-            put(named, fieldset, f"Alt{s}",  r["Alt/FL"], maxlens)
+            # put(named, fieldset, f"Alt{s}",  "", maxlens)  # não preencher Alt{s}
             put(named, fieldset, f"FREQ{s}", r["Freq"], maxlens)
             put(named, fieldset, f"TCRS{s}", f"{int(round(float(r['TC'])))}", maxlens)
             put(named, fieldset, f"THDG{s}", f"{int(round(float(r['TH'])))}", maxlens)
@@ -604,3 +605,4 @@ if template_bytes:
 
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
+
