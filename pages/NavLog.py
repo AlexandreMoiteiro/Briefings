@@ -1,4 +1,5 @@
-# app.py — NAVLOG com TOC/TOD (linhas separadas) e cortes dentro do leg (ex.: LPSO→TOC, TOC→VACOR)
+
+# app.py — NAVLOG com TOC/TOD (cortes dentro do leg), fases (↑/→/↓) e ALT por segmento (ex.: 390→3000)
 # Reqs: streamlit, pypdf, pytz
 
 import streamlit as st
@@ -56,10 +57,9 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     if "/AcroForm" not in root: raise RuntimeError("Template has no AcroForm")
     writer._root_object.update({NameObject("/AcroForm"): root["/AcroForm"]})
     try:
-        # fonte > 0 para aparecer no Acrobat/Preview
         writer._root_object["/AcroForm"].update({
             NameObject("/NeedAppearances"): True,
-            NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")
+            NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")  # fonte visível
         })
     except: pass
     str_fields = {k:(str(v) if v is not None else "") for k,v in fields.items()}
@@ -78,7 +78,7 @@ def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
 def wrap360(x): x=fmod(x,360.0); return x+360 if x<0 else x
 def angle_diff(a,b): return (a-b+180)%360-180
 
-# Triângulo do vento correto: usa vetor "vento para" (from+180) c/ sinais
+# Triângulo do vento correto: usa vetor "vento para" (from+180) com sinais
 def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: float):
     if tas_kt <= 0:
         return 0.0, wrap360(tc_deg), 0.0
@@ -149,7 +149,6 @@ def cruise_lookup(pa_ft: float, rpm: int, oat_c: Optional[float]) -> Tuple[float
         return (tas_lo + t*(tas_hi-tas_lo), ff_lo + t*(ff_hi-ff_lo))
     tas0,ff0=val(p0); tas1,ff1=val(p1)
     tas=interp1(pa_c,p0,p1,tas0,tas1); ff=interp1(pa_c,p0,p1,ff0,ff1)
-    # Correções AFM por OAT
     if oat_c is not None:
         dev=oat_c - isa_temp(pa_c)
         if dev>0: tas*=1-0.02*(dev/15); ff*=1-0.025*(dev/15)
@@ -321,7 +320,7 @@ for i,row in enumerate(legs_view):
 
 N = len(legs)
 
-# ===== Cálculo (TOC/TOD com corte dentro do leg) =====
+# ===== Cálculo (TOC/TOD cortados dentro do leg) =====
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
 
 dep_elev = aero_elev(dept); arr_elev = aero_elev(arr)
@@ -349,36 +348,28 @@ ff_descent   = float(idle_ff) if idle_mode else cruise_lookup(pa_mid_desc, int(r
 def gs_for(tc, tas): return wind_triangle(float(tc), float(tas), wind_from, wind_kt)[2]
 
 dist = [float(l["Dist"] or 0.0) for l in legs]
-
-# GS por fase em cada leg
 gs_climb   = [gs_for(legs[i]["TC"], tas_climb)   for i in range(N)]
 gs_cruise  = [gs_for(legs[i]["TC"], tas_cruise)  for i in range(N)]
 gs_descent = [gs_for(legs[i]["TC"], tas_descent) for i in range(N)]
 
-# ---- CLIMB: do início para a frente até gastar t_climb_total
+# ---- CLIMB: distribuir adiante até terminar t_climb_total
 climb_nm   = [0.0]*N
 idx_toc = None
-toc_nm_in_leg = 0.0
-
 rem_t = float(t_climb_total)
 for i in range(N):
     if rem_t <= 1e-9: break
     gs = max(gs_climb[i], 1e-6)
-    # minutos necessários para cruzar todo o leg em climb
     t_full = 60.0 * dist[i] / gs
     use_t = min(rem_t, t_full)
     climb_nm[i] = min(dist[i], gs * use_t / 60.0)
     rem_t -= use_t
     if rem_t <= 1e-9:
         idx_toc = i
-        toc_nm_in_leg = climb_nm[i]     # distância desde o início do leg até ao TOC
         break
 
-# ---- DESCENT: do fim para trás até gastar t_desc_total
+# ---- DESCENT: distribuir para trás até terminar t_desc_total
 descent_nm = [0.0]*N
 idx_tod = None
-tod_nm_from_end = 0.0
-
 rem_t = float(t_desc_total)
 for j in range(N-1, -1, -1):
     if rem_t <= 1e-9: break
@@ -389,10 +380,9 @@ for j in range(N-1, -1, -1):
     rem_t -= use_t
     if rem_t <= 1e-9:
         idx_tod = j
-        tod_nm_from_end = descent_nm[j]   # distância do fim do leg até ao TOD
         break
 
-# ===== Construir sequência de linhas (com cortes no leg) =====
+# ===== Construir sequência (com setas de fase e ALT start→end) =====
 startup = parse_hhmm(startup_str)
 takeoff = add_minutes(startup,15) if startup else None
 clock = takeoff
@@ -401,20 +391,22 @@ def ceil_pos_minutes(x, has_dist: bool):
     if not has_dist: return int(round(x))
     return max(1, int(math.ceil(x - 1e-9))) if x > 0 else 0
 
-rows=[]   # UI
-seq=[]    # PDF
-
-# Linha inicial (DEP) só para PDF
+rows=[]; seq=[]
 seq.append({"kind":"ORIGIN","name":dept,"alt":int(round(start_alt)),
             "tc":legs[0]["TC"] if N else 0.0,"tas":0,"gs":0,"dist":0,"ete":0,"eto":""})
 
 total_dist = sum(dist); total_ete = total_burn = 0.0; efob=float(start_fuel)
 
+PH_ICON = {"CLIMB":"↑","CRUISE":"→","DESCENT":"↓"}
+
+alt_cursor = float(start_alt)  # altitude instantânea corrente
+
 def add_marker(kind:str, i_leg:int):
-    """Adiciona TOC/TOD com ETE=0; ETO = clock atual."""
+    # ETO = hora atual; ALT = altitude instantânea
     rows.append({
+        "Phase": "↧" if kind=="TOC" else "↥",  # TOC alcançado / TOD iniciado
         "Leg/Marker": kind, "To (Name)": kind,
-        "Cruise ALT (ref)": str(int(round(cruise_alt if kind=='TOC' else end_alt))),
+        "ALT (ft)": f"{int(round(alt_cursor))}",
         "TC (°T)": round(float(legs[i_leg]["TC"]),0) if 0 <= i_leg < N else 0,
         "TH (°T)": 0, "MH (°M)": 0,
         "TAS (kt)": 0, "GS (kt)": 0,
@@ -423,77 +415,77 @@ def add_marker(kind:str, i_leg:int):
         "ETO": clock.strftime("%H:%M") if clock else "",
         "Burn (L)": 0.0, "EFOB (L)": round(efob,1)
     })
-    seq.append({"kind":kind,"name":kind,
-                "alt": int(round(cruise_alt if kind=='TOC' else end_alt)),
-                "tc": (legs[i_leg]["TC"] if 0 <= i_leg < N else 0.0),
+    seq.append({"kind":kind,"name":kind,"alt":int(round(alt_cursor)),
+                "tc":(legs[i_leg]["TC"] if 0 <= i_leg < N else 0.0),
                 "tas":0,"gs":0,"dist":0,"ete":0,
-                "eto": (clock.strftime("%H:%M") if clock else ""),
-                "burn":0.0,"efob":efob})
+                "eto":(clock.strftime("%H:%M") if clock else ""), "burn":0.0,"efob":efob})
 
 def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:float, ff_lph:float):
-    """Adiciona um segmento real com distância e consumo; avança relógio/totais."""
-    global clock, total_ete, total_burn, efob
+    """Adiciona segmento real; calcula ALT start→end com ROC/ROD constantes."""
+    global clock, total_ete, total_burn, efob, alt_cursor
     if d_nm <= 1e-9:
-        # escreve linha com 0 min? evita poluição; não adiciona nada
         return
     tc = float(legs[i_leg]["TC"])
-    wca, th, gs = wind_triangle(tc, tas, wind_from, wind_kt)
+    _, th, gs = wind_triangle(tc, tas, wind_from, wind_kt)
     ete_raw = 60.0 * d_nm / max(gs,1e-6)
     ete = ceil_pos_minutes(ete_raw, True)
+    # ALT end pela vertical rate (usar tempo real, não arredondado)
+    alt_start = alt_cursor
+    if phase == "CLIMB":
+        alt_end = min(cruise_alt, alt_start + roc * (ete_raw/60.0))
+    elif phase == "DESCENT":
+        alt_end = max(end_alt,   alt_start - rod_fpm * (ete_raw/60.0))
+    else:
+        alt_end = alt_start
     burn = ff_lph * (ete_raw/60.0)
     eto = ""
     if clock:
         clock = add_minutes(clock, ete); eto = clock.strftime("%H:%M")
     total_ete += ete; total_burn += burn; efob = max(0.0, efob - burn)
+    alt_cursor = alt_end  # avançar estado de altitude
     rows.append({
+        "Phase": PH_ICON[phase],
         "Leg/Marker": f"{from_nm}→{to_nm}",
         "To (Name)": to_nm,
-        "Cruise ALT (ref)": str(int(round(cruise_alt if phase!='DESCENT' else end_alt))),
-        "TC (°T)": round(tc,0), "TH (°T)": round(th,0), "MH (°M)": round(apply_var(th, var_deg, var_is_e),0),
+        "ALT (ft)": f"{int(round(alt_start))}→{int(round(alt_end))}" if abs(alt_end-alt_start)>=1 else f"{int(round(alt_start))}",
+        "TC (°T)": round(tc,0),
+        "TH (°T)": round(th,0),
+        "MH (°M)": round(apply_var(th, var_deg, var_is_e),0),
         "TAS (kt)": round(tas,0), "GS (kt)": round(gs,0),
         "FF (L/h)": round(ff_lph,1),
         "Dist (nm)": round(d_nm,1), "ETE (min)": ete, "ETO": eto,
         "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
     })
     seq.append({"kind":"LEG","phase":phase,"name":to_nm,
-                "alt": int(round(cruise_alt if phase!='DESCENT' else end_alt)),
-                "tc": tc, "tas": tas, "gs": gs, "dist": d_nm,
-                "ete": ete, "eto": eto, "burn": burn, "efob": efob})
+                "alt":int(round(alt_end)), "tc":tc, "tas":tas, "gs":gs, "dist":d_nm,
+                "ete":ete, "eto":eto, "burn":burn, "efob":efob})
 
-# Varrimento sequencial com cortes
+# Sequência: em cada leg, CLIMB (se houver) -> TOC (se cair aqui) -> CRUISE -> TOD (se cair aqui) -> DESCENT
 for i in range(N):
-    leg_from = legs[i]["From"]
-    leg_to   = legs[i]["To"]
+    leg_from, leg_to = legs[i]["From"], legs[i]["To"]
     d_total  = dist[i]
-    # ordem: CLIMB (início) -> CRUISE (meio) -> DESCENT (final)
     d_cl = min(climb_nm[i], d_total)
     d_ds = min(descent_nm[i], d_total - d_cl)
     d_cr = max(0.0, d_total - d_cl - d_ds)
 
     cur_from = leg_from
 
-    # CLIMB segmento
     if d_cl > 0:
-        to_name = "TOC" if (idx_toc == i and d_cl < d_total+1e-9) else leg_to
+        to_name = "TOC" if (idx_toc == i and d_cr + d_ds >= 0) else leg_to
         add_segment("CLIMB", cur_from, to_name, i, d_cl, tas_climb, ff_climb)
-        if to_name == "TOC":  # inserir marcador imediatamente a seguir
+        if idx_toc == i:
             add_marker("TOC", i)
-        cur_from = to_name
+        cur_from = "TOC" if idx_toc == i else to_name
 
-    # CRUISE segmento (pode terminar em TOD se TOD cai neste leg)
     if d_cr > 0:
-        to_name = leg_to
-        if idx_tod == i and d_ds > 0:
-            to_name = "TOD"
+        to_name = "TOD" if (idx_tod == i and d_ds > 0) else leg_to
         add_segment("CRUISE", cur_from, to_name, i, d_cr, tas_cruise, ff_cruise)
-        if to_name == "TOD":
+        if idx_tod == i and d_ds > 0:
             add_marker("TOD", i)
         cur_from = to_name
 
-    # DESCENT segmento
     if d_ds > 0:
         add_segment("DESCENT", cur_from, leg_to, i, d_ds, tas_descent, ff_descent)
-        cur_from = leg_to
 
 eta = clock
 landing = eta
@@ -502,20 +494,21 @@ shutdown = add_minutes(eta,5) if eta else None
 # ===== Tabela =====
 st.markdown("### Flight plan (TOC/TOD auto, com cortes dentro do leg)")
 cfg={
+    "Phase":      st.column_config.TextColumn("Fase"),
     "Leg/Marker": st.column_config.TextColumn("Leg / Marker"),
-    "To (Name)": st.column_config.TextColumn("To (Name)", disabled=True),
-    "Cruise ALT (ref)": st.column_config.TextColumn("Cruise ALT (ref)"),
-    "TC (°T)": st.column_config.NumberColumn("TC (°T)", disabled=True),
-    "TH (°T)": st.column_config.NumberColumn("TH (°T)", disabled=True),
-    "MH (°M)": st.column_config.NumberColumn("MH (°M)", disabled=True),
-    "TAS (kt)": st.column_config.NumberColumn("TAS (kt)", disabled=True),
-    "GS (kt)":  st.column_config.NumberColumn("GS (kt)", disabled=True),
-    "FF (L/h)": st.column_config.NumberColumn("FF (L/h)", disabled=True),
-    "Dist (nm)":st.column_config.NumberColumn("Dist (nm)", disabled=True),
-    "ETE (min)":st.column_config.NumberColumn("ETE (min)", disabled=True),
-    "ETO":      st.column_config.TextColumn("ETO", disabled=True),
-    "Burn (L)": st.column_config.NumberColumn("Burn (L)", disabled=True),
-    "EFOB (L)": st.column_config.NumberColumn("EFOB (L)", disabled=True),
+    "To (Name)":  st.column_config.TextColumn("To (Name)", disabled=True),
+    "ALT (ft)":   st.column_config.TextColumn("ALT (ft)"),
+    "TC (°T)":    st.column_config.NumberColumn("TC (°T)", disabled=True),
+    "TH (°T)":    st.column_config.NumberColumn("TH (°T)", disabled=True),
+    "MH (°M)":    st.column_config.NumberColumn("MH (°M)", disabled=True),
+    "TAS (kt)":   st.column_config.NumberColumn("TAS (kt)", disabled=True),
+    "GS (kt)":    st.column_config.NumberColumn("GS (kt)", disabled=True),
+    "FF (L/h)":   st.column_config.NumberColumn("FF (L/h)", disabled=True),
+    "Dist (nm)":  st.column_config.NumberColumn("Dist (nm)", disabled=True),
+    "ETE (min)":  st.column_config.NumberColumn("ETE (min)", disabled=True),
+    "ETO":        st.column_config.TextColumn("ETO", disabled=True),
+    "Burn (L)":   st.column_config.NumberColumn("Burn (L)", disabled=True),
+    "EFOB (L)":   st.column_config.NumberColumn("EFOB (L)", disabled=True),
 }
 st.data_editor(rows, hide_index=True, use_container_width=True, num_rows="fixed", column_config=cfg, key="fp_table")
 
@@ -524,7 +517,7 @@ if eta:
     tot_line += f" • **ETA {eta.strftime('%H:%M')}** • **Landing {landing.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
 st.markdown(tot_line)
 
-# ===== PDF export =====
+# ===== PDF export (mantido igual; a tabela no PDF continua sem a coluna ALT start→end) =====
 st.markdown("### PDF export")
 show_fields = st.checkbox("Mostrar nomes de campos do PDF (debug)")
 
@@ -572,7 +565,7 @@ if template_bytes:
         put(named, fieldset, "Shutdown", shutdown.strftime("%H:%M") if shutdown else "", maxlens)
         put(named, fieldset, "ETD/ETA", f"{(takeoff_pdf.strftime('%H:%M') if takeoff_pdf else '')} / {(eta.strftime('%H:%M') if eta else '')}", maxlens)
 
-        # Campos agregados
+        # Agregados
         for key in ("LEVEL F/F","LEVEL_FF","Level_FF","Level F/F"):
             put(named, fieldset, key, f"{int(round(cruise_alt))} / {ff_cruise:.1f}", maxlens)
         climb_fuel = ff_climb*(t_climb_total/60.0)
@@ -582,14 +575,13 @@ if template_bytes:
         for key in ("FLT TIME","FLT_TIME","Flight_Time","FL TIME"):
             put(named, fieldset, key, flt_time, maxlens)
 
-        # Nº de legs originais
         put(named, fieldset, "Leg_Number", str(N), maxlens)
 
-        # Tabela para o PDF: ORIGIN + sequência cronológica (segmentos e marcadores)
+        # Sequência simplificada para o PDF (sem ALT start→end)
         pdf_items = []
         pdf_items.append({"Name": dept, "Alt": str(int(round(start_alt))),
                           "TC": "", "TH": "", "MH":"", "TAS":"", "GS":"",
-                          "Dist":"", "ETE":"", "ETO":"", "Burn":"", "EFOB":""})
+                          "Dist":"", "ETE":"","ETO":"", "Burn":"", "EFOB":""})
         for it in seq:
             if it["kind"]=="ORIGIN": continue
             pdf_items.append({
@@ -606,7 +598,6 @@ if template_bytes:
                 "EFOB": f"{it.get('efob',0.0):.1f}" if it.get("efob") is not None else "",
             })
 
-        # Escrever até 11 linhas (ajusta conforme teu template)
         for i, r in enumerate(pdf_items[:11], start=1):
             s=str(i)
             put(named, fieldset, f"Name{s}", r["Name"], maxlens)
@@ -623,7 +614,6 @@ if template_bytes:
             if r["Burn"]!="": put(named, fieldset, f"PL_BO{s}", r["Burn"], maxlens)
             if r["EFOB"]!="": put(named, fieldset, f"EFOB{s}",  r["EFOB"], maxlens)
 
-        # Totais
         put(named, fieldset, "ETE_Total", f"{int(round(total_ete))}", maxlens)
         put(named, fieldset, "Dist_Total", f"{total_dist:.1f}", maxlens)
         put(named, fieldset, "PL_BO_TOTAL", f"{total_burn:.1f}", maxlens)
