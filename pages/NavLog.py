@@ -1,4 +1,5 @@
-# app.py — NAVLOG com TOC/TOD (linhas separadas), AFM perf e export p/ "NAVLOG - FORM.pdf"
+
+# app.py — NAVLOG com TOC/TOD (precisos dentro do leg), AFM perf e export p/ "NAVLOG - FORM.pdf"
 # Reqs: streamlit, pypdf, pytz
 
 import streamlit as st
@@ -6,7 +7,7 @@ import datetime as dt
 import pytz, io, json, unicodedata, re, math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from math import sin, asin, radians, degrees, fmod
+from math import sin, asin, radians, degrees, fmod  # usaremos math.cos explicitamente
 
 # =============== PDF helpers ===============
 try:
@@ -41,7 +42,7 @@ def get_fields_and_meta(template_bytes: bytes):
                 for a in page["/Annots"]:
                     obj = a.get_object()
                     if obj.get("/T"):
-                        nm = str(obj["/T"]); field_names.add(nm)
+                        nm = str(obj["/T"]) ; field_names.add(nm)
                         ml = obj.get("/MaxLen")
                         if ml: maxlens[nm] = int(ml)
     except: pass
@@ -56,7 +57,6 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     if "/AcroForm" not in root: raise RuntimeError("Template has no AcroForm")
     writer._root_object.update({NameObject("/AcroForm"): root["/AcroForm"]})
     try:
-        # fonte padrão visível
         writer._root_object["/AcroForm"].update({
             NameObject("/NeedAppearances"): True,
             NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")
@@ -78,20 +78,18 @@ def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
 def wrap360(x): x=fmod(x,360.0); return x+360 if x<0 else x
 def angle_diff(a,b): return (a-b+180)%360-180
 
-# Triângulo do vento correto:
-# - converte vento "FROM" para vetor "TO" (+180°)
-# - head/tail com sinal; crosswind define WCA (direita positiva)
+# vento: usa vetor "to" (from+180)
 def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: float):
     if tas_kt <= 0:
         return 0.0, wrap360(tc_deg), 0.0
     wind_to = wrap360(wind_from_deg + 180.0)
-    beta = radians(angle_diff(wind_to, tc_deg))  # vento->rota
-    cross = wind_kt * sin(beta)                  # +: vento da esquerda
-    head  = wind_kt * math.cos(beta)             # +: tailwind / −: headwind
-    s = max(-1.0, min(1.0, cross / max(tas_kt,1e-9)))
+    beta = radians(angle_diff(wind_to, tc_deg))
+    cross = wind_kt * sin(beta)                     # (+) vento da esquerda
+    head = wind_kt * math.cos(beta)                 # (+) tailwind, (−) headwind
+    s = max(-1.0, min(1.0, cross / max(tas_kt, 1e-9)))
     wca = degrees(asin(s))
-    th  = wrap360(tc_deg + wca)
-    gs  = max(0.0, tas_kt * math.cos(radians(wca)) + head)
+    th = wrap360(tc_deg + wca)
+    gs = max(0.0, tas_kt * math.cos(radians(wca)) + head)
     return wca, th, gs
 
 def apply_var(true_deg,var_deg,east_is_negative=False):
@@ -104,6 +102,7 @@ def parse_hhmm(s:str):
         try: return dt.datetime.strptime(s,fmt).time()
         except: pass
     return None
+
 def add_minutes(t:dt.time,m:int):
     if not t: return None
     today=dt.date.today(); base=dt.datetime.combine(today,t)
@@ -133,6 +132,7 @@ CRUISE={
     8000:{1800:(81,14.9),1900:(86,15.6),2000:(92,16.7),2100:(98,18.0),2250:(107,20.4)},
     10000:{1800:(85,15.4),1900:(91,16.4),2000:(91,16.4),2100:(97,17.5),2250:(106,19.7)},
 }
+
 def isa_temp(pa_ft): return 15.0 - 2.0*(pa_ft/1000.0)
 
 def cruise_lookup(pa_ft: float, rpm: int, oat_c: Optional[float]) -> Tuple[float,float]:
@@ -151,7 +151,6 @@ def cruise_lookup(pa_ft: float, rpm: int, oat_c: Optional[float]) -> Tuple[float
         return (tas_lo + t*(tas_hi-tas_lo), ff_lo + t*(ff_hi-ff_lo))
     tas0,ff0=val(p0); tas1,ff1=val(p1)
     tas=interp1(pa_c,p0,p1,tas0,tas1); ff=interp1(pa_c,p0,p1,ff0,ff1)
-    # Correções AFM por OAT
     if oat_c is not None:
         dev=oat_c - isa_temp(pa_c)
         if dev>0: tas*=1-0.02*(dev/15); ff*=1-0.025*(dev/15)
@@ -175,6 +174,22 @@ def vy_interp_enroute(pa):
     p0=max([p for p in pas if p<=pa_c]); p1=min([p for p in pas if p>=pa_c])
     return interp1(pa_c, p0, p1, VY_ENROUTE[p0], VY_ENROUTE[p1])
 
+# ======== Atmosfera / IAS->TAS ========
+def isa_density_ratio(pa_ft: float) -> float:
+    x = max(0.0, 1.0 - 6.8753e-6 * float(pa_ft))
+    return x ** 4.256
+
+def ias_to_tas(ias_kt: float, pa_ft: float) -> float:
+    sigma = max(1e-6, isa_density_ratio(pa_ft))
+    return ias_kt / math.sqrt(sigma)
+
+def roc_at(pa_ft: float, oat_c: float) -> float:
+    return roc_interp_enroute(pa_ft, oat_c)
+
+def vy_tas_at(pa_ft: float) -> float:
+    vy_ias = vy_interp_enroute(pa_ft)
+    return ias_to_tas(vy_ias, pa_ft)
+
 # =============== Aerodromes ===============
 AEROS={
  "LPSO":{"elev":390,"freq":"119.805"},
@@ -183,6 +198,7 @@ AEROS={
  "LPCO":{"elev":587,"freq":"118.405"},
  "LPVZ":{"elev":2060,"freq":"118.305"},
 }
+
 def aero_elev(icao): return int(AEROS.get(icao,{}).get("elev",0))
 def aero_freq(icao): return AEROS.get(icao,{}).get("freq","")
 
@@ -266,7 +282,7 @@ with c_rb:
                        file_name=f"route_{ascii_safe(registration)}.json",
                        mime="application/json")
 
-uploaded = st.file_uploader("📤 Seleciona rota (JSON)", type=["json"])
+uploaded = st.file_uploader("📤 Seleciona rota (JSON)", type=["json"]) 
 use_uploaded = st.button("Usar rota do ficheiro")
 if use_uploaded and uploaded is not None:
     try:
@@ -323,7 +339,7 @@ for i,row in enumerate(legs_view):
 
 N = len(legs)
 
-# ===== Cálculo (TOC/TOD como linhas separadas; legs = cruise-only) =====
+# ===== Cálculo base =====
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
 
 dep_elev = aero_elev(dept); arr_elev = aero_elev(arr)
@@ -335,188 +351,257 @@ pa_cruise = pressure_alt(cruise_alt, qnh)
 vy_kt = vy_interp_enroute(pa_start)
 tas_climb, tas_cruise, tas_descent = vy_kt, float(cruise_ref_kt), float(descent_ref_kt)
 
-roc = roc_interp_enroute(pa_start, temp_c)                 # ft/min
+# FFs (AFM) para agregados/etiquetas
 delta_climb = max(0.0, cruise_alt - start_alt)
 delta_desc  = max(0.0, cruise_alt - end_alt)
-t_climb_total = delta_climb / max(roc,1e-6)
-t_desc_total  = delta_desc  / max(rod_fpm,1e-6)
-
-# FFs (AFM)
-pa_mid_climb = pressure_alt(start_alt + 0.5*delta_climb, qnh)
-pa_mid_desc  = pressure_alt(end_alt   + 0.5*delta_desc,  qnh)
+pa_mid_climb = start_alt + 0.5*delta_climb
+pa_mid_desc  = end_alt   + 0.5*delta_desc
 _, ff_climb  = cruise_lookup(pa_mid_climb, int(rpm_climb),  temp_c)
 _, ff_cruise = cruise_lookup(pa_cruise,   int(rpm_cruise),  temp_c)
 ff_descent   = float(idle_ff) if idle_mode else cruise_lookup(pa_mid_desc, int(rpm_descent), temp_c)[1]
 
 def gs_for(tc, tas): return wind_triangle(float(tc), float(tas), wind_from, wind_kt)[2]
-
 dist = [float(l["Dist"] or 0.0) for l in legs]
 
-# --- PERFIL VERTICAL: repartir por DISTÂNCIA com GS de cada fase ---
-gs_climb   = [gs_for(legs[i]["TC"], tas_climb)   for i in range(N)]
-gs_cruise  = [gs_for(legs[i]["TC"], tas_cruise)  for i in range(N)]
-gs_descent = [gs_for(legs[i]["TC"], tas_descent) for i in range(N)]
+# ===== Integração da subida/descida para achar TOC/TOD precisos =====
+def integrate_climb_to(cruise_alt_ft: float,
+                       start_alt_ft: float,
+                       qnh_hpa: float,
+                       oat_c: float,
+                       legs_list: List[dict],
+                       wind_from_deg: float,
+                       wind_kt_val: float) -> Tuple[Optional[int], Optional[float], float]:
+    if cruise_alt_ft <= start_alt_ft + 1e-6:
+        return None, None, 0.0
+    step_ft = 500.0
+    alt = start_alt_ft
+    t_total = 0.0
+    idx_toc = None
+    frac_in_leg = None
+    for i, leg in enumerate(legs_list):
+        tc = float(leg["TC"]); dist_leg_nm = float(leg["Dist"] or 0.0)
+        if dist_leg_nm <= 0: continue
+        dist_left = dist_leg_nm
+        guard = 0
+        while dist_left > 1e-9 and alt < cruise_alt_ft - 1e-6 and guard < 10000:
+            guard += 1
+            pa = pressure_alt(alt, qnh_hpa)
+            tas_step = vy_tas_at(pa)
+            _, _, gs = wind_triangle(tc, tas_step, wind_from_deg, wind_kt_val)
+            gs = max(1e-3, gs)
+            roc_fpm = max(1.0, roc_at(pa, oat_c))
+            climb_left_ft = cruise_alt_ft - alt
+            d_alt = min(step_ft, climb_left_ft)
+            dt_min = d_alt / roc_fpm
+            d_nm = gs * (dt_min/60.0)
+            if d_nm <= dist_left + 1e-9:
+                dist_left -= d_nm
+                alt += d_alt
+                t_total += dt_min
+            else:
+                dt_need = climb_left_ft / roc_fpm
+                d_need = gs * (dt_need/60.0)
+                frac_in_leg = (dist_leg_nm - dist_left + d_need) / max(1e-9, dist_leg_nm)
+                idx_toc = i; t_total += dt_need; alt = cruise_alt_ft
+                break
+        if idx_toc is not None: break
+    return idx_toc, frac_in_leg, t_total
 
-climb_nm   = [0.0]*N
-descent_nm = [0.0]*N
+def integrate_descent_from(cruise_alt_ft: float,
+                           end_alt_ft: float,
+                           legs_list: List[dict],
+                           qnh_hpa: float,
+                           oat_c: float,
+                           wind_from_deg: float,
+                           wind_kt_val: float,
+                           descent_ias_kt: float,
+                           rod_fpm_val: float) -> Tuple[Optional[int], Optional[float], float]:
+    if cruise_alt_ft <= end_alt_ft + 1e-6:
+        return None, None, 0.0
+    step_ft = 500.0
+    alt = cruise_alt_ft
+    t_total = 0.0
+    idx_tod = None
+    frac_in_leg = None
+    for j in range(len(legs_list)-1, -1, -1):
+        leg = legs_list[j]
+        tc = float(leg["TC"]); dist_leg_nm = float(leg["Dist"] or 0.0)
+        if dist_leg_nm <= 0: continue
+        dist_left = dist_leg_nm
+        guard = 0
+        while dist_left > 1e-9 and alt > end_alt_ft + 1e-6 and guard < 10000:
+            guard += 1
+            pa = pressure_alt(alt, qnh_hpa)
+            tas_desc = ias_to_tas(descent_ias_kt, pa)
+            _, _, gs = wind_triangle(tc, tas_desc, wind_from_deg, wind_kt_val)
+            gs = max(1e-3, gs)
+            d_alt = min(step_ft, alt - end_alt_ft)
+            dt_min = d_alt / max(1.0, rod_fpm_val)
+            d_nm = gs * (dt_min/60.0)
+            if d_nm <= dist_left + 1e-9:
+                dist_left -= d_nm
+                alt -= d_alt
+                t_total += dt_min
+            else:
+                dt_need = (alt - end_alt_ft) / max(1.0, rod_fpm_val)
+                d_need = gs * (dt_need/60.0)
+                frac_from_start = max(0.0, (dist_leg_nm - (dist_left - d_need)) / max(1e-9, dist_leg_nm))
+                idx_tod = j
+                frac_in_leg = min(1.0, frac_from_start)
+                t_total += dt_need
+                alt = end_alt_ft
+                break
+        if idx_tod is not None: break
+    return idx_tod, frac_in_leg, t_total
 
-# CLIMB distribuído do início para a frente
-rem_t = float(t_climb_total)
-idx_toc = None
-toc_nm_in_leg = 0.0
-for i in range(N):
-    if rem_t <= 1e-9: break
-    gs = max(gs_climb[i], 1e-6)
-    t_full = 60.0 * dist[i] / gs
-    use_t = min(rem_t, t_full)
-    climb_nm[i] = min(dist[i], gs * use_t / 60.0)
-    rem_t -= use_t
-    if rem_t <= 1e-9:
-        idx_toc = i
-        toc_nm_in_leg = climb_nm[i]
-        break
+# === TOC/TOD precisos ===
+idx_toc, frac_toc, t_climb_total = integrate_climb_to(
+    cruise_alt, start_alt, qnh, temp_c, legs, wind_from, wind_kt
+)
+idx_tod, frac_tod, t_desc_total = integrate_descent_from(
+    cruise_alt, end_alt, legs, qnh, temp_c, wind_from, wind_kt, descent_ref_kt, rod_fpm
+)
 
-# DESCENT distribuído do fim para trás
-rem_t = float(t_desc_total)
-idx_tod = None
-tod_nm_from_end = 0.0
-for j in range(N-1,-1,-1):
-    if rem_t <= 1e-9: break
-    gs = max(gs_descent[j], 1e-6)
-    t_full = 60.0 * dist[j] / gs
-    use_t = min(rem_t, t_full)
-    descent_nm[j] = min(dist[j], gs * use_t / 60.0)
-    rem_t -= use_t
-    if rem_t <= 1e-9:
-        idx_tod = j
-        tod_nm_from_end = descent_nm[j]
-        break
+# ==== Construir "segments" com cortes no ponto exacto do TOC/TOD ====
+segments = []
+for i, leg in enumerate(legs):
+    d_nm = float(leg["Dist"] or 0.0)
+    if d_nm <= 0: 
+        continue
+    split_points = []
+    if idx_toc is not None and i == idx_toc and frac_toc is not None:
+        split_points.append(("TOC", max(0.0, min(1.0, frac_toc))))
+    if idx_tod is not None and i == idx_tod and frac_tod is not None:
+        split_points.append(("TOD", max(0.0, min(1.0, frac_tod))))
+    split_points.sort(key=lambda x: x[1])
 
-# tempos por fase dentro de cada leg
-t_climb_leg  = [0.0]*N
-t_desc_leg   = [0.0]*N
-t_cruise_leg = [0.0]*N
-for i in range(N):
-    cr_nm = max(0.0, dist[i] - climb_nm[i] - descent_nm[i])
-    t_climb_leg[i]  = 60.0 * climb_nm[i]   / max(gs_climb[i],   1e-6)
-    t_desc_leg[i]   = 60.0 * descent_nm[i] / max(gs_descent[i], 1e-6)
-    t_cruise_leg[i] = 60.0 * cr_nm         / max(gs_cruise[i],  1e-6)
+    prev_f = 0.0
+    for tag, f in split_points:
+        seg_len = d_nm * (f - prev_f)
+        if seg_len > 1e-6:
+            segments.append({"kind":"LEG", "i": i, "tc": leg["TC"], "dist": seg_len,
+                             "from": leg["From"], "to": leg["To"]})
+        segments.append({"kind": tag, "i": i, "tc": leg["TC"], "dist": 0.0,
+                         "from": leg["From"], "to": leg["To"]})
+        prev_f = f
+    if prev_f < 1.0 - 1e-9:
+        seg_len = d_nm * (1.0 - prev_f)
+        segments.append({"kind":"LEG", "i": i, "tc": leg["TC"], "dist": seg_len,
+                         "from": leg["From"], "to": leg["To"]})
 
-# ===== Construir sequência de linhas: LEG (cruise-only) + TOC/TOD separados =====
-startup = parse_hhmm(startup_str)
-takeoff = add_minutes(startup,15) if startup else None
-clock = takeoff
-
+# ===== Sequência, linhas UI e totais =====
 def ceil_pos_minutes(x, has_dist: bool):
     if not has_dist: return int(round(x))
     return max(1, int(math.ceil(x - 1e-9))) if x > 0 else 0
 
-rows=[]  # para UI
-seq=[]   # para PDF (ordem final)
+rows=[]; seq=[]
+startup = parse_hhmm(startup_str)
+takeoff = add_minutes(startup,15) if startup else None
+clock = takeoff
 
-# 1) Linha inicial (DEP) só para PDF
 seq.append({"kind":"ORIGIN","name":dept,"alt":int(round(start_alt)),
             "tc":legs[0]["TC"] if N else 0.0,"tas":0,"gs":0,"dist":0,"ete":0,"eto":""})
 
-total_dist = sum(dist); total_ete = total_burn = 0.0; efob=float(start_fuel)
+total_dist = sum(dist)
+total_ete = total_burn = 0.0
+efob=float(start_fuel)
 
-def append_leg_cruise(i):
-    """Escreve SÓ o cruzeiro do leg i; relógio avança pelo cruzeiro deste leg."""
-    global clock, total_ete, total_burn, efob
-    tc = float(legs[i]["TC"])
-    cr_nm = max(0.0, dist[i] - climb_nm[i] - descent_nm[i])
-    gs = gs_for(tc, tas_cruise)
-    if cr_nm <= 1e-9:
-        ete = 0
-        burn = 0.0
-        eto = ""  # sem alteração de tempo
-    else:
-        ete_raw = 60.0 * cr_nm / max(gs,1e-6)
-        ete = ceil_pos_minutes(ete_raw, True)
-        burn = ff_cruise * (ete_raw/60.0)
-        eto = ""
-        if clock:
-            clock = add_minutes(clock, ete)
-            eto = clock.strftime("%H:%M")
-
-        total_ete += ete; total_burn += burn; efob=max(0.0, efob-burn)
-
-    th = wind_triangle(tc, tas_cruise, wind_from, wind_kt)[1]
-    mh = apply_var(th, var_deg, var_is_e)
-
-    rows.append({
-        "Leg/Marker": f"{legs[i]['From']}→{legs[i]['To']}",
-        "To (Name)": legs[i]['To'],
-        "Cruise ALT (ref)": str(int(round(cruise_alt))),
-        "TC (°T)": round(tc,0), "TH (°T)": round(th,0), "MH (°M)": round(mh,0),
-        "TAS (kt)": round(tas_cruise,0), "GS (kt)": round(gs,0),
-        "FF (L/h)": round(ff_cruise,1),
-        "Dist (nm)": round(cr_nm,1), "ETE (min)": ete, "ETO": eto,
-        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
-    })
-    seq.append({"kind":"LEG","name":legs[i]['To'],"alt":int(round(cruise_alt)),
-                "tc":tc,"tas":tas_cruise,"gs":gs,"dist":cr_nm,"ete":ete,"eto":eto,
-                "burn":burn,"efob":efob})
-
-def append_toc_marker():
-    """TOC: linha separada com ETE = tempo total de climb; avança relógio aqui."""
-    global clock, total_ete, total_burn, efob
-    if idx_toc is None: return
-    ete = int(round(t_climb_total))
-    burn = ff_climb*(t_climb_total/60.0)
-    eto=""
-    if clock:
-        clock = add_minutes(clock, ete)
-        eto = clock.strftime("%H:%M")
-    total_ete += ete; total_burn += burn; efob=max(0.0, efob-burn)
-
-    rows.append({
-        "Leg/Marker":"TOC","To (Name)":"TOC","Cruise ALT (ref)":str(int(round(cruise_alt))),
-        "TC (°T)": round(float(legs[idx_toc]["TC"]),0), "TH (°T)": 0, "MH (°M)": 0,
-        "TAS (kt)": round(tas_climb,0), "GS (kt)": round(gs_for(legs[idx_toc]["TC"], tas_climb),0),
-        "FF (L/h)": round(ff_climb,1),
-        "Dist (nm)": 0.0, "ETE (min)": ete, "ETO": eto,
-        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
-    })
-    seq.append({"kind":"TOC","name":"TOC","alt":int(round(cruise_alt)),
-                "tc":legs[idx_toc]["TC"],"tas":tas_climb,"gs":0,"dist":0,
-                "ete":ete,"eto":eto,"burn":burn,"efob":efob})
-
-def append_tod_marker():
-    """TOD: início da descida — ETO é o instante antes de iniciar; ETE = tempo de descida."""
-    global clock, total_ete, total_burn, efob
-    if idx_tod is None: return
+def add_marker(kind:str, seg, tas_show, ff_show):
+    global rows, seq, efob
     eto = clock.strftime("%H:%M") if clock else ""
-    ete = int(round(t_desc_total))
-    burn = ff_descent*(t_desc_total/60.0)
-    if clock:
-        clock = add_minutes(clock, ete)
-    total_ete += ete; total_burn += burn; efob=max(0.0, efob-burn)
+    rows.append({
+        "Leg/Marker": kind, "To (Name)": kind,
+        "Cruise ALT (ref)": str(int(round(cruise_alt if kind=="TOC" else end_alt))),
+        "TC (°T)": round(float(seg["tc"]),0), "TH (°T)": 0, "MH (°M)": 0,
+        "TAS (kt)": round(tas_show,0),
+        "GS (kt)": round(gs_for(seg["tc"], tas_show),0),
+        "FF (L/h)": round(ff_show,1),
+        "Dist (nm)": 0.0, "ETE (min)": 0, "ETO": eto,
+        "Burn (L)": 0.0, "EFOB (L)": round(efob,1)
+    })
+    seq.append({"kind":kind,"name":kind,
+                "alt":int(round(cruise_alt if kind=="TOC" else end_alt)),
+                "tc":seg["tc"],"tas":tas_show,"gs":0,"dist":0,"ete":0,"eto":eto,
+                "burn":0.0,"efob":efob})
+
+for seg in segments:
+    kind = seg["kind"]
+    tc = float(seg["tc"])
+    d_nm = float(seg["dist"])
+
+    if kind in ("TOC","TOD"):
+        if kind=="TOC":
+            pa_mid = pressure_alt(start_alt + 0.5*max(0.0, cruise_alt-start_alt), qnh)
+            toc_tas = vy_tas_at(pa_mid)
+            _, ff_c = cruise_lookup(pa_mid, int(rpm_climb), temp_c)
+            add_marker("TOC", seg, toc_tas, ff_c)
+        else:
+            pa_mid = pressure_alt(end_alt + 0.5*max(0.0, cruise_alt-end_alt), qnh)
+            tod_tas = ias_to_tas(descent_ref_kt, pa_mid)
+            ff_d = float(idle_ff) if idle_mode else cruise_lookup(pa_mid, int(rpm_descent), temp_c)[1]
+            add_marker("TOD", seg, tod_tas, ff_d)
+        continue
+
+    # determinar fase pelo que já apareceu na sequência
+    phase = "CRUISE"
+    if idx_toc is not None and not any(x["kind"]=="TOC" for x in seq):
+        phase = "CLIMB"
+    if idx_tod is not None and any(x["kind"]=="TOD" for x in seq):
+        phase = "DESCENT"
+
+    if phase == "CLIMB":
+        # aproximação: TAS & FF médios da subida
+        pa_mid = pressure_alt(start_alt + 0.5*max(0.0, cruise_alt-start_alt), qnh)
+        tas = vy_tas_at(pa_mid)
+        gs = gs_for(tc, tas)
+        t_min = 60.0 * d_nm / max(1e-6, gs)
+        _, ff_c = cruise_lookup(pa_mid, int(rpm_climb), temp_c)
+        burn = ff_c * (t_min/60.0)
+        alt_ref = int(round(min(cruise_alt, start_alt + roc_at(pa_mid, temp_c) * t_min)))
+    elif phase == "DESCENT":
+        pa_mid = pressure_alt(end_alt + 0.5*max(0.0, cruise_alt-end_alt), qnh)
+        tas = ias_to_tas(descent_ref_kt, pa_mid)
+        gs = gs_for(tc, tas)
+        t_min = 60.0 * d_nm / max(1e-6, gs)
+        ff_d = float(idle_ff) if idle_mode else cruise_lookup(pa_mid, int(rpm_descent), temp_c)[1]
+        burn = ff_d * (t_min/60.0)
+        alt_ref = int(round(max(end_alt, cruise_alt - rod_fpm * t_min)))
+    else:  # CRUISE
+        pa_mid = pressure_alt(cruise_alt, qnh)
+        tas = float(cruise_ref_kt)
+        gs = gs_for(tc, tas)
+        t_min = 60.0 * d_nm / max(1e-6, gs)
+        _, ff_cr = cruise_lookup(pa_mid, int(rpm_cruise), temp_c)
+        burn = ff_cr * (t_min/60.0)
+        alt_ref = int(round(cruise_alt))
+
+    ete_disp = ceil_pos_minutes(t_min, d_nm > 0)
+    eto = add_minutes(clock, ete_disp).strftime("%H:%M") if clock else ""
 
     rows.append({
-        "Leg/Marker":"TOD","To (Name)":"TOD","Cruise ALT (ref)":str(int(round(end_alt))),
-        "TC (°T)": round(float(legs[idx_tod]["TC"]),0),
-        "TH (°T)": 0, "MH (°M)": 0,
-        "TAS (kt)": round(tas_descent,0), "GS (kt)": round(gs_for(legs[idx_tod]["TC"], tas_descent),0),
-        "FF (L/h)": round(ff_descent,1),
-        "Dist (nm)": 0.0, "ETE (min)": ete, "ETO": eto,
-        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
+        "Leg/Marker": f"{seg['from']}→{seg['to']}",
+        "To (Name)": seg["to"],
+        "Cruise ALT (ref)": str(alt_ref),
+        "TC (°T)": round(tc,0),
+        "TH (°T)": round(wind_triangle(tc, tas, wind_from, wind_kt)[1],0),
+        "MH (°M)": round(apply_var(wind_triangle(tc, tas, wind_from, wind_kt)[1], var_deg, var_is_e),0),
+        "TAS (kt)": round(tas,0),
+        "GS (kt)": round(gs,0),
+        "FF (L/h)": round(burn/(t_min/60.0),1) if t_min>0 else 0.0,
+        "Dist (nm)": round(d_nm,1),
+        "ETE (min)": ete_disp,
+        "ETO": eto,
+        "Burn (L)": round(burn,1),
+        "EFOB (L)": round(max(0.0, efob - burn),1)
     })
-    seq.append({"kind":"TOD","name":"TOD","alt":int(round(end_alt)),
-                "tc":legs[idx_tod]["TC"],
-                "tas":tas_descent,"gs":0,"dist":0,"ete":ete,"eto":eto,
-                "burn":burn,"efob":efob})
 
-# Timeline:
-for i in range(N):
-    # Se o TOC ocorre neste leg, coloca o marcador ANTES do cruzeiro deste leg
-    if idx_toc is not None and i == idx_toc:
-        append_toc_marker()
-    # Cruzeiro (se houver) deste leg
-    append_leg_cruise(i)
-    # Se o TOD começa neste leg, coloca o marcador DEPOIS do cruzeiro deste leg
-    if idx_tod is not None and i == idx_tod:
-        append_tod_marker()
+    seq.append({"kind":"LEG","name":seg["to"],"alt":alt_ref,"tc":tc,"tas":tas,
+                "gs":gs,"dist":d_nm,"ete":ete_disp,"eto":eto,"burn":burn,"efob":max(0.0, efob-burn)})
+
+    total_ete += ete_disp
+    total_burn += burn
+    efob = max(0.0, efob - burn)
+    clock = add_minutes(clock, ete_disp)
 
 eta = clock
 landing = eta
@@ -589,28 +674,24 @@ if template_bytes:
         put(named, fieldset, "flt_lvl_altitude", f"{int(round(cruise_alt))}", maxlens)
 
         put(named, fieldset, "Startup", startup_str, maxlens)
-        takeoff_pdf = add_minutes(parse_hhmm(startup_str),15) if startup_str else None
-        put(named, fieldset, "Takeoff", takeoff_pdf.strftime("%H:%M") if takeoff_pdf else "", maxlens)
+        takeoff_for_pdf = add_minutes(parse_hhmm(startup_str),15) if startup_str else None
+        put(named, fieldset, "Takeoff", takeoff_for_pdf.strftime("%H:%M") if takeoff_for_pdf else "", maxlens)
         put(named, fieldset, "Landing", eta.strftime("%H:%M") if eta else "", maxlens)
         put(named, fieldset, "Shutdown", shutdown.strftime("%H:%M") if shutdown else "", maxlens)
-        put(named, fieldset, "ETD/ETA", f"{(takeoff_pdf.strftime('%H:%M') if takeoff_pdf else '')} / {(eta.strftime('%H:%M') if eta else '')}", maxlens)
+        put(named, fieldset, "ETD/ETA", f"{(takeoff_for_pdf.strftime('%H:%M') if takeoff_for_pdf else '')} / {(eta.strftime('%H:%M') if eta else '')}", maxlens)
 
-        # Campos agregados
         for key in ("LEVEL F/F","LEVEL_FF","Level_FF","Level F/F"):
             put(named, fieldset, key, f"{int(round(cruise_alt))} / {ff_cruise:.1f}", maxlens)
-        climb_fuel = ff_climb*(t_climb_total/60.0)
+        climb_fuel = ff_climb*(t_climb_total/60.0) if delta_climb>0 else 0.0
         for key in ("CLIMB FUEL","CLIMB_FUEL","Climb_Fuel"):
             put(named, fieldset, key, f"{climb_fuel:.1f}", maxlens)
         flt_time = f"{int(total_ete)//60:02d}:{int(total_ete)%60:02d}"
         for key in ("FLT TIME","FLT_TIME","Flight_Time","FL TIME"):
             put(named, fieldset, key, flt_time, maxlens)
 
-        # Nº de legs (sem TOC/TOD)
         put(named, fieldset, "Leg_Number", str(N), maxlens)
 
-        # Tabela para o PDF:
-        # linha 1 = ORIGIN (DEP + elevação)
-        # depois: cada LEG (cruise-only) na ordem; inserir TOC/TOD como linhas
+        # Tabela PDF (ORIGIN + sequência com markers e segmentos)
         pdf_items = []
         pdf_items.append({"Name": dept, "Alt": str(int(round(start_alt))),
                           "TC": "", "TH": "", "MH":"", "TAS":"", "GS":"",
@@ -631,7 +712,6 @@ if template_bytes:
                 "EFOB": f"{it.get('efob',0.0):.1f}" if it.get("efob") is not None else "",
             })
 
-        # Escrever até 11 linhas
         for i, r in enumerate(pdf_items[:11], start=1):
             s=str(i)
             put(named, fieldset, f"Name{s}", r["Name"], maxlens)
@@ -648,7 +728,6 @@ if template_bytes:
             if r["Burn"]!="": put(named, fieldset, f"PL_BO{s}", r["Burn"], maxlens)
             if r["EFOB"]!="": put(named, fieldset, f"EFOB{s}",  r["EFOB"], maxlens)
 
-        # Totais
         put(named, fieldset, "ETE_Total", f"{int(round(total_ete))}", maxlens)
         put(named, fieldset, "Dist_Total", f"{total_dist:.1f}", maxlens)
         put(named, fieldset, "PL_BO_TOTAL", f"{total_burn:.1f}", maxlens)
@@ -663,4 +742,3 @@ if template_bytes:
             st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
-
