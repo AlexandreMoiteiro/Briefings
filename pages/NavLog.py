@@ -1,10 +1,9 @@
-# app.py — NAVLOG (legs com CLB/CRZ/DSC), AFM perf e export p/ "NAVLOG - FORM.pdf"
+# app.py — NAVLOG com TOC/TOD dentro dos legs (CLB→CRZ / CRZ→DSC), AFM perf e PDF
 # Reqs: streamlit, pypdf, pytz
 
 import streamlit as st
 import datetime as dt
-import pytz
-import io, json, unicodedata, re
+import pytz, io, json, unicodedata, re, math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from math import sin, asin, radians, degrees, fmod
@@ -81,10 +80,10 @@ def wind_triangle(tc_deg,tas_kt,wind_from_deg,wind_kt):
     if tas_kt<=0: return 0.0,wrap360(tc_deg),0.0
     beta=radians(angle_diff(wind_from_deg,tc_deg))
     cross=wind_kt*sin(beta)
-    head = wind_kt*(1-(sin(beta)**2))**0.5           # cos(beta)
+    head = (wind_kt**2 - cross**2) ** 0.5              # = wind_kt*cos(beta)
     s=max(-1.0,min(1.0,cross/max(tas_kt,1e-9)))
     wca=degrees(asin(s))
-    gs = tas_kt*(1 - s*s)**0.5 - head                # tas*cos(wca) - headwind
+    gs = tas_kt*(1 - s*s)**0.5 - head                  # tas*cos(wca) - headwind
     th=wrap360(tc_deg+wca)
     return wca,th,max(0.0,gs)
 
@@ -98,7 +97,6 @@ def parse_hhmm(s:str):
         try: return dt.datetime.strptime(s,fmt).time()
         except: pass
     return None
-
 def add_minutes(t:dt.time,m:int):
     if not t: return None
     today=dt.date.today(); base=dt.datetime.combine(today,t)
@@ -110,7 +108,7 @@ def interp1(x,x0,x1,y0,y1):
     if x1==x0: return y0
     t=(x-x0)/(x1-x0); return y0+t*(y1-y0)
 
-# EN-ROUTE ROC @ 650 kg (AFM WH5-11)  + fator 0.90
+# EN-ROUTE ROC (AFM WH5-11)  + fator 0.90
 ROC_ENROUTE = {
     0:{-25:981,0:835,25:704,50:586},  2000:{-25:870,0:726,25:597,50:481},
     4000:{-25:759,0:617,25:491,50:377},6000:{-25:648,0:509,25:385,50:273},
@@ -118,11 +116,8 @@ ROC_ENROUTE = {
     12000:{-25:319,0:187,25:69,50:-37},14000:{-25:210,0:80,25:-35,50:-139},
 }
 ROC_FACTOR = 0.90
-
-# Vy (KIAS) @ 650 kg (en-route)
 VY_ENROUTE = {0:67,2000:67,4000:67,6000:67,8000:67,10000:67,12000:67,14000:67}
 
-# Cruise perf (PA → rpm → (KTAS, FF L/h)) (AFM WH5-12..13)
 CRUISE={
     0:{1800:(82,15.3),1900:(89,17.0),2000:(95,18.7),2100:(101,20.7),2250:(110,24.6),2388:(118,26.9)},
     2000:{1800:(82,15.3),1900:(88,16.6),2000:(94,17.5),2100:(100,19.9),2250:(109,23.5)},
@@ -149,15 +144,11 @@ def cruise_lookup(pa_ft: float, rpm: int, oat_c: Optional[float]) -> Tuple[float
         return (tas_lo + t*(tas_hi-tas_lo), ff_lo + t*(ff_hi-ff_lo))
     tas0,ff0=val(p0); tas1,ff1=val(p1)
     tas=interp1(pa_c,p0,p1,tas0,tas1); ff=interp1(pa_c,p0,p1,ff0,ff1)
-    # Correções OAT (AFM)
+    # Correções AFM por OAT
     if oat_c is not None:
         dev=oat_c - isa_temp(pa_c)
-        if dev>0:
-            tas *= 1.0 - 0.02*(dev/15.0)
-            ff  *= 1.0 - 0.025*(dev/15.0)
-        elif dev<0:
-            tas *= 1.0 + 0.01*((-dev)/15.0)
-            ff  *= 1.0 + 0.03*((-dev)/15.0)
+        if dev>0: tas*=1-0.02*(dev/15); ff*=1-0.025*(dev/15)
+        elif dev<0: tas*=1+0.01*((-dev)/15); ff*=1+0.03*((-dev)/15)
     return max(0.0,tas), max(0.0,ff)
 
 def roc_interp_enroute(pa, temp_c):
@@ -170,15 +161,14 @@ def roc_interp_enroute(pa, temp_c):
     v00, v01 = ROC_ENROUTE[p0][t0], ROC_ENROUTE[p0][t1]
     v10, v11 = ROC_ENROUTE[p1][t0], ROC_ENROUTE[p1][t1]
     v0 = interp1(t, t0, t1, v00, v01); v1 = interp1(t, t0, t1, v10, v11)
-    return max(1.0, interp1(pa_c, p0, p1, v0, v1) * ROC_FACTOR)  # aplica 0.90
+    return max(1.0, interp1(pa_c, p0, p1, v0, v1) * ROC_FACTOR)
 
 def vy_interp_enroute(pa):
-    table=VY_ENROUTE; pas=sorted(table.keys())
-    pa_c=clamp(pa,pas[0],pas[-1])
+    pas=sorted(VY_ENROUTE.keys()); pa_c=clamp(pa,pas[0],pas[-1])
     p0=max([p for p in pas if p<=pa_c]); p1=min([p for p in pas if p>=pa_c])
-    return interp1(pa_c, p0, p1, table[p0], table[p1])
+    return interp1(pa_c, p0, p1, VY_ENROUTE[p0], VY_ENROUTE[p1])
 
-# =============== Aerodromes ===============
+# =============== Aerodromes (elev/freq para PDF) ===============
 AEROS={
  "LPSO":{"elev":390,"freq":"119.805"},
  "LPEV":{"elev":807,"freq":"122.705"},
@@ -195,7 +185,7 @@ st.title("Navigation Plan & Inflight Log — Tecnam P2008")
 
 DEFAULT_STUDENT="AMOIT"; DEFAULT_AIRCRAFT="P208"; DEFAULT_CALLSIGN="RVP"
 REGS=["CS-ECC","CS-ECD","CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW"]
-PDF_TEMPLATE_PATHS=["NAVLOG - FORM.pdf"]  # PDF ao lado do app.py
+PDF_TEMPLATE_PATHS=["NAVLOG - FORM.pdf"]
 
 # Header
 c1,c2,c3=st.columns(3)
@@ -211,16 +201,15 @@ with c3:
     dept=st.selectbox("Departure",list(AEROS.keys()),index=0)
     arr =st.selectbox("Arrival", list(AEROS.keys()),index=1)
     altn=st.selectbox("Alternate",list(AEROS.keys()),index=2)
-
 startup_str=st.text_input("Startup (HH:MM)","")
 
-# Atmosfera & navegação
+# Atmosfera / navegação
 c4,c5,c6=st.columns(3)
 with c4:
     qnh=st.number_input("QNH (hPa)",900,1050,1013,step=1)
     cruise_alt=st.number_input("Cruise Altitude (ft)",0,14000,3000,step=100)
     initial_alt=st.number_input("Altitude inicial (ft AMSL)",0,20000,0,step=50,
-                                help="Se 0, usa a elevação do DEP (ex.: 390 ft LPSO).")
+                                help="0 = usa a elevação do DEP.")
 with c5:
     temp_c=st.number_input("OAT (°C)",-40,50,15,step=1)
     var_deg=st.number_input("Mag Variation (°)",0,30,1,step=1)
@@ -230,7 +219,7 @@ with c6:
     wind_kt=st.number_input("Wind (kt)",0,120,0,step=1)
     target_arr_alt=st.number_input("Altitude alvo na chegada (ft AMSL)",0,20000,0,step=50)
 
-# Performance / consumos AFM
+# Perf / consumos
 c7,c8,c9=st.columns(3)
 with c7:
     rpm_climb  = st.number_input("Climb RPM (AFM)",1800,2388,2250,step=10)
@@ -260,7 +249,6 @@ c_ra, c_rb = st.columns([1,1])
 with c_ra:
     apply_route = st.button("Aplicar rota")
 with c_rb:
-    # JSON apenas com route_points e legs (TC/Dist)
     def snapshot_route() -> dict:
         return {
             "route_points": st.session_state.get("points", [dept, arr]),
@@ -302,7 +290,7 @@ points = st.session_state.points
 if points: points[0]=dept
 if len(points)>=2: points[-1]=arr
 
-# LEGS deduzidos dos points
+# LEGS
 def blank_leg(): return {"From":"","To":"","TC":0.0,"Dist":0.0}
 if "legs" not in st.session_state: st.session_state.legs = []
 target_legs = max(0, len(points)-1)
@@ -328,65 +316,58 @@ for i,row in enumerate(legs_view):
 
 N = len(legs)
 
-# ===== Cálculos (per-leg com CLB/CRZ/DSC mistos) =====
+# ===== Cálculo (TOC/TOD DENTRO dos legs) =====
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
 
 dep_elev = aero_elev(dept); arr_elev = aero_elev(arr)
 start_alt = float(initial_alt) if initial_alt>0 else float(dep_elev)
 end_alt   = float(target_arr_alt) if target_arr_alt>0 else float(arr_elev)
+
 pa_start  = pressure_alt(start_alt, qnh)
 pa_cruise = pressure_alt(cruise_alt, qnh)
-pa_arr    = pressure_alt(end_alt, qnh)
+vy_kt = vy_interp_enroute(pa_start)
+tas_climb, tas_cruise, tas_descent = vy_kt, float(cruise_ref_kt), float(descent_ref_kt)
 
-vy_kt = vy_interp_enroute(pa_start)          # Vy (AFM en-route)
+roc = roc_interp_enroute(pa_start, temp_c)                 # ft/min
+t_climb_total = max(0.0, (cruise_alt - start_alt)) / max(roc,1e-6)
+t_desc_total  = max(0.0, (cruise_alt - end_alt))  / max(rod_fpm,1e-6)
 
-tas_climb   = vy_kt
-tas_cruise  = float(cruise_ref_kt)
-tas_descent = float(descent_ref_kt)
-
-roc = roc_interp_enroute(pa_start, temp_c)   # ft/min
-delta_climb = max(0.0, cruise_alt - start_alt)
-climb_min_total = delta_climb / max(roc,1e-6)
-
-desc_min_total = max(0.0, cruise_alt - end_alt) / max(rod_fpm,1e-6)
-
-# FF (AFM) por fase
-pa_mid_climb = start_alt + 0.5*delta_climb
-pa_mid_desc  = end_alt   + 0.5*(cruise_alt - end_alt)
+# FFs (AFM) p/ cada fase
+pa_mid_climb = start_alt + 0.5*max(0.0, cruise_alt - start_alt)
+pa_mid_desc  = end_alt   + 0.5*max(0.0, cruise_alt - end_alt)
 _, ff_climb  = cruise_lookup(pa_mid_climb, int(rpm_climb),  temp_c)
 _, ff_cruise = cruise_lookup(pa_cruise,   int(rpm_cruise),  temp_c)
 ff_descent   = float(idle_ff) if idle_mode else cruise_lookup(pa_mid_desc, int(rpm_descent), temp_c)[1]
-
-# Distribuir distâncias de CLIMB/DESC pelos legs e calcular tempos por leg com o TC de cada leg
-climb_remaining_time = climb_min_total
-desc_remaining_time  = desc_min_total
 
 def gs_for(tc, tas): return wind_triangle(float(tc), float(tas), wind_from, wind_kt)[2]
 
 dist = [float(l["Dist"] or 0.0) for l in legs]
 t_climb = [0.0]*N; t_cruise=[0.0]*N; t_desc=[0.0]*N
 
-# CLIMB: enquanto houver tempo de subida, “come” distância dos primeiros legs
+# CLIMB: só nos primeiros legs até TOC (dentro do leg onde calhar)
+rem_t = t_climb_total
 for i in range(N):
-    if climb_remaining_time <= 1e-9: break
+    if rem_t <= 1e-9: break
     gs = gs_for(legs[i]["TC"], tas_climb)
-    d_possible = gs * (climb_remaining_time/60.0)
-    d_used = min(dist[i], d_possible)
-    t_used = 60.0 * d_used / max(gs,1e-6)
-    t_climb[i] += t_used
-    climb_remaining_time -= t_used
+    d_leg = dist[i]
+    # tempo para percorrer TODO o leg em CLB
+    t_full = 60.0 * d_leg / max(gs,1e-6)
+    use = min(rem_t, t_full)
+    t_climb[i] = use
+    rem_t -= use
 
-# DESCENT: do fim para o início
+# DESCENT: só nos últimos legs desde TOD (dentro do leg onde calhar)
+rem_t = t_desc_total
 for j in range(N-1,-1,-1):
-    if desc_remaining_time <= 1e-9: break
+    if rem_t <= 1e-9: break
     gs = gs_for(legs[j]["TC"], tas_descent)
-    d_possible = gs * (desc_remaining_time/60.0)
-    d_used = min(dist[j], d_possible)
-    t_used = 60.0 * d_used / max(gs,1e-6)
-    t_desc[j] += t_used
-    desc_remaining_time -= t_used
+    d_leg = dist[j]
+    t_full = 60.0 * d_leg / max(gs,1e-6)
+    use = min(rem_t, t_full)
+    t_desc[j] = use
+    rem_t -= use
 
-# CRUISE: o que sobrar em cada leg
+# CRUISE = restante de cada leg após subtração de CLB/DSC naquele leg
 for i in range(N):
     d_cl = gs_for(legs[i]["TC"], tas_climb)   * (t_climb[i]/60.0)
     d_ds = gs_for(legs[i]["TC"], tas_descent) * (t_desc[i]/60.0)
@@ -394,7 +375,7 @@ for i in range(N):
     gs_cr = gs_for(legs[i]["TC"], tas_cruise)
     t_cruise[i] = 60.0 * d_cr / max(gs_cr,1e-6)
 
-# Tabela final (cada leg já com CLB/CRZ/DSC agregados)
+# ===== Construção da tabela =====
 startup = parse_hhmm(startup_str)
 takeoff = add_minutes(startup,15) if startup else None
 clock = takeoff
@@ -403,67 +384,64 @@ total_dist = sum(dist)
 total_ete = total_burn = 0.0
 efob = float(start_fuel)
 
+def ceil_pos_minutes(x, has_dist: bool):
+    if not has_dist: return int(round(x))
+    return max(1, int(math.ceil(x - 1e-9))) if x > 0 else 0
+
 def hhmm_from_minutes(m):
     h = int(m)//60; mm = int(m)%60
     return f"{h:01d}h{mm:02d}"
 
 rows=[]
 for i,L in enumerate(legs):
-    tc=float(L["TC"])
-    th = wind_triangle(tc, tas_cruise, wind_from, wind_kt)[1]   # rumo verdadeiro pelo cruise
+    tc=float(L["TC"]); has_dist = dist[i] > 0.0
+    th = wind_triangle(tc, tas_cruise, wind_from, wind_kt)[1]
     mh = apply_var(th, var_deg, var_is_e)
 
-    ete_min = t_climb[i] + t_cruise[i] + t_desc[i]
+    ete_min_raw = t_climb[i] + t_cruise[i] + t_desc[i]
+    ete_min = ceil_pos_minutes(ete_min_raw, has_dist)
+
     burn = ff_climb*(t_climb[i]/60.0) + ff_cruise*(t_cruise[i]/60.0) + ff_descent*(t_desc[i]/60.0)
 
-    # “fase dominante” para exibir ALT/TAS/GS/FF
+    # fase dominante para exibir ALT/TAS/GS/FF
     phase = "CRZ"; alt_show = cruise_alt; tas_show = tas_cruise; gs_show = gs_for(tc, tas_cruise); ff_show = ff_cruise
     if t_climb[i] > max(t_cruise[i], t_desc[i]): phase="CLB"; alt_show = start_alt; tas_show=tas_climb; gs_show=gs_for(tc,tas_climb); ff_show=ff_climb
     if t_desc[i]  > max(t_cruise[i], t_climb[i]): phase="DSC"; alt_show = end_alt;   tas_show=tas_descent; gs_show=gs_for(tc,tas_descent); ff_show=ff_descent
 
-    ff_avg = (60.0*burn/max(ete_min,1e-6)) if ete_min>0 else ff_show
+    ff_avg = (60.0*burn/max(ete_min_raw,1e-6)) if ete_min_raw>0 else ff_show
 
-    # ETO acumulado ao fim do leg
     eto_str=""
     if clock:
-        clock = add_minutes(clock, int(round(ete_min)))
+        clock = add_minutes(clock, ete_min)
         eto_str = clock.strftime("%H:%M")
 
     total_ete += ete_min; total_burn += burn; efob = max(0.0, efob - burn)
 
-    comp = []
-    if t_climb[i]>0.01: comp.append(f"CLB {int(round(t_climb[i]))}m")
+    comp=[]
+    if t_climb[i]>0.01:  comp.append(f"CLB {int(round(t_climb[i]))}m")
     if t_cruise[i]>0.01: comp.append(f"CRZ {int(round(t_cruise[i]))}m")
-    if t_desc[i]>0.01: comp.append(f"DSC {int(round(t_desc[i]))}m")
+    if t_desc[i]>0.01:   comp.append(f"DSC {int(round(t_desc[i]))}m")
 
     rows.append({
         "Leg/Marker": f"{L['From']}→{L['To']}",
-        "To (Name)": L["From"],                       # para o PDF, Name = ponto FROM (1º será LPSO)
+        "Name (PDF)": L["From"],                                 # Name do PDF = ponto FROM
         "Alt/Phase": f"{int(round(alt_show))} / {phase}",
-        "TC (°T)": round(tc,0),
-        "TH (°T)": round(th,0),
-        "MH (°M)": round(mh,0),
-        "TAS (kt)": round(tas_show,0),
-        "GS (kt)":  round(gs_show,0),
-        "FF (L/h)": round(ff_avg,1),
-        "Dist (nm)": round(dist[i],1),
-        "ETE (min)": int(round(ete_min)),
-        "ETO": eto_str,
-        "Burn (L)": round(burn,1),
-        "EFOB (L)": round(efob,1),
+        "TC (°T)": round(tc,0), "TH (°T)": round(th,0), "MH (°M)": round(mh,0),
+        "TAS (kt)": round(tas_show,0), "GS (kt)": round(gs_show,0),
+        "FF (L/h)": round(ff_avg,1), "Dist (nm)": round(dist[i],1),
+        "ETE (min)": ete_min, "ETO": eto_str,
+        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1),
         "Comp": " + ".join(comp),
     })
 
-eta = clock
-landing = eta
-shutdown = add_minutes(eta,5) if eta else None
+eta = clock; landing = eta; shutdown = add_minutes(eta,5) if eta else None
 flt_time_hhmm = hhmm_from_minutes(total_ete)
 
-# ===== Tabela final =====
-st.markdown("### Flight plan (legs com CLB/CRZ/DSC agregados)")
+# ===== Tabela =====
+st.markdown("### Flight plan (TOC/TOD dentro do leg)")
 cfg={
     "Leg/Marker": st.column_config.TextColumn("Leg"),
-    "To (Name)": st.column_config.TextColumn("Name (PDF) — FROM do leg", disabled=True),
+    "Name (PDF)": st.column_config.TextColumn("Name (FROM do leg)", disabled=True),
     "Alt/Phase": st.column_config.TextColumn("Altitude / Fase"),
     "TC (°T)": st.column_config.NumberColumn("TC (°T)", disabled=True),
     "TH (°T)": st.column_config.NumberColumn("TH (°T)", disabled=True),
@@ -476,7 +454,7 @@ cfg={
     "ETO":      st.column_config.TextColumn("ETO", disabled=True),
     "Burn (L)": st.column_config.NumberColumn("Burn (L)", disabled=True),
     "EFOB (L)": st.column_config.NumberColumn("EFOB (L)", disabled=True),
-    "Comp":     st.column_config.TextColumn("Composição (tempo por fase)", disabled=True),
+    "Comp":     st.column_config.TextColumn("Composição (CLB/CRZ/DSC)", disabled=True),
 }
 st.data_editor(rows, hide_index=True, use_container_width=True, num_rows="fixed", column_config=cfg, key="fp_table")
 
@@ -519,7 +497,6 @@ if template_bytes:
         put(named, fieldset, "Arrival_comm", aero_freq(arr), maxlens)
         put(named, fieldset, "Enroute_comm", "123.755", maxlens)
 
-        # Condições / tempos
         isa_dev = round(temp_c - isa_temp(pressure_alt(aero_elev(dept), qnh)))
         put(named, fieldset, "QNH", f"{int(round(qnh))}", maxlens)
         put(named, fieldset, "temp_isa_dev", f"{int(round(temp_c))} / {isa_dev}", maxlens)
@@ -535,27 +512,24 @@ if template_bytes:
         put(named, fieldset, "ETD/ETA", f"{(takeoff.strftime('%H:%M') if takeoff else '')} / {(eta.strftime('%H:%M') if eta else '')}", maxlens)
 
         # Campos agregados
-        # LEVEL/F-F  (texto "cruise_alt / ff_cruise")
         for key in ("LEVEL F/F","LEVEL_FF","Level_FF","Level F/F"):
             put(named, fieldset, key, f"{int(round(cruise_alt))} / {ff_cruise:.1f}", maxlens)
-        # CLIMB FUEL
-        climb_fuel = ff_climb*(climb_min_total/60.0)
+        climb_fuel = ff_climb*(t_climb_total/60.0)
         for key in ("CLIMB FUEL","CLIMB_FUEL","Climb_Fuel"):
             put(named, fieldset, key, f"{climb_fuel:.1f}", maxlens)
-        # FLT TIME
         for key in ("FLT TIME","FLT_TIME","Flight_Time","FL TIME"):
-            put(named, fieldset, key, flt_time_hhmm.replace("h",":"), maxlens)
+            put(named, fieldset, key, hhmm_from_minutes(total_ete).replace("h",":"), maxlens)
 
-        # Nº legs
         put(named, fieldset, "Leg_Number", str(N), maxlens)
 
-        # Linhas (Name = FROM do leg; Alt = alt/phase dominante)
+        # Linhas (Name = FROM; Alt = 1º leg usa start_alt; último usa end_alt; restantes cruise)
         for i, r in enumerate(rows[:11], start=1):
             s=str(i)
-            put(named, fieldset, f"Name{s}", r["To (Name)"], maxlens)   # FROM
-            # meter só o número da altitude (sem /fase)
-            alt_num = r["Alt/Phase"].split("/")[0].strip()
-            put(named, fieldset, f"Alt{s}",  alt_num, maxlens)
+            put(named, fieldset, f"Name{s}", r["Name (PDF)"], maxlens)
+            if i == 1:        alt_num = int(round(start_alt))
+            elif i == N:      alt_num = int(round(end_alt))
+            else:             alt_num = int(round(cruise_alt))
+            put(named, fieldset, f"Alt{s}",  f"{alt_num}", maxlens)
             put(named, fieldset, f"FREQ{s}", "", maxlens)
             put(named, fieldset, f"TCRS{s}", f"{int(round(float(r['TC (°T)'])))}", maxlens)
             put(named, fieldset, f"THDG{s}", f"{int(round(float(r['TH (°T)'])))}", maxlens)
@@ -568,7 +542,6 @@ if template_bytes:
             put(named, fieldset, f"PL_BO{s}", f"{r['Burn (L)']}", maxlens)
             put(named, fieldset, f"EFOB{s}",  f"{r['EFOB (L)']}", maxlens)
 
-        # Totais
         put(named, fieldset, "ETE_Total", f"{int(round(total_ete))}", maxlens)
         put(named, fieldset, "Dist_Total", f"{total_dist:.1f}", maxlens)
         put(named, fieldset, "PL_BO_TOTAL", f"{total_burn:.1f}", maxlens)
@@ -583,4 +556,5 @@ if template_bytes:
             st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
+
 
