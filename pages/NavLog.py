@@ -210,8 +210,6 @@ c4,c5,c6=st.columns(3)
 with c4:
     qnh=st.number_input("QNH (hPa)",900,1050,1013,step=1)
     cruise_alt=st.number_input("Cruise Altitude (ft)",0,14000,3000,step=100)
-    initial_alt=st.number_input("Altitude inicial (ft AMSL)",0,20000,0,step=50,
-                                help="0 = usa a elevação do DEP.")
 with c5:
     temp_c=st.number_input("OAT (°C)",-40,50,15,step=1)
     var_deg=st.number_input("Mag Variation (°)",0,30,1,step=1)
@@ -219,7 +217,6 @@ with c5:
 with c6:
     wind_from=st.number_input("Wind FROM (°TRUE)",0,360,0,step=1)
     wind_kt=st.number_input("Wind (kt)",0,120,0,step=1)
-    target_arr_alt=st.number_input("Altitude alvo na chegada (ft AMSL)",0,20000,0,step=50)
 
 # Perf / consumos
 c7,c8,c9=st.columns(3)
@@ -322,8 +319,8 @@ N = len(legs)
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
 
 dep_elev = aero_elev(dept); arr_elev = aero_elev(arr)
-start_alt = float(initial_alt) if initial_alt>0 else float(dep_elev)
-end_alt   = float(target_arr_alt) if target_arr_alt>0 else float(arr_elev)
+start_alt = float(dep_elev)              # <- SEM override; usa ELEVAÇÃO do DEP
+end_alt   = float(arr_elev)              # <- SEM override; usa ELEVAÇÃO do ARR
 
 pa_start  = pressure_alt(start_alt, qnh)
 pa_cruise = pressure_alt(cruise_alt, qnh)
@@ -380,7 +377,7 @@ for j in range(N-1, -1, -1):
         idx_tod = j
         break
 
-# ===== APP: linhas por SEGMENTO (ex.: LPSO→TOC / TOC→VACOR) =====
+# ===== APP: linhas por SEGMENTO =====
 startup = parse_hhmm(startup_str)
 takeoff = add_minutes(startup,15) if startup else None
 clock = takeoff
@@ -396,12 +393,11 @@ alt_cursor = float(start_alt)
 total_dist = sum(dist); total_ete = total_burn = 0.0; efob=float(start_fuel)
 
 def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:float, ff_lph:float):
-    """Acrescenta um segmento de um leg; atualiza relógio, ALT, totais e constrói ponto PDF."""
     global clock, total_ete, total_burn, efob, alt_cursor
     if d_nm <= 1e-9: return
 
     tc = float(legs[i_leg]["TC"])
-    wca, th, gs = wind_triangle(tc, tas, wind_from, wind_kt)
+    _, th, gs = wind_triangle(tc, tas, wind_from, wind_kt)
 
     ete_raw = 60.0 * d_nm / max(gs,1e-6)  # minutos reais
     ete = ceil_pos_minutes(ete_raw)
@@ -409,9 +405,9 @@ def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:fl
 
     alt_start = alt_cursor
     if phase == "CLIMB":
-        alt_end = min(cruise_alt, alt_start + roc * ete_raw)      # <<< FIX: sem /60
+        alt_end = min(cruise_alt, alt_start + roc * ete_raw)
     elif phase == "DESCENT":
-        alt_end = max(end_alt,   alt_start - rod_fpm * ete_raw)    # <<< FIX: sem /60
+        alt_end = max(end_alt,   alt_start - rod_fpm * ete_raw)
     else:
         alt_end = alt_start
 
@@ -462,12 +458,12 @@ for i in range(N):
 
     if d_cl > 0:
         to_name = "TOC" if (idx_toc == i and d_cl < d_total) else leg_to
-        add_segment("CLIMB", cur_from, to_name, i, d_cl, tas_climb, ff_climb)
+        add_segment("CLIMB", cur_from, to_name, i, d_cl, vy_kt, ff_climb)
         cur_from = to_name
 
     if d_cr > 0:
         to_name = "TOD" if (idx_tod == i and d_ds > 0) else leg_to
-        add_segment("CRUISE", cur_from, to_name, i, d_cr, tas_cruise, ff_cruise)
+        add_segment("CRUISE", cur_from, to_name, i, d_cr, float(cruise_ref_kt), ff_cruise)
         cur_from = to_name
 
     if d_ds > 0:
@@ -566,12 +562,16 @@ if template_bytes:
         put(named, fieldset, "Shutdown", (add_minutes(parse_hhmm(last_eto),5).strftime("%H:%M") if last_eto else ""), maxlens)
         put(named, fieldset, "ETD/ETA", f"{(add_minutes(parse_hhmm(startup_str),15).strftime('%H:%M') if startup_str else '')} / {last_eto}", maxlens)
 
+        # Totais e outros
         tot_min = sum(int(it["ETE"] or "0") for it in pdf_items)
         tot_nm  = sum(float(it["Dist"] or 0.0) for it in pdf_items)
         tot_bo  = sum(float(it["Burn"] or 0.0) for it in pdf_items)
         put(named, fieldset, "FLT TIME", f"{tot_min//60:02d}:{tot_min%60:02d}", maxlens)
+
+        # LEVEL F/F -> agora **só altitude**
         for key in ("LEVEL F/F","LEVEL_FF","Level_FF","Level F/F"):
-            put(named, fieldset, key, f"{int(round(cruise_alt))} / {ff_cruise:.1f}", maxlens)
+            put(named, fieldset, key, f"{int(round(cruise_alt))}", maxlens)
+
         put(named, fieldset, "CLIMB FUEL", f"{ff_climb*(t_climb_total/60.0):.1f}", maxlens)
         put(named, fieldset, "ETE_Total", f"{tot_min}", maxlens)
         put(named, fieldset, "Dist_Total", f"{tot_nm:.1f}", maxlens)
@@ -579,13 +579,14 @@ if template_bytes:
         put(named, fieldset, "EFOB_TOTAL", f"{max(0.0, float(start_fuel)-tot_bo):.1f}", maxlens)
         put(named, fieldset, "Leg_Number", str(N), maxlens)
 
+        # Linhas (até 11)
         for i, r in enumerate(pdf_items[:11], start=1):
             s=str(i)
             put(named, fieldset, f"Name{s}", r["Name"], maxlens)
             put(named, fieldset, f"Alt{s}",  r["Alt"], maxlens)
             put(named, fieldset, f"FREQ{s}", "", maxlens)
             if r["TC"]!="":   put(named, fieldset, f"TCRS{s}", r["TC"], maxlens)
-            if r["TH"]!="":   put(named, fieldset, f"THDG{s}", r["TH"], maxlens)   # TH agora sai no PDF
+            if r["TH"]!="":   put(named, fieldset, f"THDG{s}", r["TH"], maxlens)
             if r["MH"]!="":   put(named, fieldset, f"MHDG{s}", r["MH"], maxlens)
             if r["TAS"]!="":  put(named, fieldset, f"TAS{s}",  r["TAS"], maxlens)
             if r["GS"]!="":   put(named, fieldset, f"GS{s}",   r["GS"], maxlens)
@@ -603,5 +604,6 @@ if template_bytes:
             st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
+
 
 
