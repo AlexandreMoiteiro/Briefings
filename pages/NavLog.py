@@ -421,41 +421,91 @@ seq.append({"kind":"ORIGIN","name":dept,"alt":int(round(start_alt)),
 total_dist = sum(dist); total_ete = total_burn = 0.0; efob=float(start_fuel)
 
 
-def append_ui_leg(i):
-    nonlocal_vars = {}
-    global clock, total_ete, total_burn, efob
-    tc=float(legs[i]["TC"]); has_dist = dist[i] > 0.0
-    # tempo só de CRUISE
-    ete_raw = t_cruise_leg[i]
+def append_leg(i, leg_start_clock):
+    global total_ete, total_burn, efob
+    tc = float(legs[i]["TC"]); has_dist = dist[i] > 0.0
+
+    # tempos por segmento dentro do leg
+    t_cl = float(t_climb_leg[i])
+    t_cr = float(t_cruise_leg[i])
+    t_ds = float(t_desc_leg[i])
+    ete_raw = t_cl + t_cr + t_ds
     ete = ceil_pos_minutes(ete_raw, has_dist)
+
+    # heading/vento para exibição (mantemos referência de cruzeiro)
     th = wind_triangle(tc, tas_cruise, wind_from, wind_kt)[1]
     mh = apply_var(th, var_deg, var_is_e)
-    gs = gs_for(tc, tas_cruise)
-    burn = ff_cruise*(t_cruise_leg[i]/60.0)
 
-    eto=""
-    if clock:
-        clock = add_minutes(clock, ete)
-        eto = clock.strftime("%H:%M")
+    # GS média do leg (ponderada pelo tempo). Se 0, usa GS de cruzeiro como fallback
+    d_cl = gs_for(tc, tas_climb)   * (t_cl/60.0)
+    d_cr = gs_for(tc, tas_cruise)  * (t_cr/60.0)
+    d_ds = gs_for(tc, tas_descent) * (t_ds/60.0)
+    gs_avg = (dist[i] / (ete_raw/60.0)) if ete_raw > 0 else gs_for(tc, tas_cruise)
 
-    total_ete += ete; total_burn += burn; efob=max(0.0, efob-burn)
+    # consumo por segmento
+    burn = ff_climb*(t_cl/60.0) + ff_cruise*(t_cr/60.0) + ff_descent*(t_ds/60.0)
+
+    eto = ""
+    if leg_start_clock:
+        eto = add_minutes(leg_start_clock, ete).strftime("%H:%M")
+
+    total_ete += ete
+    total_burn += burn
+    efob = max(0.0, efob - burn)
 
     rows.append({
         "Leg/Marker": f"{legs[i]['From']}→{legs[i]['To']}",
         "To (Name)": legs[i]['To'],
         "Cruise ALT (ref)": str(int(round(cruise_alt))),
         "TC (°T)": round(tc,0), "TH (°T)": round(th,0), "MH (°M)": round(mh,0),
-        "TAS (kt)": round(tas_cruise,0), "GS (kt)": round(gs,0),
+        "TAS (kt)": round(tas_cruise,0), "GS (kt)": round(gs_avg,0),
         "FF (L/h)": round(ff_cruise,1),
         "Dist (nm)": round(dist[i],1), "ETE (min)": ete, "ETO": eto,
         "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
     })
+
     seq.append({"kind":"LEG","name":legs[i]['To'],"alt":int(round(cruise_alt)),
-                "tc":tc,"tas":tas_cruise,"gs":gs,"dist":dist[i],"ete":ete,"eto":eto,
+                "tc":tc,"tas":tas_cruise,"gs":gs_avg,"dist":dist[i],"ete":ete,"eto":eto,
                 "burn":burn,"efob":efob})
 
+    # devolve o novo clock (fim do leg)
+    return add_minutes(leg_start_clock, ete)
+
+
+def append_toc_marker(i, eto_time):
+    # Marcador sem consumo nem incremento de totais; ETE=0
+    rows.append({
+        "Leg/Marker":"TOC","To (Name)":"TOC","Cruise ALT (ref)":str(int(round(cruise_alt))),
+        "TC (°T)": round(float(legs[i]["TC"]),0), "TH (°T)": 0, "MH (°M)": 0,
+        "TAS (kt)": round(tas_climb,0), "GS (kt)": round(gs_for(legs[i]["TC"], tas_climb),0),
+        "FF (L/h)": round(ff_climb,1),
+        "Dist (nm)": 0.0, "ETE (min)": 0, "ETO": eto_time.strftime("%H:%M") if eto_time else "",
+        "Burn (L)": 0.0, "EFOB (L)": round(efob,1)
+    })
+    seq.append({"kind":"TOC","name":"TOC","alt":int(round(cruise_alt)),
+                "tc":legs[i]["TC"],"tas":tas_climb,"gs":0,"dist":0,
+                "ete":0,"eto":(eto_time.strftime("%H:%M") if eto_time else ""),
+                "burn":0.0,"efob":efob})
+
+
+def append_tod_marker(i, eto_time):
+    rows.append({
+        "Leg/Marker":"TOD","To (Name)":"TOD","Cruise ALT (ref)":str(int(round(end_alt))),
+        "TC (°T)": round(float(legs[i]["TC"]),0),
+        "TH (°T)": 0, "MH (°M)": 0,
+        "TAS (kt)": round(tas_descent,0), "GS (kt)": round(gs_for(legs[i]["TC"], tas_descent),0),
+        "FF (L/h)": round(ff_descent,1),
+        "Dist (nm)": 0.0, "ETE (min)": 0, "ETO": eto_time.strftime("%H:%M") if eto_time else "",
+        "Burn (L)": 0.0, "EFOB (L)": round(efob,1)
+    })
+    seq.append({"kind":"TOD","name":"TOD","alt":int(round(end_alt)),
+                "tc":legs[i]["TC"],
+                "tas":tas_descent,"gs":0,"dist":0,"ete":0,
+                "eto":(eto_time.strftime("%H:%M") if eto_time else ""),
+                "burn":0.0,"efob":efob})
 
 def append_toc(i):
+    pass  # legacy placeholder; não usado mais
     global clock, total_ete, total_burn, efob
     ete = int(round(t_climb_total))
     burn = ff_climb*(t_climb_total/60.0)
@@ -502,13 +552,23 @@ def append_tod(i):
                 "tas":tas_descent,"gs":0,"dist":0,"ete":ete,"eto":eto,
                 "burn":burn,"efob":efob})
 
-# Montar sequência e linhas UI (ordem cronológica correta)
+# Montar sequência e linhas UI (com ETE por leg completo e marcadores com ETE=0)
 for i in range(N):
-    if idx_toc is not None and i == idx_toc:
-        append_toc(i)      # climb termina ANTES do cruise deste leg
-    append_ui_leg(i)       # cruise deste leg
-    if idx_tod is not None and i == idx_tod:
-        append_tod(i)      # início da descida APÓS o cruise remanescente do leg
+    leg_start_clock = clock
+
+    # Se o TOC cai neste leg, o ETO do TOC é o início do leg + tempo de climb dentro do leg
+    if idx_toc is not None and i == idx_toc and t_climb_leg[i] > 0:
+        toc_time = add_minutes(leg_start_clock, ceil_pos_minutes(t_climb_leg[i], True))
+        append_toc_marker(i, toc_time)
+
+    # Linha do leg (tempo total do leg)
+    clock = append_leg(i, leg_start_clock)
+
+    # Se o TOD cai neste leg, o ETO do TOD é o início do leg + (climb + cruise) deste leg
+    if idx_tod is not None and i == idx_tod and (t_desc_leg[i] > 0):
+        tod_lead = t_climb_leg[i] + t_cruise_leg[i]
+        tod_time = add_minutes(leg_start_clock, ceil_pos_minutes(tod_lead, True))
+        append_tod_marker(i, tod_time)
 
 eta = clock
 landing = eta
@@ -655,4 +715,5 @@ if template_bytes:
             st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
+
 
