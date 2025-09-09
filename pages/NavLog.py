@@ -1,4 +1,4 @@
-# app.py — NAVLOG com cortes (LPSO→TOC, TOC→VACOR, …) na APP e TH no PDF
+# app.py — NAVLOG com cortes dentro do leg (TOC/TOD) e PDF alinhado com a APP
 # Reqs: streamlit, pypdf, pytz
 
 import streamlit as st
@@ -162,7 +162,7 @@ def roc_interp_enroute(pa, temp_c):
     else: t0,t1=25,50
     v00, v01 = ROC_ENROUTE[p0][t0], ROC_ENROUTE[p0][t1]
     v10, v11 = ROC_ENROUTE[p1][t0], ROC_ENROUTE[p1][t1]
-    v0 = interp1(t, t0, t1, v00, v01); v1 = interp1(t, t0, t1, v10, v11)
+    v0 = interp1(t, t0, t1, v00, v01); v1 = interp1(pa_c, p0, p1, v10, v11)
     return max(1.0, interp1(pa_c, p0, p1, v0, v1) * ROC_FACTOR)
 
 def vy_interp_enroute(pa):
@@ -209,14 +209,14 @@ startup_str=st.text_input("Startup (HH:MM)","")
 c4,c5,c6=st.columns(3)
 with c4:
     qnh=st.number_input("QNH (hPa)",900,1050,1013,step=1)
-    cruise_alt=st.number_input("Cruise Altitude (ft)",0,14000,3000,step=100)
+    cruise_alt=st.number_input("Cruise Altitude (ft)",0,14000,4000,step=100)
 with c5:
     temp_c=st.number_input("OAT (°C)",-40,50,15,step=1)
     var_deg=st.number_input("Mag Variation (°)",0,30,1,step=1)
     var_is_e=(st.selectbox("E/W",["W","E"],index=0)=="E")
 with c6:
     wind_from=st.number_input("Wind FROM (°TRUE)",0,360,0,step=1)
-    wind_kt=st.number_input("Wind (kt)",0,120,0,step=1)
+    wind_kt=st.number_input("Wind (kt)",0,120,17,step=1)
 
 # Perf / consumos
 c7,c8,c9=st.columns(3)
@@ -229,7 +229,7 @@ with c8:
 with c9:
     rod_fpm=st.number_input("ROD (ft/min)",200,1500,700,step=10)
     idle_ff=st.number_input("Idle FF (L/h)", 0.0, 20.0, 5.0, step=0.1)
-    start_fuel=st.number_input("Fuel inicial (EFOB_START) [L]",0.0,1000.0,0.0,step=1.0)
+    start_fuel=st.number_input("Fuel inicial (EFOB_START) [L]",0.0,1000.0,85.0,step=0.1)
 
 # Velocidades ref
 cruise_ref_kt = st.number_input("Cruise speed (kt)", 40, 140, 80, step=1)
@@ -319,8 +319,8 @@ N = len(legs)
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
 
 dep_elev = aero_elev(dept); arr_elev = aero_elev(arr)
-start_alt = float(dep_elev)              # <- SEM override; usa ELEVAÇÃO do DEP
-end_alt   = float(arr_elev)              # <- SEM override; usa ELEVAÇÃO do ARR
+start_alt = float(dep_elev)
+end_alt   = float(arr_elev)
 
 pa_start  = pressure_alt(start_alt, qnh)
 pa_cruise = pressure_alt(cruise_alt, qnh)
@@ -385,14 +385,16 @@ clock = takeoff
 def ceil_pos_minutes(x):  # arredonda ↑ e garante 1 min quando >0
     return max(1, int(math.ceil(x - 1e-9))) if x > 0 else 0
 
-rows=[]; seq_points=[]  # para o PDF
+rows=[]; seq_points=[]  # para o PDF (nome-a-nome, na ordem dos cortes)
 
 PH_ICON = {"CLIMB":"↑","CRUISE":"→","DESCENT":"↓"}
 
 alt_cursor = float(start_alt)
-total_dist = sum(dist); total_ete = total_burn = 0.0; efob=float(start_fuel)
+total_ete = total_burn = 0.0
+efob=float(start_fuel)  # EFOB planeado (vai cair segmento a segmento)
 
 def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:float, ff_lph:float):
+    """Acrescenta um segmento; atualiza relógio, ALT, EFOB; regista o ponto 'to_nm' para o PDF na ORDEM CORRETA."""
     global clock, total_ete, total_burn, efob, alt_cursor
     if d_nm <= 1e-9: return
 
@@ -411,12 +413,12 @@ def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:fl
     else:
         alt_end = alt_start
 
-    detail = f"{phase.capitalize()} {d_nm:.1f} nm"
-
     eto = ""
     if clock:
         clock = add_minutes(clock, ete); eto = clock.strftime("%H:%M")
-    total_ete += ete; total_burn += burn; efob = max(0.0, efob - burn)
+    total_ete += ete
+    total_burn += burn
+    efob = max(0.0, efob - burn)
     alt_cursor = alt_end
 
     rows.append({
@@ -424,7 +426,7 @@ def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:fl
         "Leg/Marker": f"{from_nm}→{to_nm}",
         "To (Name)": to_nm,
         "ALT (ft)": f"{int(round(alt_start))}→{int(round(alt_end))}",
-        "Detalhe": detail,
+        "Detalhe": f"{phase.capitalize()} {d_nm:.1f} nm",
         "TC (°T)": round(tc,0),
         "TH (°T)": round(th,0),
         "MH (°M)": round(apply_var(th, var_deg, var_is_e),0),
@@ -434,18 +436,18 @@ def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:fl
         "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
     })
 
-    # Guardar ponto (nome a nome) para PDF
+    # ponto de chegada (to_nm) para o PDF — ORDEM EXATA dos cortes
     seq_points.append({
         "name": to_nm, "alt": int(round(alt_end)),
         "tc": int(round(tc)), "th": int(round(th)),
         "mh": int(round(apply_var(th, var_deg, var_is_e))),
         "tas": int(round(tas)), "gs": int(round(gs)),
-        "dist": d_nm, "ete": ete, "eto": eto, "burn": burn
+        "dist": d_nm, "ete": ete, "eto": eto, "burn": burn, "efob": efob
     })
 
-# Ponto inicial para o PDF
+# Ponto inicial (DEP) para o PDF
 seq_points.append({"name": dept, "alt": int(round(start_alt)),
-                   "tc":"", "th":"", "mh":"", "tas":"", "gs":"", "dist":"", "ete":"", "eto": (clock.strftime("%H:%M") if clock else ""), "burn":""})
+                   "tc":"", "th":"", "mh":"", "tas":"", "gs":"", "dist":"", "ete":"", "eto": (takeoff.strftime("%H:%M") if takeoff else ""), "burn":"", "efob": efob})
 
 for i in range(N):
     leg_from, leg_to = legs[i]["From"], legs[i]["To"]
@@ -495,16 +497,18 @@ cfg={
 }
 st.data_editor(rows, hide_index=True, use_container_width=True, num_rows="fixed", column_config=cfg, key="fp_table")
 
-tot_line = f"**Totais** — Dist {sum(float(r['Dist (nm)']) for r in rows):.1f} nm • ETE {int(sum(int(r['ETE (min)']) for r in rows))//60:02d}:{int(sum(int(r['ETE (min)']) for r in rows))%60:02d} • Burn {sum(float(r['Burn (L)']) for r in rows):.1f} L • EFOB {efob:.1f} L"
+tot_ete_m = int(sum(int(r['ETE (min)']) for r in rows))
+tot_line = f"**Totais** — Dist {sum(float(r['Dist (nm)']) for r in rows):.1f} nm • ETE {tot_ete_m//60:02d}:{tot_ete_m%60:02d} • Burn {sum(float(r['Burn (L)']) for r in rows):.1f} L • EFOB {efob:.1f} L"
 if eta:
     tot_line += f" • **ETA {eta.strftime('%H:%M')}** • **Landing {landing.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
 st.markdown(tot_line)
 
-# ===== PDF export (nome a nome; inclui TH) =====
+# ===== PDF export (nome a nome; inclui TH e EFOB por linha) =====
 st.markdown("### PDF export")
 show_fields = st.checkbox("Mostrar nomes de campos do PDF (debug)")
 
 def build_pdf_items_from_points(points):
+    """Cada item é o ponto de chegada; idx=1 é o DEP (sem métricas do segmento)."""
     items = []
     for idx, p in enumerate(points, start=1):
         it = {
@@ -515,10 +519,11 @@ def build_pdf_items_from_points(points):
             "MH":  (str(p["mh"]) if idx>1 else ""),
             "TAS": (str(p["tas"]) if idx>1 else ""),
             "GS":  (str(p["gs"])  if idx>1 else ""),
-            "Dist": (f"{p['dist']:.1f}" if idx>1 else ""),
+            "Dist": (f"{p['dist']:.1f}" if idx>1 and isinstance(p["dist"], (int,float)) else ""),
             "ETE":  (str(p["ete"]) if idx>1 else ""),
             "ETO":  (p["eto"] if idx>1 else (p["eto"] or "")),
-            "Burn": (f"{p['burn']:.1f}" if idx>1 else ""),
+            "Burn": (f"{p['burn']:.1f}" if idx>1 and isinstance(p["burn"], (int,float)) else ""),
+            "EFOB": (f"{p['efob']:.1f}" if idx>1 and isinstance(p["efob"], (int,float)) else f"{p['efob']:.1f}" if idx==1 else "")
         }
         items.append(it)
     return items
@@ -557,27 +562,27 @@ if template_bytes:
             put(named, fieldset, k, v, maxlens)
 
         pdf_items = build_pdf_items_from_points(seq_points)
+
+        # ETA/Shutdown
         last_eto = pdf_items[-1]["ETO"] if pdf_items else ""
         put(named, fieldset, "Landing", last_eto, maxlens)
         put(named, fieldset, "Shutdown", (add_minutes(parse_hhmm(last_eto),5).strftime("%H:%M") if last_eto else ""), maxlens)
         put(named, fieldset, "ETD/ETA", f"{(add_minutes(parse_hhmm(startup_str),15).strftime('%H:%M') if startup_str else '')} / {last_eto}", maxlens)
 
-        # Totais e outros
+        # Totais
         tot_min = sum(int(it["ETE"] or "0") for it in pdf_items)
         tot_nm  = sum(float(it["Dist"] or 0.0) for it in pdf_items)
         tot_bo  = sum(float(it["Burn"] or 0.0) for it in pdf_items)
+        last_efob = pdf_items[-1]["EFOB"] if pdf_items else ""
         put(named, fieldset, "FLT TIME", f"{tot_min//60:02d}:{tot_min%60:02d}", maxlens)
-
-        # LEVEL F/F -> agora **só altitude**
+        # LEVEL F/F -> apenas altitude
         for key in ("LEVEL F/F","LEVEL_FF","Level_FF","Level F/F"):
             put(named, fieldset, key, f"{int(round(cruise_alt))}", maxlens)
-
         put(named, fieldset, "CLIMB FUEL", f"{ff_climb*(t_climb_total/60.0):.1f}", maxlens)
         put(named, fieldset, "ETE_Total", f"{tot_min}", maxlens)
         put(named, fieldset, "Dist_Total", f"{tot_nm:.1f}", maxlens)
         put(named, fieldset, "PL_BO_TOTAL", f"{tot_bo:.1f}", maxlens)
-        put(named, fieldset, "EFOB_TOTAL", f"{max(0.0, float(start_fuel)-tot_bo):.1f}", maxlens)
-        put(named, fieldset, "Leg_Number", str(N), maxlens)
+        put(named, fieldset, "EFOB_TOTAL", last_efob, maxlens)
 
         # Linhas (até 11)
         for i, r in enumerate(pdf_items[:11], start=1):
@@ -594,6 +599,10 @@ if template_bytes:
             if r["ETE"]!="":  put(named, fieldset, f"ETE{s}",  r["ETE"], maxlens)
             if r["ETO"]!="":  put(named, fieldset, f"ETO{s}",  r["ETO"], maxlens)
             if r["Burn"]!="": put(named, fieldset, f"PL_BO{s}", r["Burn"], maxlens)
+            # EFOB por linha (o teu template pode usar EFOBn ou AFOBn)
+            if r["EFOB"]!="":
+                put(named, fieldset, f"EFOB{s}", r["EFOB"], maxlens)
+                put(named, fieldset, f"AFOB{s}", r["EFOB"], maxlens)
 
         if st.button("Gerar PDF preenchido", type="primary"):
             out = fill_pdf(template_bytes, named)
