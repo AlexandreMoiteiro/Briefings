@@ -1,4 +1,4 @@
-# app.py — NAVLOG com cortes (LPSO→TOC, TOC→VACOR, …) na APP e TH (True Heading) no PDF
+# app.py — NAVLOG com cortes (LPSO→TOC, TOC→VACOR, …) na APP e TH no PDF
 # Reqs: streamlit, pypdf, pytz
 
 import streamlit as st
@@ -77,14 +77,14 @@ def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
 def wrap360(x): x=fmod(x,360.0); return x+360 if x<0 else x
 def angle_diff(a,b): return (a-b+180)%360-180
 
-# Triângulo do vento (vetor vento-para = from+180, sinais corretos)
+# Triângulo do vento (vento-para = from+180)
 def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: float):
     if tas_kt <= 0:
         return 0.0, wrap360(tc_deg), 0.0
     wind_to = wrap360(wind_from_deg + 180.0)
     beta = radians(angle_diff(wind_to, tc_deg))
-    cross = wind_kt * sin(beta)               # +vento da esquerda
-    head  = wind_kt * math.cos(beta)          # +tailwind / −headwind
+    cross = wind_kt * sin(beta)              # +vento da esquerda
+    head  = wind_kt * math.cos(beta)         # +tailwind / −headwind
     s = max(-1.0, min(1.0, cross/max(tas_kt,1e-9)))
     wca = degrees(asin(s))
     th  = wrap360(tc_deg + wca)
@@ -240,7 +240,7 @@ descent_ref_kt= st.number_input("Descent speed (kt)", 40, 120, 65, step=1)
 
 # ===== ROUTE (textarea) + JSON =====
 def parse_route_text(txt:str) -> List[str]:
-    tokens = re.split(r"[,\s→\\-]+", (txt or "").strip())
+    tokens = re.split(r"[,\s→\-]+", (txt or "").strip())
     return [t for t in tokens if t]
 
 st.markdown("### Route (DEP … ARR)")
@@ -388,7 +388,7 @@ clock = takeoff
 def ceil_pos_minutes(x):  # arredonda ↑ e garante 1 min quando >0
     return max(1, int(math.ceil(x - 1e-9))) if x > 0 else 0
 
-rows=[]; seq_points=[]  # seq_points será usada no PDF
+rows=[]; seq_points=[]  # para o PDF
 
 PH_ICON = {"CLIMB":"↑","CRUISE":"→","DESCENT":"↓"}
 
@@ -398,21 +398,20 @@ total_dist = sum(dist); total_ete = total_burn = 0.0; efob=float(start_fuel)
 def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:float, ff_lph:float):
     """Acrescenta um segmento de um leg; atualiza relógio, ALT, totais e constrói ponto PDF."""
     global clock, total_ete, total_burn, efob, alt_cursor
-
     if d_nm <= 1e-9: return
 
     tc = float(legs[i_leg]["TC"])
     wca, th, gs = wind_triangle(tc, tas, wind_from, wind_kt)
 
-    ete_raw = 60.0 * d_nm / max(gs,1e-6)
+    ete_raw = 60.0 * d_nm / max(gs,1e-6)  # minutos reais
     ete = ceil_pos_minutes(ete_raw)
     burn = ff_lph * (ete_raw/60.0)
 
     alt_start = alt_cursor
     if phase == "CLIMB":
-        alt_end = min(cruise_alt, alt_start + roc * (ete_raw/60.0))
+        alt_end = min(cruise_alt, alt_start + roc * ete_raw)      # <<< FIX: sem /60
     elif phase == "DESCENT":
-        alt_end = max(end_alt,   alt_start - rod_fpm * (ete_raw/60.0))
+        alt_end = max(end_alt,   alt_start - rod_fpm * ete_raw)    # <<< FIX: sem /60
     else:
         alt_end = alt_start
 
@@ -439,7 +438,7 @@ def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:fl
         "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
     })
 
-    # Ponto para o PDF (nome a nome): o “to_nm” torna-se o próximo ponto
+    # Guardar ponto (nome a nome) para PDF
     seq_points.append({
         "name": to_nm, "alt": int(round(alt_end)),
         "tc": int(round(tc)), "th": int(round(th)),
@@ -509,15 +508,7 @@ st.markdown(tot_line)
 st.markdown("### PDF export")
 show_fields = st.checkbox("Mostrar nomes de campos do PDF (debug)")
 
-try:
-    template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
-except Exception as e:
-    template_bytes = None
-    st.error(f"Não foi possível ler o PDF: {e}")
-
 def build_pdf_items_from_points(points):
-    """Converte seq_points (primeiro é o DEP) em linhas para o PDF.
-       Cada linha i (i>=2) leva Dist/ETE/ETO/TC/TH/MH/TAS/GS do segmento entre o ponto i-1 e i."""
     items = []
     for idx, p in enumerate(points, start=1):
         it = {
@@ -535,6 +526,12 @@ def build_pdf_items_from_points(points):
         }
         items.append(it)
     return items
+
+try:
+    template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
+except Exception as e:
+    template_bytes = None
+    st.error(f"Não foi possível ler o PDF: {e}")
 
 if template_bytes:
     fieldset, maxlens = get_fields_and_meta(template_bytes)
@@ -563,16 +560,12 @@ if template_bytes:
         }.items():
             put(named, fieldset, k, v, maxlens)
 
-        # Pontos para o PDF
         pdf_items = build_pdf_items_from_points(seq_points)
-
-        # ETA/Shutdown
         last_eto = pdf_items[-1]["ETO"] if pdf_items else ""
         put(named, fieldset, "Landing", last_eto, maxlens)
         put(named, fieldset, "Shutdown", (add_minutes(parse_hhmm(last_eto),5).strftime("%H:%M") if last_eto else ""), maxlens)
         put(named, fieldset, "ETD/ETA", f"{(add_minutes(parse_hhmm(startup_str),15).strftime('%H:%M') if startup_str else '')} / {last_eto}", maxlens)
 
-        # Totais (a partir dos pontos)
         tot_min = sum(int(it["ETE"] or "0") for it in pdf_items)
         tot_nm  = sum(float(it["Dist"] or 0.0) for it in pdf_items)
         tot_bo  = sum(float(it["Burn"] or 0.0) for it in pdf_items)
@@ -586,14 +579,13 @@ if template_bytes:
         put(named, fieldset, "EFOB_TOTAL", f"{max(0.0, float(start_fuel)-tot_bo):.1f}", maxlens)
         put(named, fieldset, "Leg_Number", str(N), maxlens)
 
-        # Escrever até 11 linhas (ajusta ao teu template)
         for i, r in enumerate(pdf_items[:11], start=1):
             s=str(i)
             put(named, fieldset, f"Name{s}", r["Name"], maxlens)
             put(named, fieldset, f"Alt{s}",  r["Alt"], maxlens)
             put(named, fieldset, f"FREQ{s}", "", maxlens)
             if r["TC"]!="":   put(named, fieldset, f"TCRS{s}", r["TC"], maxlens)
-            if r["TH"]!="":   put(named, fieldset, f"THDG{s}", r["TH"], maxlens)  # <- TH agora preenchido
+            if r["TH"]!="":   put(named, fieldset, f"THDG{s}", r["TH"], maxlens)   # TH agora sai no PDF
             if r["MH"]!="":   put(named, fieldset, f"MHDG{s}", r["MH"], maxlens)
             if r["TAS"]!="":  put(named, fieldset, f"TAS{s}",  r["TAS"], maxlens)
             if r["GS"]!="":   put(named, fieldset, f"GS{s}",   r["GS"], maxlens)
@@ -611,4 +603,5 @@ if template_bytes:
             st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
+
 
