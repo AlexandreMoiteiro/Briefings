@@ -1,4 +1,4 @@
-# app.py — NAVLOG com TOC/TOD dentro dos legs (CLB→CRZ / CRZ→DSC), AFM perf e PDF
+# app.py — NAVLOG com TOC/TOD (linhas separadas), AFM perf e export p/ "NAVLOG - FORM.pdf"
 # Reqs: streamlit, pypdf, pytz
 
 import streamlit as st
@@ -168,7 +168,7 @@ def vy_interp_enroute(pa):
     p0=max([p for p in pas if p<=pa_c]); p1=min([p for p in pas if p>=pa_c])
     return interp1(pa_c, p0, p1, VY_ENROUTE[p0], VY_ENROUTE[p1])
 
-# =============== Aerodromes (elev/freq para PDF) ===============
+# =============== Aerodromes ===============
 AEROS={
  "LPSO":{"elev":390,"freq":"119.805"},
  "LPEV":{"elev":807,"freq":"122.705"},
@@ -232,7 +232,7 @@ with c9:
     idle_ff=st.number_input("Idle FF (L/h)", 0.0, 20.0, 5.0, step=0.1)
     start_fuel=st.number_input("Fuel inicial (EFOB_START) [L]",0.0,1000.0,0.0,step=1.0)
 
-# Velocidades para GS/tempo
+# Velocidades ref
 cruise_ref_kt = st.number_input("Cruise speed (kt)", 40, 140, 80, step=1)
 descent_ref_kt= st.number_input("Descent speed (kt)", 40, 120, 65, step=1)
 
@@ -259,8 +259,9 @@ with c_rb:
                        file_name=f"route_{ascii_safe(registration)}.json",
                        mime="application/json")
 
-uploaded = st.file_uploader("📤 Carregar rota (JSON)", type=["json"])
-if uploaded is not None:
+uploaded = st.file_uploader("📤 Seleciona rota (JSON)", type=["json"])
+use_uploaded = st.button("Usar rota do ficheiro")
+if use_uploaded and uploaded is not None:
     try:
         data = json.loads(uploaded.read().decode("utf-8"))
         st.session_state.points = list(data.get("route_points") or [dept, arr])
@@ -274,8 +275,7 @@ if uploaded is not None:
                                           "To":st.session_state.points[i+1],
                                           "TC":tc,"Dist":di})
         st.session_state["route_text"] = " ".join(st.session_state.points)
-        st.success("Rota carregada.")
-        st.rerun()
+        st.success("Rota carregada do JSON.")
     except Exception as e:
         st.error(f"Falha a carregar JSON: {e}")
 
@@ -316,7 +316,7 @@ for i,row in enumerate(legs_view):
 
 N = len(legs)
 
-# ===== Cálculo (TOC/TOD DENTRO dos legs) =====
+# ===== Cálculo (TOC/TOD como linhas separadas) =====
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
 
 dep_elev = aero_elev(dept); arr_elev = aero_elev(arr)
@@ -329,12 +329,14 @@ vy_kt = vy_interp_enroute(pa_start)
 tas_climb, tas_cruise, tas_descent = vy_kt, float(cruise_ref_kt), float(descent_ref_kt)
 
 roc = roc_interp_enroute(pa_start, temp_c)                 # ft/min
-t_climb_total = max(0.0, (cruise_alt - start_alt)) / max(roc,1e-6)
-t_desc_total  = max(0.0, (cruise_alt - end_alt))  / max(rod_fpm,1e-6)
+delta_climb = max(0.0, cruise_alt - start_alt)
+delta_desc  = max(0.0, cruise_alt - end_alt)
+t_climb_total = delta_climb / max(roc,1e-6)
+t_desc_total  = delta_desc  / max(rod_fpm,1e-6)
 
-# FFs (AFM) p/ cada fase
-pa_mid_climb = start_alt + 0.5*max(0.0, cruise_alt - start_alt)
-pa_mid_desc  = end_alt   + 0.5*max(0.0, cruise_alt - end_alt)
+# FFs (AFM)
+pa_mid_climb = start_alt + 0.5*delta_climb
+pa_mid_desc  = end_alt   + 0.5*delta_desc
 _, ff_climb  = cruise_lookup(pa_mid_climb, int(rpm_climb),  temp_c)
 _, ff_cruise = cruise_lookup(pa_cruise,   int(rpm_cruise),  temp_c)
 ff_descent   = float(idle_ff) if idle_mode else cruise_lookup(pa_mid_desc, int(rpm_descent), temp_c)[1]
@@ -342,107 +344,164 @@ ff_descent   = float(idle_ff) if idle_mode else cruise_lookup(pa_mid_desc, int(r
 def gs_for(tc, tas): return wind_triangle(float(tc), float(tas), wind_from, wind_kt)[2]
 
 dist = [float(l["Dist"] or 0.0) for l in legs]
-t_climb = [0.0]*N; t_cruise=[0.0]*N; t_desc=[0.0]*N
+t_climb_leg=[0.0]*N; t_desc_leg=[0.0]*N; t_cruise_leg=[0.0]*N
 
-# CLIMB: só nos primeiros legs até TOC (dentro do leg onde calhar)
+# CLIMB distribuída pelos primeiros legs até completar TOC
 rem_t = t_climb_total
+idx_toc = None
 for i in range(N):
     if rem_t <= 1e-9: break
     gs = gs_for(legs[i]["TC"], tas_climb)
-    d_leg = dist[i]
-    # tempo para percorrer TODO o leg em CLB
-    t_full = 60.0 * d_leg / max(gs,1e-6)
-    use = min(rem_t, t_full)
-    t_climb[i] = use
+    t_leg_full = 60.0 * dist[i] / max(gs,1e-6)
+    use = min(rem_t, t_leg_full)
+    t_climb_leg[i] = use
     rem_t -= use
+    if rem_t <= 1e-9:
+        idx_toc = i
+        break
 
-# DESCENT: só nos últimos legs desde TOD (dentro do leg onde calhar)
+# DESCENT distribuída dos últimos legs para trás até completar TOD
 rem_t = t_desc_total
+idx_tod = None
 for j in range(N-1,-1,-1):
     if rem_t <= 1e-9: break
     gs = gs_for(legs[j]["TC"], tas_descent)
-    d_leg = dist[j]
-    t_full = 60.0 * d_leg / max(gs,1e-6)
-    use = min(rem_t, t_full)
-    t_desc[j] = use
+    t_leg_full = 60.0 * dist[j] / max(gs,1e-6)
+    use = min(rem_t, t_leg_full)
+    t_desc_leg[j] = use
     rem_t -= use
+    if rem_t <= 1e-9:
+        idx_tod = j
+        break
 
-# CRUISE = restante de cada leg após subtração de CLB/DSC naquele leg
+# CRUISE = o que sobra em cada leg
 for i in range(N):
-    d_cl = gs_for(legs[i]["TC"], tas_climb)   * (t_climb[i]/60.0)
-    d_ds = gs_for(legs[i]["TC"], tas_descent) * (t_desc[i]/60.0)
+    d_cl = gs_for(legs[i]["TC"], tas_climb)   * (t_climb_leg[i]/60.0)
+    d_ds = gs_for(legs[i]["TC"], tas_descent) * (t_desc_leg[i]/60.0)
     d_cr = max(0.0, dist[i] - d_cl - d_ds)
     gs_cr = gs_for(legs[i]["TC"], tas_cruise)
-    t_cruise[i] = 60.0 * d_cr / max(gs_cr,1e-6)
+    t_cruise_leg[i] = 60.0 * d_cr / max(gs_cr,1e-6)
 
-# ===== Construção da tabela =====
+# ===== Construir sequência de linhas: LEG (cruise-only) + TOC/TOD separados =====
 startup = parse_hhmm(startup_str)
 takeoff = add_minutes(startup,15) if startup else None
 clock = takeoff
-
-total_dist = sum(dist)
-total_ete = total_burn = 0.0
-efob = float(start_fuel)
 
 def ceil_pos_minutes(x, has_dist: bool):
     if not has_dist: return int(round(x))
     return max(1, int(math.ceil(x - 1e-9))) if x > 0 else 0
 
-def hhmm_from_minutes(m):
-    h = int(m)//60; mm = int(m)%60
-    return f"{h:01d}h{mm:02d}"
+rows=[]  # para UI
+seq=[]   # para PDF (ordem final)
 
-rows=[]
-for i,L in enumerate(legs):
-    tc=float(L["TC"]); has_dist = dist[i] > 0.0
+# 1) Linha inicial (DEP) só para PDF
+seq.append({"kind":"ORIGIN","name":dept,"alt":int(round(start_alt)),
+            "tc":legs[0]["TC"] if N else 0.0,"tas":0,"gs":0,"dist":0,"ete":0,"eto":""})
+
+total_dist = sum(dist); total_ete = total_burn = 0.0; efob=float(start_fuel)
+
+def append_ui_leg(i):
+    global clock, total_ete, total_burn, efob
+    tc=float(legs[i]["TC"]); has_dist = dist[i] > 0.0
+    # tempo só de CRUISE
+    ete_raw = t_cruise_leg[i]
+    ete = ceil_pos_minutes(ete_raw, has_dist)
     th = wind_triangle(tc, tas_cruise, wind_from, wind_kt)[1]
     mh = apply_var(th, var_deg, var_is_e)
+    gs = gs_for(tc, tas_cruise)
+    burn = ff_cruise*(t_cruise_leg[i]/60.0)
 
-    ete_min_raw = t_climb[i] + t_cruise[i] + t_desc[i]
-    ete_min = ceil_pos_minutes(ete_min_raw, has_dist)
-
-    burn = ff_climb*(t_climb[i]/60.0) + ff_cruise*(t_cruise[i]/60.0) + ff_descent*(t_desc[i]/60.0)
-
-    # fase dominante para exibir ALT/TAS/GS/FF
-    phase = "CRZ"; alt_show = cruise_alt; tas_show = tas_cruise; gs_show = gs_for(tc, tas_cruise); ff_show = ff_cruise
-    if t_climb[i] > max(t_cruise[i], t_desc[i]): phase="CLB"; alt_show = start_alt; tas_show=tas_climb; gs_show=gs_for(tc,tas_climb); ff_show=ff_climb
-    if t_desc[i]  > max(t_cruise[i], t_climb[i]): phase="DSC"; alt_show = end_alt;   tas_show=tas_descent; gs_show=gs_for(tc,tas_descent); ff_show=ff_descent
-
-    ff_avg = (60.0*burn/max(ete_min_raw,1e-6)) if ete_min_raw>0 else ff_show
-
-    eto_str=""
+    eto=""
     if clock:
-        clock = add_minutes(clock, ete_min)
-        eto_str = clock.strftime("%H:%M")
+        clock = add_minutes(clock, ete)
+        eto = clock.strftime("%H:%M")
 
-    total_ete += ete_min; total_burn += burn; efob = max(0.0, efob - burn)
-
-    comp=[]
-    if t_climb[i]>0.01:  comp.append(f"CLB {int(round(t_climb[i]))}m")
-    if t_cruise[i]>0.01: comp.append(f"CRZ {int(round(t_cruise[i]))}m")
-    if t_desc[i]>0.01:   comp.append(f"DSC {int(round(t_desc[i]))}m")
+    total_ete += ete; total_burn += burn; efob=max(0.0, efob-burn)
 
     rows.append({
-        "Leg/Marker": f"{L['From']}→{L['To']}",
-        "Name (PDF)": L["From"],                                 # Name do PDF = ponto FROM
-        "Alt/Phase": f"{int(round(alt_show))} / {phase}",
+        "Leg/Marker": f"{legs[i]['From']}→{legs[i]['To']}",
+        "To (Name)": legs[i]['To'],
+        "Cruise ALT (ref)": str(int(round(cruise_alt))),
         "TC (°T)": round(tc,0), "TH (°T)": round(th,0), "MH (°M)": round(mh,0),
-        "TAS (kt)": round(tas_show,0), "GS (kt)": round(gs_show,0),
-        "FF (L/h)": round(ff_avg,1), "Dist (nm)": round(dist[i],1),
-        "ETE (min)": ete_min, "ETO": eto_str,
-        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1),
-        "Comp": " + ".join(comp),
+        "TAS (kt)": round(tas_cruise,0), "GS (kt)": round(gs,0),
+        "FF (L/h)": round(ff_cruise,1),
+        "Dist (nm)": round(dist[i],1), "ETE (min)": ete, "ETO": eto,
+        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
     })
+    seq.append({"kind":"LEG","name":legs[i]['To'],"alt":int(round(cruise_alt)),
+                "tc":tc,"tas":tas_cruise,"gs":gs,"dist":dist[i],"ete":ete,"eto":eto,
+                "burn":burn,"efob":efob})
 
-eta = clock; landing = eta; shutdown = add_minutes(eta,5) if eta else None
-flt_time_hhmm = hhmm_from_minutes(total_ete)
+def append_toc():
+    global clock, total_ete, total_burn, efob
+    ete = int(round(t_climb_total))
+    burn = ff_climb*(t_climb_total/60.0)
+    eto=""
+    if clock:
+        clock = add_minutes(clock, ete)
+        eto = clock.strftime("%H:%M}")
+    total_ete += ete; total_burn += burn; efob=max(0.0, efob-burn)
+
+    rows.insert(idx_toc+1, {
+        "Leg/Marker":"TOC","To (Name)":"TOC","Cruise ALT (ref)":str(int(round(cruise_alt))),
+        "TC (°T)": round(float(legs[idx_toc]["TC"]),0), "TH (°T)": 0, "MH (°M)": 0,
+        "TAS (kt)": round(tas_climb,0), "GS (kt)": round(gs_for(legs[idx_toc]["TC"], tas_climb),0),
+        "FF (L/h)": round(ff_climb,1),
+        "Dist (nm)": 0.0, "ETE (min)": ete, "ETO": eto,
+        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
+    })
+    seq.insert(1+idx_toc+1, {"kind":"TOC","name":"TOC","alt":int(round(cruise_alt)),
+                             "tc":legs[idx_toc]["TC"],"tas":tas_climb,"gs":0,"dist":0,
+                             "ete":ete,"eto":eto,"burn":burn,"efob":efob})
+
+def append_tod():
+    global clock, total_ete, total_burn, efob
+    ete = int(round(t_desc_total))
+    burn = ff_descent*(t_desc_total/60.0)
+    eto=""
+    if clock:
+        clock = add_minutes(clock, ete)
+        eto = clock.strftime("%H:%M}")
+    total_ete += ete; total_burn += burn; efob=max(0.0, efob-burn)
+
+    # inserir depois do leg idx_tod (mais para o fim)
+    insert_at = len(rows) if idx_tod is None else min(len(rows), idx_tod+1+(1 if idx_toc is not None and idx_tod>=idx_toc else 0))
+    rows.insert(insert_at, {
+        "Leg/Marker":"TOD","To (Name)":"TOD","Cruise ALT (ref)":str(int(round(end_alt))),
+        "TC (°T)": round(float(legs[idx_tod]["TC"] if idx_tod is not None else 0.0),0),
+        "TH (°T)": 0, "MH (°M)": 0,
+        "TAS (kt)": round(tas_descent,0), "GS (kt)": round(gs_for(legs[idx_tod]["TC"] if idx_tod is not None else 0.0, tas_descent),0),
+        "FF (L/h)": round(ff_descent,1),
+        "Dist (nm)": 0.0, "ETE (min)": ete, "ETO": eto,
+        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
+    })
+    seq.append({"kind":"TOD","name":"TOD","alt":int(round(end_alt)),
+                "tc":(legs[idx_tod]["TC"] if idx_tod is not None else 0.0),
+                "tas":tas_descent,"gs":0,"dist":0,"ete":ete,"eto":eto,
+                "burn":burn,"efob":efob})
+
+# Montar sequência e linhas UI
+for i in range(N):
+    append_ui_leg(i)
+    if idx_toc is not None and i==idx_toc:
+        append_toc()
+for i in range(N):
+    if idx_tod is not None and i==idx_tod:
+        # TOD já vai ao fim da sequência (depois de todos os legs) para ficar antes do último ARR no PDF
+        pass
+if idx_tod is not None:
+    append_tod()
+
+eta = clock
+landing = eta
+shutdown = add_minutes(eta,5) if eta else None
 
 # ===== Tabela =====
-st.markdown("### Flight plan (TOC/TOD dentro do leg)")
+st.markdown("### Flight plan (TOC/TOD auto)")
 cfg={
-    "Leg/Marker": st.column_config.TextColumn("Leg"),
-    "Name (PDF)": st.column_config.TextColumn("Name (FROM do leg)", disabled=True),
-    "Alt/Phase": st.column_config.TextColumn("Altitude / Fase"),
+    "Leg/Marker": st.column_config.TextColumn("Leg / Marker"),
+    "To (Name)": st.column_config.TextColumn("To (Name)", disabled=True),
+    "Cruise ALT (ref)": st.column_config.TextColumn("Cruise ALT (ref)"),
     "TC (°T)": st.column_config.NumberColumn("TC (°T)", disabled=True),
     "TH (°T)": st.column_config.NumberColumn("TH (°T)", disabled=True),
     "MH (°M)": st.column_config.NumberColumn("MH (°M)", disabled=True),
@@ -454,14 +513,13 @@ cfg={
     "ETO":      st.column_config.TextColumn("ETO", disabled=True),
     "Burn (L)": st.column_config.NumberColumn("Burn (L)", disabled=True),
     "EFOB (L)": st.column_config.NumberColumn("EFOB (L)", disabled=True),
-    "Comp":     st.column_config.TextColumn("Composição (CLB/CRZ/DSC)", disabled=True),
 }
 st.data_editor(rows, hide_index=True, use_container_width=True, num_rows="fixed", column_config=cfg, key="fp_table")
 
-tot = f"**Totais** — Dist {total_dist:.1f} nm • ETE {flt_time_hhmm} • Burn {total_burn:.1f} L • EFOB {efob:.1f} L"
+tot_line = f"**Totais** — Dist {total_dist:.1f} nm • ETE {int(total_ete)//60}h{int(total_ete)%60:02d} • Burn {total_burn:.1f} L • EFOB {efob:.1f} L"
 if eta:
-    tot += f" • **ETA {eta.strftime('%H:%M')}** • **Landing {landing.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
-st.markdown(tot)
+    tot_line += f" • **ETA {eta.strftime('%H:%M')}** • **Landing {landing.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
+st.markdown(tot_line)
 
 # ===== PDF export =====
 st.markdown("### PDF export")
@@ -517,31 +575,55 @@ if template_bytes:
         climb_fuel = ff_climb*(t_climb_total/60.0)
         for key in ("CLIMB FUEL","CLIMB_FUEL","Climb_Fuel"):
             put(named, fieldset, key, f"{climb_fuel:.1f}", maxlens)
+        flt_time = f"{int(total_ete)//60:02d}:{int(total_ete)%60:02d}"
         for key in ("FLT TIME","FLT_TIME","Flight_Time","FL TIME"):
-            put(named, fieldset, key, hhmm_from_minutes(total_ete).replace("h",":"), maxlens)
+            put(named, fieldset, key, flt_time, maxlens)
 
+        # Nº de legs (sem TOC/TOD)
         put(named, fieldset, "Leg_Number", str(N), maxlens)
 
-        # Linhas (Name = FROM; Alt = 1º leg usa start_alt; último usa end_alt; restantes cruise)
-        for i, r in enumerate(rows[:11], start=1):
-            s=str(i)
-            put(named, fieldset, f"Name{s}", r["Name (PDF)"], maxlens)
-            if i == 1:        alt_num = int(round(start_alt))
-            elif i == N:      alt_num = int(round(end_alt))
-            else:             alt_num = int(round(cruise_alt))
-            put(named, fieldset, f"Alt{s}",  f"{alt_num}", maxlens)
-            put(named, fieldset, f"FREQ{s}", "", maxlens)
-            put(named, fieldset, f"TCRS{s}", f"{int(round(float(r['TC (°T)'])))}", maxlens)
-            put(named, fieldset, f"THDG{s}", f"{int(round(float(r['TH (°T)'])))}", maxlens)
-            put(named, fieldset, f"MHDG{s}", f"{int(round(float(r['MH (°M)'])))}", maxlens)
-            put(named, fieldset, f"TAS{s}",  f"{int(round(float(r['TAS (kt)'])))}", maxlens)
-            put(named, fieldset, f"GS{s}",   f"{int(round(float(r['GS (kt)'])))}", maxlens)
-            put(named, fieldset, f"Dist{s}", f"{r['Dist (nm)']}", maxlens)
-            put(named, fieldset, f"ETE{s}",  f"{int(round(float(r['ETE (min)'])))}", maxlens)
-            put(named, fieldset, f"ETO{s}",  r["ETO"], maxlens)
-            put(named, fieldset, f"PL_BO{s}", f"{r['Burn (L)']}", maxlens)
-            put(named, fieldset, f"EFOB{s}",  f"{r['EFOB (L)']}", maxlens)
+        # Tabela para o PDF:
+        # linha 1 = ORIGIN (DEP + elevação)
+        # depois: cada LEG (cruise-only) na ordem; inserir TOC logo após o leg idx_toc; TOD antes do ARR final.
+        pdf_items = []
+        pdf_items.append({"Name": dept, "Alt": str(int(round(start_alt))),
+                          "TC": "", "TH": "", "MH":"", "TAS":"", "GS":"",
+                          "Dist":"", "ETE":"", "ETO":"", "Burn":"", "EFOB":""})
+        # acrescentar as restantes linhas a partir de seq (LEG/TOC/TOD)
+        for it in seq:
+            if it["kind"]=="ORIGIN": continue
+            pdf_items.append({
+                "Name": it["name"],
+                "Alt":  str(int(round(it["alt"]))),
+                "TC":   f"{int(round(float(it['tc'])))}",
+                "TH":   "", "MH":"",    # TH/MH já estão calculados mas o teu PDF pode não ter estes campos
+                "TAS":  f"{int(round(float(it['tas'])))}" if it["tas"] else "",
+                "GS":   f"{int(round(float(it['gs'])))}"  if it["gs"] else "",
+                "Dist": f"{it['dist']}" if it.get("dist") is not None else "",
+                "ETE":  f"{int(round(float(it['ete'])))}",
+                "ETO":  it.get("eto",""),
+                "Burn": f"{it.get('burn',0.0):.1f}" if it.get("burn") is not None else "",
+                "EFOB": f"{it.get('efob',0.0):.1f}" if it.get("efob") is not None else "",
+            })
 
+        # Escrever até 11 linhas
+        for i, r in enumerate(pdf_items[:11], start=1):
+            s=str(i)
+            put(named, fieldset, f"Name{s}", r["Name"], maxlens)
+            put(named, fieldset, f"Alt{s}",  r["Alt"], maxlens)
+            put(named, fieldset, f"FREQ{s}", "", maxlens)
+            if r["TC"]!="":   put(named, fieldset, f"TCRS{s}", r["TC"], maxlens)
+            if r["TH"]!="":   put(named, fieldset, f"THDG{s}", r["TH"], maxlens)
+            if r["MH"]!="":   put(named, fieldset, f"MHDG{s}", r["MH"], maxlens)
+            if r["TAS"]!="":  put(named, fieldset, f"TAS{s}",  r["TAS"], maxlens)
+            if r["GS"]!="":   put(named, fieldset, f"GS{s}",   r["GS"], maxlens)
+            if r["Dist"]!="": put(named, fieldset, f"Dist{s}", r["Dist"], maxlens)
+            if r["ETE"]!="":  put(named, fieldset, f"ETE{s}",  r["ETE"], maxlens)
+            if r["ETO"]!="":  put(named, fieldset, f"ETO{s}",  r["ETO"], maxlens)
+            if r["Burn"]!="": put(named, fieldset, f"PL_BO{s}", r["Burn"], maxlens)
+            if r["EFOB"]!="": put(named, fieldset, f"EFOB{s}",  r["EFOB"], maxlens)
+
+        # Totais
         put(named, fieldset, "ETE_Total", f"{int(round(total_ete))}", maxlens)
         put(named, fieldset, "Dist_Total", f"{total_dist:.1f}", maxlens)
         put(named, fieldset, "PL_BO_TOTAL", f"{total_burn:.1f}", maxlens)
@@ -556,5 +638,3 @@ if template_bytes:
             st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
-
-
