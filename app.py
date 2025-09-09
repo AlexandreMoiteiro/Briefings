@@ -1,9 +1,6 @@
-
-# app.py — Briefings + Charts (Weather) + NOTAM/GAMET/SIGMET (Gist)
-# + PDFs (Detailed/PT e Final/EN) + PowerPoint (EN)
-# + Emparelhamento Navlog↔VFR por ROTA (embutido “tal como é”)
-# + Aba para Flight Plan & Mass & Balance
-
+# app.py — Briefings com editor de NOTAMs, GAMET e SIGMET (via Gist)
+# + Charts (Weather) + PDFs (Detailed/PT e Final/EN) + PowerPoint (EN)
+# + Emparelhamento Navlog↔VFR por Rota + Flight Plan + Mass & Balance
 from typing import Dict, Any, List, Tuple, Optional
 import io, os, re, base64, tempfile, unicodedata, json, datetime as dt
 import streamlit as st
@@ -49,7 +46,7 @@ client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
 
 # ---------- Constantes úteis ----------
 PASTEL = (90, 127, 179)
-LPSO_ARP = (39.211667, -8.057778)
+LPSO_ARP = (39.211667, -8.057778)  # LPSO (ARP)
 
 # ---------- Utils ----------
 def safe_str(x) -> str:
@@ -59,22 +56,18 @@ def ascii_safe(text: str) -> str:
     if text is None or text is Ellipsis:
         return ""
     t = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode("ascii")
-    return (t.replace("\u00A0", " ").replace("\u2009", " ").replace("\u2013", "-")
-              .replace("\u2014", "-").replace("\uFEFF", ""))
+    return (t.replace("\u00A0"," ").replace("\u2009"," ").replace("\u2013","-")
+             .replace("\u2014","-").replace("\uFEFF",""))
 
 def parse_icaos(s: str) -> List[str]:
     tokens = re.split(r"[,\s]+", (s or "").strip(), flags=re.UNICODE)
     return [t.upper() for t in tokens if t]
 
-# manter ficheiros de upload na sessão (para não “perder” bytes depois)
-def cache_upload(file, slot_key: str) -> Optional[Dict[str, Any]]:
-    if not file: 
-        st.session_state.pop(slot_key, None)
-        return None
-    b = file.getvalue() if hasattr(file, "getvalue") else file.read()
-    obj = {"bytes": b, "type": (file.type or ""), "name": safe_str(getattr(file, "name", ""))}
-    st.session_state[slot_key] = obj
-    return obj
+def read_upload_bytes(upload) -> bytes:
+    try:
+        return upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
+    except Exception:
+        return b""
 
 # ---------- Image helpers ----------
 def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 450) -> Image.Image:
@@ -82,9 +75,6 @@ def load_first_pdf_page(pdf_bytes: bytes, dpi: int = 450) -> Image.Image:
     page = doc.load_page(0)
     png = page.get_pixmap(dpi=dpi).tobytes("png")
     return Image.open(io.BytesIO(png)).convert("RGB").copy()
-
-def to_png_bytes(img: Image.Image) -> io.BytesIO:
-    out = io.BytesIO(); img.save(out, format="PNG"); out.seek(0); return out
 
 def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
     """Aceita PDF/PNG/JPG/JPEG/GIF e devolve bytes PNG (ou placeholder)."""
@@ -94,57 +84,16 @@ def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
             img = load_first_pdf_page(file_bytes, dpi=300)
         else:
             img = Image.open(io.BytesIO(file_bytes)).convert("RGB").copy()
-        return to_png_bytes(img)
+        out = io.BytesIO(); img.save(out, format="PNG"); out.seek(0); return out
     except Exception:
         try:
             Image.open(io.BytesIO(file_bytes))
             return io.BytesIO(file_bytes)
         except Exception:
             ph = Image.new("RGB", (800, 600), (245, 246, 248))
-            bio = io.BytesIO(); ph.save(bio, format="PNG"); bio.seek(0); return bio
+            out = io.BytesIO(); ph.save(out, format="PNG"); out.seek(0); return out
 
-# ---------- PDF helpers ----------
-def draw_header(pdf: FPDF, text: str) -> None:
-    pdf.set_draw_color(229, 231, 235)
-    pdf.set_line_width(0.3)
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 12, ascii_safe(text), ln=True, align="C", border="B")
-
-def place_image_full(pdf: FPDF, img_png: io.BytesIO, max_h_pad: int = 58) -> None:
-    max_w = pdf.w - 22; max_h = pdf.h - max_h_pad
-    img = Image.open(img_png); iw, ih = img.size
-    r = min(max_w/iw, max_h/ih); w, h = int(iw*r), int(ih*r)
-    x = (pdf.w - w)//2; y = pdf.get_y() + 6
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        img.save(tmp, format="PNG"); path = tmp.name
-    pdf.image(path, x=x, y=y, w=w, h=h); os.remove(path)
-    pdf.ln(h + 10)
-
-def image_bytes_to_pdf_bytes_fullbleed(img_bytes: bytes, orientation: str = "P") -> bytes:
-    """Converte uma imagem para página PDF full-bleed (sem títulos/margens)."""
-    doc = FPDF(orientation=orientation, unit="mm", format="A4"); doc.add_page(orientation=orientation)
-    max_w, max_h = doc.w, doc.h
-    img = Image.open(io.BytesIO(img_bytes))
-    iw, ih = img.size; r = min(max_w/iw, max_h/ih); w, h = int(iw*r), int(ih*r)
-    x, y = (doc.w - w) / 2, (doc.h - h) / 2
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        img.convert("RGB").save(tmp, format="PNG"); path = tmp.name
-    doc.image(path, x=x, y=y, w=w, h=h); os.remove(path)
-    data = doc.output(dest="S")
-    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
-
-def fpdf_to_bytes(doc: FPDF) -> bytes:
-    data = doc.output(dest="S")
-    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
-
-# ---------- Ordenação de charts ----------
-_KIND_RANK = {"SPC": 1, "SIGWX": 2, "Wind & Temp": 3, "Other": 9}
-def _chart_sort_key(c: Dict[str, Any]) -> Tuple[int, int]:
-    kind = c.get("kind", "Other"); rank = _KIND_RANK.get(kind, 9)
-    order = int(c.get("order", 9999) or 9999)
-    return (rank, order)
-
-# ---------- Gist helpers (GAMET / NOTAMs / SIGMET) ----------
+# ---------- Gist helpers ----------
 def _get_gist(seckey_token, seckey_id, seckey_file, fallback_file="") -> Tuple[str,str,str]:
     token = (st.secrets.get(seckey_token) or st.secrets.get("GIST_TOKEN") or "").strip()
     gid   = (st.secrets.get(seckey_id)    or st.secrets.get("GIST_ID")    or "").strip()
@@ -162,9 +111,11 @@ def gist_load(token, gid, fn) -> Dict[str,Any]:
                          timeout=12)
         r.raise_for_status()
         files = r.json().get("files", {})
-        file_obj = files.get(fn) or {}; content = (file_obj.get("content") or "").strip()
+        file_obj = files.get(fn) or {}
+        content = (file_obj.get("content") or "").strip()
         return json.loads(content) if content else {}
-    except Exception: return {}
+    except Exception:
+        return {}
 
 def gist_save(token,gid,fn,payload:Dict[str,Any]) -> Tuple[bool,str]:
     if not _gist_ok(token,gid,fn): return False, "Config Gist incompleta."
@@ -210,39 +161,142 @@ def save_sigmet_to_gist(text: str) -> Tuple[bool, str]:
     payload = {"updated_utc": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"), "text": (text or "").strip()}
     return gist_save(t,g,f,payload)
 
-# ---------- IA (charts) ----------
+# ---------- METAR/TAF (CheckWX) ----------
+def cw_headers() -> Dict[str, str]:
+    key = st.secrets.get("CHECKWX_API_KEY", "\n").strip()
+    return {"X-API-Key": key} if key else {}
+
+def fetch_metar_now(icao: str) -> str:
+    try:
+        hdr = cw_headers()
+        if not hdr: return ""
+        r = requests.get(f"https://api.checkwx.com/metar/{icao}", headers=hdr, timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data: return ""
+        if isinstance(data[0], dict): return data[0].get("raw") or data[0].get("raw_text", "") or ""
+        return str(data[0])
+    except Exception: return ""
+
+def fetch_taf_now(icao: str) -> str:
+    try:
+        hdr = cw_headers()
+        if not hdr: return ""
+        r = requests.get(f"https://api.checkwx.com/taf/{icao}", headers=hdr, timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data: return ""
+        if isinstance(data[0], dict): return data[0].get("raw") or data[0].get("raw_text", "") or ""
+        return str(data[0])
+    except Exception: return ""
+
+# ---------- GPT wrapper ----------
 def gpt_text(prompt_system: str, prompt_user: str, max_tokens: int = 900) -> str:
     model_name = safe_str(st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")).strip() or "gpt-4o-mini"
     try:
-        r = client.chat.completions.create(
+        r2 = client.chat.completions.create(
             model=model_name,
             messages=[{"role":"system","content":prompt_system},{"role":"user","content":prompt_user}],
             max_tokens=max_tokens, temperature=0.15
         )
-        content = (r.choices[0].message.content or "").strip()
+        content = (r2.choices[0].message.content or "").strip()
         return ascii_safe(content) if content else ""
-    except Exception as e: return ascii_safe(f"Analise indisponivel (erro IA: {e})")
+    except Exception as e2:
+        return ascii_safe(f"Analise indisponivel (erro IA: {e2})")
 
+# ---------- Prompts (PT-PT) ----------
 def analyze_chart_pt(kind: str, img_b64: str, filename_hint: str = "") -> str:
     model_name = safe_str(st.secrets.get("OPENAI_MODEL_VISION", "gpt-4o")).strip() or "gpt-4o"
-    sys = ("Es meteorologista aeronautico senior. PT-PT, conciso e rigoroso, texto corrido com 5 blocos. "
-           "Usa apenas info visivel no chart; se algo nao existir, 'nao indicado'.")
-    if not (st.secrets.get("OPENAI_API_KEY") or "").strip(): return "Analise de imagem desativada (OPENAI_API_KEY em falta)."
+    sys = (
+        "Es meteorologista aeronautico senior. PT-PT, conciso e rigoroso, texto corrido com 5 blocos curtos. "
+        "Usa apenas informacao visivel; se algo nao existir, 'nao indicado'."
+    )
+    if not (st.secrets.get("OPENAI_API_KEY") or "").strip():
+        return "Analise de imagem desativada (OPENAI_API_KEY em falta)."
     try:
         r = client.chat.completions.create(
             model=model_name,
-            messages=[{"role":"system","content":sys},
-                      {"role":"user","content":[
-                          {"type":"text","text":f"Tipo de chart: {kind}. Ficheiro: {filename_hint}"},
-                          {"type":"image_url","image_url":{"url":f"data:image/png;base64,{img_b64}"}}
-                      ]}],
+            messages=[
+                {"role": "system", "content": sys},
+                {"role": "user", "content": [
+                    {"type": "text", "text": f"Tipo de chart: {kind}. Ficheiro: {filename_hint}"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                ]},
+            ],
             max_tokens=1100, temperature=0.1
         )
         out = (r.choices[0].message.content or "").strip()
         return ascii_safe(out) if out else "Analise indisponivel."
-    except Exception as e: return ascii_safe(f"Analise indisponivel (erro IA: {e})")
+    except Exception as e:
+        return ascii_safe(f"Analise indisponivel (erro IA: {e})")
 
-# ---------- Classes PDF ----------
+def analyze_metar_taf_pt(icao: str, metar: str, taf: str) -> str:
+    sys = (
+        "Es meteorologista aeronautico senior. PT-PT, resposta telegráfica e concisa (max ~8 linhas). "
+        "Usa apenas info presente; sem glossarios. Inclui: hora, vento/raj, vis, fenomenos, nuvens+alturas (oktas entre parenteses), T/Td, QNH. "
+        "No TAF: validade e BECMG/TEMPO/PROB com efeito pratico (1 frase/segmento). Se algo nao existir, 'nao presente'. "
+        "Termina com 'Impacto' (VFR/IFR + 2-3 riscos)."
+    )
+    user = f"Aerodromo {icao}\n\nMETAR (RAW):\n{metar}\n\nTAF (RAW):\n{taf}"
+    return gpt_text(prompt_system=sys, prompt_user=user, max_tokens=700)
+
+# ---------- PDF helpers ----------
+def draw_header(pdf: FPDF, text: str) -> None:
+    pdf.set_draw_color(229, 231, 235)
+    pdf.set_line_width(0.3)
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.cell(0, 12, ascii_safe(text), ln=True, align="C", border="B")
+
+def place_image_full(pdf: FPDF, img_png: io.BytesIO, max_h_pad: int = 58) -> None:
+    max_w = pdf.w - 22; max_h = pdf.h - max_h_pad
+    img = Image.open(img_png); iw, ih = img.size
+    r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
+    x = (pdf.w - w) // 2; y = pdf.get_y() + 6
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        img.save(tmp, format="PNG"); path = tmp.name
+    pdf.image(path, x=x, y=y, w=w, h=h); os.remove(path)
+    pdf.ln(h + 10)
+
+def image_bytes_to_pdf_bytes_fullbleed(img_bytes: bytes, orientation: str = "P") -> bytes:
+    """Imagem -> 1 página PDF full-bleed (sem títulos/margens)."""
+    doc = FPDF(orientation=orientation, unit="mm", format="A4"); doc.add_page(orientation=orientation)
+    max_w, max_h = doc.w, doc.h
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    iw, ih = img.size; r = min(max_w/iw, max_h/ih); w, h = int(iw*r), int(ih*r)
+    x, y = (doc.w - w) / 2, (doc.h - h) / 2
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        img.save(tmp, "PNG"); path = tmp.name
+    doc.image(path, x=x, y=y, w=w, h=h); os.remove(path)
+    data = doc.output(dest="S")
+    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
+
+def fpdf_to_bytes(doc: FPDF) -> bytes:
+    data = doc.output(dest="S")
+    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
+
+# ---------- Ordenação de charts ----------
+_KIND_RANK = {"SPC": 1, "SIGWX": 2, "Wind & Temp": 3, "Other": 9}
+def _chart_sort_key(c: Dict[str, Any]) -> Tuple[int, int]:
+    kind = c.get("kind", "Other")
+    rank = _KIND_RANK.get(kind, 9)
+    order = int(c.get("order", 9999) or 9999)
+    return (rank, order)
+
+# ---------- PDF classes ----------
+class DetailedPDF(FPDF):
+    def header(self) -> None: pass
+    def footer(self) -> None: pass
+
+    def chart_block(self, title: str, subtitle: str, img_png: io.BytesIO, analysis_pt: str) -> None:
+        self.add_page(orientation="P"); draw_header(self, ascii_safe(title))
+        if subtitle: self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
+        max_w = self.w - 22; max_h = (self.h // 2) - 18
+        img = Image.open(img_png); iw, ih = img.size; r = min(max_w/iw, max_h/ih); w, h = int(iw*r), int(ih*r)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            img.save(tmp, format="PNG"); path = tmp.name
+        self.image(path, x=(self.w - w)//2, y=self.get_y() + 6, w=w, h=h); os.remove(path); self.ln(h + 12)
+        self.set_font("Helvetica","",12); self.multi_cell(0, 7, ascii_safe(analysis_pt or " "))
+
 class FinalBriefPDF(FPDF):
     def header(self) -> None: pass
     def footer(self) -> None: pass
@@ -278,7 +332,7 @@ st.markdown(
 )
 
 # ---------- Abas ----------
-tab_mission, tab_notams, tab_sigmet_gamet, tab_charts, tab_pairs, tab_docs, tab_generate = st.tabs(
+tab_mission, tab_notams, tab_sigmet_gamet, tab_charts, tab_pairs, tab_fpmb, tab_generate = st.tabs(
     ["Missão", "NOTAMs", "SIGMET & GAMET", "Charts", "Navlog ↔ VFR (Rotas)", "Flight Plan & M&B", "Gerar Saídas"]
 )
 
@@ -333,8 +387,7 @@ with tab_notams:
             )
 
     if st.button("Guardar NOTAMs no Gist"):
-        new_map: Dict[str, List[str]] = {}
-        new_map.update(existing_map)  # merge
+        new_map: Dict[str, List[str]] = {}; new_map.update(existing_map)  # merge
         for icao in (icaos_notam if 'icaos_notam' in locals() else []):
             new_map[icao] = parse_block_to_list(editors_notam.get(icao, ""))
         ok, msg = save_notams_to_gist(new_map)
@@ -406,27 +459,18 @@ with tab_pairs:
                 nav_file = st.file_uploader(f"Navlog ({route or 'ROTA'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_nav_{i}")
             with c2:
                 vfr_file = st.file_uploader(f"VFR Map ({route or 'ROTA'})", type=["pdf","png","jpg","jpeg","gif"], key=f"pair_vfr_{i}")
-            # não precisamos guardar bytes aqui; lemos direto ao gerar
             pairs.append({"route": route, "nav": nav_file, "vfr": vfr_file})
 
 # ---------- Flight Plan & M&B ----------
-with tab_docs:
+with tab_fpmb:
     st.markdown("### Flight Plan & Mass & Balance")
-    cfp, cmb = st.columns(2)
-    with cfp:
-        fp_upload = st.file_uploader("Flight Plan (PDF/Imagem)", type=["pdf","png","jpg","jpeg","gif"], key="fp_upload")
-        if fp_upload:
-            obj = cache_upload(fp_upload, "fp_store")
-            if obj and obj["type"] != "application/pdf":
-                try:
-                    st.image(ensure_png_from_bytes(obj["bytes"], obj["type"]).getvalue(), caption=obj["name"], use_column_width=True)
-                except Exception:
-                    st.caption(obj["name"])
-    with cmb:
-        mb_upload = st.file_uploader("Mass & Balance Sheet (PDF)", type=["pdf"], key="mb_upload")
-        if mb_upload:
-            obj = cache_upload(mb_upload, "mb_store")
-            st.caption(obj["name"] if obj else "")
+    c1, c2 = st.columns(2)
+    with c1:
+        fp_upload = st.file_uploader("Flight Plan (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
+        if fp_upload: st.success(f"Flight Plan carregado: {safe_str(fp_upload.name)}")
+    with c2:
+        mb_upload = st.file_uploader("Mass & Balance (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
+        if mb_upload: st.success(f"M&B carregado: {safe_str(mb_upload.name)}")
 
 # ---------- Gerar Saídas ----------
 with tab_generate:
@@ -436,19 +480,65 @@ with tab_generate:
     with col_pdfs[1]: gen_final = st.button("Generate Final Briefing (EN)")
     with col_pdfs[2]: gen_ppt   = st.button("Generate PowerPoint (EN)")
 
+# ---------- Detailed (PT) ----------
+if 'gen_det' in locals() and gen_det:
+    det = DetailedPDF()
+
+    # CHARTS PRIMEIRO (Weather=charts)
+    charts_local: List[Dict[str,Any]] = locals().get("charts", [])
+    if charts_local:
+        grouped: Dict[str, List[Dict[str,Any]]] = {"SPC": [], "SIGWX": [], "Wind & Temp": [], "Other": []}
+        for c in charts_local: grouped.setdefault(c["kind"], []).append(c)
+        for k in list(grouped.keys()): grouped[k] = sorted(grouped[k], key=_chart_sort_key)
+        for kind in ["SPC","SIGWX","Wind & Temp","Other"]:
+            for ch in grouped.get(kind, []):
+                title, subtitle, img_png, fname = ch["title"], ch["subtitle"], ch["img_png"], ch.get("filename","")
+                analysis_txt = ""
+                if locals().get("use_ai_for_charts", False):
+                    try:
+                        analysis_txt = analyze_chart_pt(kind, base64.b64encode(img_png.getvalue()).decode("utf-8"), filename_hint=fname)
+                    except Exception: analysis_txt = "Analise indisponivel."
+                det.chart_block(title, subtitle, img_png, analysis_txt)
+
+    # (Opcional) METAR/TAF resumido — se quiseres manter no Detailed
+    icaos_metar_local = locals().get("icaos_metar", [])
+    if icaos_metar_local:
+        det.add_page(orientation="P"); draw_header(det, "METAR / TAF — Interpretacao (PT, resumida)")
+        det.set_font("Helvetica","",12); det.ln(2)
+        for icao in icaos_metar_local:
+            metar_raw = fetch_metar_now(icao) or ""; taf_raw = fetch_taf_now(icao) or ""
+            analysis = analyze_metar_taf_pt(icao, metar_raw, taf_raw) if (metar_raw or taf_raw) else "Sem METAR/TAF disponiveis."
+            det.set_font("Helvetica","B",13); det.cell(0,8, ascii_safe(icao), ln=True)
+            if metar_raw: det.set_font("Helvetica","B",12); det.cell(0,7,"METAR (RAW):", ln=True); det.set_font("Helvetica","",12); det.multi_cell(0,7, ascii_safe(metar_raw))
+            if taf_raw:   det.set_font("Helvetica","B",12); det.cell(0,7,"TAF (RAW):", ln=True);   det.set_font("Helvetica","",12); det.multi_cell(0,7, ascii_safe(taf_raw))
+            det.set_font("Helvetica","B",12); det.cell(0,7,"Interpretacao:", ln=True)
+            det.set_font("Helvetica","",12); det.multi_cell(0,7, ascii_safe(analysis)); det.ln(2)
+
+    # SIGMET / GAMET (texto simples)
+    sigmet_text_local = locals().get("sigmet_text",""); _sigmet_initial_local = locals().get("_sigmet_initial","")
+    gamet_text_local  = locals().get("gamet_text","");  _gamet_initial_local  = locals().get("_gamet_initial","")
+    sigmet_for_pdf = (sigmet_text_local or _sigmet_initial_local or "").strip()
+    gamet_for_pdf  = (gamet_text_local  or _gamet_initial_local  or "").strip()
+    if sigmet_for_pdf:
+        det.add_page(orientation="P"); draw_header(det, "SIGMET (LPPC) — Texto (RAW)")
+        det.set_font("Helvetica","",12); det.multi_cell(0,7, ascii_safe(sigmet_for_pdf))
+    if gamet_for_pdf:
+        det.add_page(orientation="P"); draw_header(det, "GAMET — Texto (RAW)")
+        det.set_font("Helvetica","",12); det.multi_cell(0,7, ascii_safe(gamet_for_pdf))
+
+    # Glossário curto
+    det.add_page(orientation="P"); draw_header(det, "Glossario — Simbologia, Nuvens & Fenomenos")
+    det.set_font("Helvetica","",12); det.multi_cell(0,7, ascii_safe(
+        "Cobertura (oktas): FEW 1–2; SCT 3–4; BKN 5–7; OVC 8.\n"
+        "Frentes: fria/ quente/ oclusao/ estacionaria. SIGWX: jatos, turbulencia, gelo, CB/TCU, EMBD/OCNL/FRQ."
+    ))
+
+    det_name = f"Briefing Detalhado - Missao {locals().get('mission_no') or 'X'}.pdf"
+    det.output(det_name)
+    with open(det_name, "rb") as f:
+        st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
+
 # ---------- Final Briefing (EN) ----------
-class _TmpFB(FPDF): pass  # placeholder tipado
-
-def _render_pdf_to_png_bytes_list(pdf_bytes: bytes, dpi: int = 300) -> List[bytes]:
-    out = []
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for i in range(doc.page_count):
-        p = doc.load_page(i)
-        png = p.get_pixmap(dpi=dpi).tobytes("png")
-        out.append(png)
-    doc.close()
-    return out
-
 if 'gen_final' in locals() and gen_final:
     fb = FinalBriefPDF()
     fb.cover(
@@ -460,66 +550,62 @@ if 'gen_final' in locals() and gen_final:
         date_str=str(locals().get("flight_date","")),
         time_utc=locals().get("time_utc","")
     )
-
-    # CHARTS FIRST (Weather)
+    # CHARTS primeiro (Weather=charts)
     charts_local: List[Dict[str,Any]] = locals().get("charts", [])
     if charts_local:
         ordered = [(c["title"], c["subtitle"], c["img_png"]) for c in sorted(charts_local, key=_chart_sort_key)]
         fb.charts_only(ordered)
 
+    # Base PDF
     fb_bytes: bytes = fpdf_to_bytes(fb)
     final_bytes = fb_bytes
 
-    # Merge com: Flight Plan (PDF/Imagem) -> Pares Navlog/VFR -> M&B PDF
+    # Merge com Flight Plan, Pares Navlog/VFR e M&B (tal como são)
     nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
-    fp_store = st.session_state.get("fp_store")  # {'bytes','type','name'}
-    mb_store = st.session_state.get("mb_store")  # {'bytes','type','name'}
-
+    fp_upload = locals().get("fp_upload", None)
+    mb_upload = locals().get("mb_upload", None)
     try:
-        main = fitz.open(stream=fb_bytes, filetype="pdf")
-        insert_pos = main.page_count
+        main = fitz.open(stream=fb_bytes, filetype="pdf"); insert_pos = main.page_count
 
-        # 1) Flight Plan
-        if fp_store:
-            if (fp_store["type"] or "").lower() == "application/pdf":
-                fp_doc = fitz.open(stream=fp_store["bytes"], filetype="pdf")
+        # Flight Plan
+        if fp_upload is not None:
+            raw = read_upload_bytes(fp_upload)
+            if (fp_upload.type or "").lower() == "application/pdf":
+                fp_doc = fitz.open(stream=raw, filetype="pdf")
                 main.insert_pdf(fp_doc, start_at=insert_pos); insert_pos += fp_doc.page_count; fp_doc.close()
             else:
-                img_pdf = image_bytes_to_pdf_bytes_fullbleed(fp_store["bytes"], orientation="P")
-                im_doc = fitz.open(stream=img_pdf, filetype="pdf")
-                main.insert_pdf(im_doc, start_at=insert_pos); insert_pos += im_doc.page_count; im_doc.close()
+                fp_bytes = image_bytes_to_pdf_bytes_fullbleed(raw or b"", orientation="P")
+                fp_doc = fitz.open(stream=fp_bytes, filetype="pdf")
+                main.insert_pdf(fp_doc, start_at=insert_pos); insert_pos += fp_doc.page_count; fp_doc.close()
 
-        # 2) Navlog/VFR “tal como são”
+        # Pares Navlog/VFR
         for p in (nav_pairs or []):
-            # Navlog
-            nv = p.get("nav")
+            nv = p.get("nav"); vf = p.get("vfr")
             if nv is not None:
-                raw = nv.getvalue() if hasattr(nv,"getvalue") else nv.read()
+                raw = read_upload_bytes(nv)
                 if (nv.type or "").lower() == "application/pdf":
                     nv_doc = fitz.open(stream=raw, filetype="pdf")
-                    main.insert_pdf(nv_doc, start_at=insert_pos); insert_pos += nv_doc.page_count; nv_doc.close()
                 else:
-                    nv_bytes = image_bytes_to_pdf_bytes_fullbleed(raw or b"", orientation="P")
-                    nv_doc = fitz.open(stream=nv_bytes, filetype="pdf")
-                    main.insert_pdf(nv_doc, start_at=insert_pos); insert_pos += nv_doc.page_count; nv_doc.close()
-            # VFR
-            vf = p.get("vfr")
+                    nv_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw or b"", "P"), filetype="pdf")
+                main.insert_pdf(nv_doc, start_at=insert_pos); insert_pos += nv_doc.page_count; nv_doc.close()
             if vf is not None:
-                raw = vf.getvalue() if hasattr(vf,"getvalue") else vf.read()
+                raw = read_upload_bytes(vf)
                 if (vf.type or "").lower() == "application/pdf":
                     vf_doc = fitz.open(stream=raw, filetype="pdf")
-                    main.insert_pdf(vf_doc, start_at=insert_pos); insert_pos += vf_doc.page_count; vf_doc.close()
                 else:
-                    vf_bytes = image_bytes_to_pdf_bytes_fullbleed(raw or b"", orientation="L")
-                    vf_doc = fitz.open(stream=vf_bytes, filetype="pdf")
-                    main.insert_pdf(vf_doc, start_at=insert_pos); insert_pos += vf_doc.page_count; vf_doc.close()
+                    vf_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw or b"", "L"), filetype="pdf")
+                main.insert_pdf(vf_doc, start_at=insert_pos); insert_pos += vf_doc.page_count; vf_doc.close()
 
-        # 3) Mass & Balance (PDF)
-        if mb_store and (mb_store["type"] or "").lower() == "application/pdf":
-            mb_doc = fitz.open(stream=mb_store["bytes"], filetype="pdf")
-            if mb_doc.page_count > 0:
-                main.insert_pdf(mb_doc, start_at=insert_pos); insert_pos += mb_doc.page_count
-            mb_doc.close()
+        # Mass & Balance
+        if mb_upload is not None:
+            raw = read_upload_bytes(mb_upload)
+            if (mb_upload.type or "").lower() == "application/pdf":
+                mb_doc = fitz.open(stream=raw, filetype="pdf")
+                main.insert_pdf(mb_doc, start_at=insert_pos); insert_pos += mb_doc.page_count; mb_doc.close()
+            else:
+                mb_bytes = image_bytes_to_pdf_bytes_fullbleed(raw or b"", orientation="P")
+                mb_doc = fitz.open(stream=mb_bytes, filetype="pdf")
+                main.insert_pdf(mb_doc, start_at=insert_pos); insert_pos += mb_doc.page_count; mb_doc.close()
 
         final_bytes = main.tobytes(); main.close()
     except Exception:
@@ -536,25 +622,30 @@ def _ppt_add_fullbleed_image_slide(prs: Presentation, img_bytes: bytes) -> None:
     slide = prs.slides.add_slide(_ppt_blank_slide(prs))
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         Image.open(io.BytesIO(img_bytes)).convert("RGB").save(tmp, "PNG"); path = tmp.name
+    # inserir por largura; se exceder a altura, ajusta
     pic = slide.shapes.add_picture(path, Inches(0), Inches(0), width=prs.slide_width)
     if pic.height > prs.slide_height:
-        # ajusta se necessário
         ratio = prs.slide_height / pic.height
         pic.height = prs.slide_height
-        pic.width = int(pic.width * ratio)
-        pic.left = int((prs.slide_width - pic.width) / 2)
+        pic.width  = int(pic.width * ratio)
+        pic.left   = int((prs.slide_width - pic.width) / 2)
     os.remove(path)
 
-if 'gen_ppt' in locals() and gen_ppt:
-    prs = Presentation()
-    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+def _render_pdf_to_png_bytes_list(pdf_bytes: bytes, dpi: int = 300) -> List[bytes]:
+    out = []; doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for i in range(doc.page_count):
+        p = doc.load_page(i); out.append(p.get_pixmap(dpi=dpi).tobytes("png"))
+    doc.close(); return out
 
-    # CAPA
-    title_slide = prs.slides.add_slide(prs.slide_layouts[5])  # title only
-    title_tf = title_slide.shapes.title.text_frame; title_tf.clear()
-    p = title_tf.paragraphs[0]; p.text = "Briefing"; p.font.size = Pt(44); p.font.bold = True
-    sub = title_slide.shapes.add_textbox(Inches(1), Inches(2.3), Inches(11.3), Inches(2)).text_frame
-    sub.text = ascii_safe(
+if 'gen_ppt' in locals() and gen_ppt:
+    prs = Presentation(); prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+
+    # Capa
+    slide = prs.slides.add_slide(prs.slide_layouts[5])  # title only
+    tf = slide.shapes.title.text_frame; tf.clear(); p = tf.paragraphs[0]
+    p.text = "Briefing"; p.font.size = Pt(44); p.font.bold = True
+    box = slide.shapes.add_textbox(Inches(1), Inches(2.3), Inches(11.3), Inches(2)).text_frame
+    box.text = ascii_safe(
         f"Mission: {safe_str(locals().get('mission_no',''))}   "
         f"Pilot: {safe_str(locals().get('pilot',''))}   "
         f"Aircraft: {safe_str(locals().get('aircraft_type',''))}   "
@@ -564,110 +655,58 @@ if 'gen_ppt' in locals() and gen_ppt:
         f"Weather: {APP_WEATHER_URL}    NOTAMs: {APP_NOTAMS_URL}"
     )
 
-    # CHARTS (Weather)
+    # Charts (Weather)
     charts_local: List[Dict[str,Any]] = locals().get("charts", [])
     if charts_local:
         for c in sorted(charts_local, key=_chart_sort_key):
             _ppt_add_fullbleed_image_slide(prs, c["img_png"].getvalue())
 
-    # Flight Plan (da sessão)
-    fp_store = st.session_state.get("fp_store")
-    if fp_store:
-        if (fp_store["type"] or "").lower() == "application/pdf":
-            for page_png in _render_pdf_to_png_bytes_list(fp_store["bytes"], dpi=300):
+    # Flight Plan
+    fp_upload = locals().get("fp_upload", None)
+    if fp_upload is not None:
+        raw = read_upload_bytes(fp_upload)
+        if (fp_upload.type or "").lower() == "application/pdf":
+            for page_png in _render_pdf_to_png_bytes_list(raw, dpi=300):
                 _ppt_add_fullbleed_image_slide(prs, page_png)
         else:
-            _ppt_add_fullbleed_image_slide(prs, fp_store["bytes"])
+            _ppt_add_fullbleed_image_slide(prs, raw)
 
-    # NAVLOG ↔ VFR (por rota)
+    # Navlog & VFR
     nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
     for p in (nav_pairs or []):
-        nv = p.get("nav")
+        nv = p.get("nav"); vf = p.get("vfr")
         if nv is not None:
-            raw = nv.getvalue() if hasattr(nv,"getvalue") else nv.read()
+            raw = read_upload_bytes(nv)
             if (nv.type or "").lower() == "application/pdf":
                 for page_png in _render_pdf_to_png_bytes_list(raw, dpi=300):
                     _ppt_add_fullbleed_image_slide(prs, page_png)
             else:
                 _ppt_add_fullbleed_image_slide(prs, raw)
-        vf = p.get("vfr")
         if vf is not None:
-            raw = vf.getvalue() if hasattr(vf,"getvalue") else vf.read()
+            raw = read_upload_bytes(vf)
             if (vf.type or "").lower() == "application/pdf":
                 for page_png in _render_pdf_to_png_bytes_list(raw, dpi=300):
                     _ppt_add_fullbleed_image_slide(prs, page_png)
             else:
                 _ppt_add_fullbleed_image_slide(prs, raw)
 
-    # Mass & Balance (PDF)
-    mb_store = st.session_state.get("mb_store")
-    if mb_store and (mb_store["type"] or "").lower() == "application/pdf":
-        for page_png in _render_pdf_to_png_bytes_list(mb_store["bytes"], dpi=300):
-            _ppt_add_fullbleed_image_slide(prs, page_png)
+    # Mass & Balance
+    mb_upload = locals().get("mb_upload", None)
+    if mb_upload is not None:
+        raw = read_upload_bytes(mb_upload)
+        if (mb_upload.type or "").lower() == "application/pdf":
+            for page_png in _render_pdf_to_png_bytes_list(raw, dpi=300):
+                _ppt_add_fullbleed_image_slide(prs, page_png)
+        else:
+            _ppt_add_fullbleed_image_slide(prs, raw)
 
-    # Guarda e disponibiliza
+    # Guardar PPTX
     ppt_name = f"Briefing - Mission {safe_str(locals().get('mission_no') or 'X')}.pptx"
     with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
-        prs.save(tmp.name); tmp.seek(0); ppt_bytes = tmp.read(); path = tmp.name
-    st.download_button("Download PowerPoint (EN)", data=ppt_bytes, file_name=ppt_name, mime="application/vnd.openxmlformats-officedocument.presentationml.presentation", use_container_width=True)
-    try: os.remove(path)
+        prs.save(tmp.name); tmp.seek(0); ppt_bytes = tmp.read(); tmp_path = tmp.name
+    st.download_button("Download PowerPoint (EN)", data=ppt_bytes, file_name=ppt_name,
+                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                       use_container_width=True)
+    try: os.remove(tmp_path)
     except Exception: pass
 
-# ---------- Detailed (PT) ----------
-class DetailedPDF(FPDF):
-    def header(self) -> None: pass
-    def footer(self) -> None: pass
-    def chart_block(self, title: str, subtitle: str, img_png: io.BytesIO, analysis_pt: str) -> None:
-        self.add_page(orientation="P"); draw_header(self, ascii_safe(title))
-        if subtitle: self.set_font("Helvetica","I",12); self.cell(0,9,ascii_safe(subtitle), ln=True, align="C")
-        max_w = self.w - 22; max_h = (self.h // 2) - 18
-        img = Image.open(img_png); iw, ih = img.size; r = min(max_w/iw, max_h/ih); w, h = int(iw*r), int(ih*r)
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            img.save(tmp, format="PNG"); path = tmp.name
-        self.image(path, x=(self.w - w)//2, y=self.get_y() + 6, w=w, h=h); os.remove(path); self.ln(h + 12)
-        self.set_font("Helvetica","",12); self.multi_cell(0, 7, ascii_safe(analysis_pt or " "))
-    def text_block(self, title:str, raw:str):
-        if not raw.strip(): return
-        self.add_page(orientation="P"); draw_header(self, ascii_safe(title))
-        self.ln(2); self.set_font("Helvetica","B",12); self.cell(0,8,"Texto (RAW):", ln=True)
-        self.set_font("Helvetica","",12); self.multi_cell(0,7, ascii_safe(raw))
-
-if 'gen_det' in locals() and gen_det:
-    sigmet_text_local = locals().get("sigmet_text",""); _sigmet_initial_local = locals().get("_sigmet_initial","")
-    gamet_text_local = locals().get("gamet_text","");   _gamet_initial_local = locals().get("_gamet_initial","")
-    det = DetailedPDF()
-
-    # CHARTS PRIMEIRO
-    charts_local: List[Dict[str,Any]] = locals().get("charts", [])
-    if charts_local:
-        grouped: Dict[str, List[Dict[str,Any]]] = {"SPC": [], "SIGWX": [], "Wind & Temp": [], "Other": []}
-        for c in charts_local: grouped.setdefault(c["kind"], []).append(c)
-        for k in list(grouped.keys()): grouped[k] = sorted(grouped[k], key=_chart_sort_key)
-        for kind in ["SPC","SIGWX","Wind & Temp","Other"]:
-            for ch in grouped.get(kind, []):
-                title, subtitle, img_png, fname = ch["title"], ch["subtitle"], ch["img_png"], ch.get("filename","")
-                analysis_txt = ""
-                if locals().get("use_ai_for_charts", False):
-                    try:
-                        analysis_txt = analyze_chart_pt(kind, base64.b64encode(img_png.getvalue()).decode("utf-8"), filename_hint=fname)
-                    except Exception: analysis_txt = "Analise indisponivel."
-                det.chart_block(title, subtitle, img_png, analysis_txt)
-
-    # SIGMET / GAMET (texto)
-    sigmet_for_pdf = (sigmet_text_local or _sigmet_initial_local or "").strip()
-    if sigmet_for_pdf: det.text_block("SIGMET (LPPC)", sigmet_for_pdf)
-    gamet_for_pdf = (gamet_text_local or _gamet_initial_local or "").strip()
-    if gamet_for_pdf: det.text_block("GAMET", gamet_for_pdf)
-
-    # Glossário simples
-    det.add_page(orientation="P"); draw_header(det, "Glossario — Simbologia, Nuvens & Fenomenos")
-    det.set_font("Helvetica","",12); det.multi_cell(0,7, ascii_safe(
-        "Cobertura (oktas): FEW 1–2; SCT 3–4; BKN 5–7; OVC 8.\n"
-        "Frentes: fria (triangulos), quente (semicirculos), oclusao (mix), estacionaria (pouco mov.).\n"
-        "SIGWX: jatos, turbulencia, gelo, CB/TCU com tops/bases, EMBD/OCNL/FRQ."
-    ))
-
-    det_name = f"Briefing Detalhado - Missao {locals().get('mission_no') or 'X'}.pdf"
-    det.output(det_name)
-    with open(det_name, "rb") as f:
-        st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
