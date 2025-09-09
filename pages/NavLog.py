@@ -1,9 +1,4 @@
-# app.py — NAVLOG com TOC/TOD “cortados” dentro do leg
-# Tabela da APP: apenas linhas From->To (sem TOC/TOD como linhas separadas),
-# mostrando FASES (↑/→/↓), ALT real do leg (ex.: 390→3000) e tempos/consumos do leg inteiro.
-# PDF: sequência “nome a nome”, podendo incluir TOC/TOD como pontos intermédios
-# quando caem a meio de um leg. Cada ponto tem o ETE/Dist **desde o ponto anterior**.
-#
+# app.py — NAVLOG com cortes (LPSO→TOC, TOC→VACOR, …) na APP e TH (True Heading) no PDF
 # Reqs: streamlit, pypdf, pytz
 
 import streamlit as st
@@ -63,7 +58,7 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     try:
         writer._root_object["/AcroForm"].update({
             NameObject("/NeedAppearances"): True,
-            NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")  # fonte visível
+            NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")
         })
     except: pass
     str_fields = {k:(str(v) if v is not None else "") for k,v in fields.items()}
@@ -82,14 +77,14 @@ def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
 def wrap360(x): x=fmod(x,360.0); return x+360 if x<0 else x
 def angle_diff(a,b): return (a-b+180)%360-180
 
-# Triângulo do vento correto: usa vetor “vento para” (from+180) com sinais
+# Triângulo do vento (vetor vento-para = from+180, sinais corretos)
 def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: float):
     if tas_kt <= 0:
         return 0.0, wrap360(tc_deg), 0.0
     wind_to = wrap360(wind_from_deg + 180.0)
     beta = radians(angle_diff(wind_to, tc_deg))
-    cross = wind_kt * sin(beta)               # + vento da esquerda
-    head  = wind_kt * math.cos(beta)          # + tailwind / − headwind
+    cross = wind_kt * sin(beta)               # +vento da esquerda
+    head  = wind_kt * math.cos(beta)          # +tailwind / −headwind
     s = max(-1.0, min(1.0, cross/max(tas_kt,1e-9)))
     wca = degrees(asin(s))
     th  = wrap360(tc_deg + wca)
@@ -97,7 +92,6 @@ def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: f
     return wca, th, gs
 
 def apply_var(true_deg,var_deg,east_is_negative=False):
-    # East is least (−), West is best (+)
     return wrap360(true_deg - var_deg if east_is_negative else true_deg + var_deg)
 
 def parse_hhmm(s:str):
@@ -118,7 +112,6 @@ def interp1(x,x0,x1,y0,y1):
     if x1==x0: return y0
     t=(x-x0)/(x1-x0); return y0+t*(y1-y0)
 
-# EN-ROUTE ROC (AFM WH5-11)  + fator 0.90
 ROC_ENROUTE = {
     0:{-25:981,0:835,25:704,50:586},  2000:{-25:870,0:726,25:597,50:481},
     4000:{-25:759,0:617,25:491,50:377},6000:{-25:648,0:509,25:385,50:273},
@@ -247,7 +240,7 @@ descent_ref_kt= st.number_input("Descent speed (kt)", 40, 120, 65, step=1)
 
 # ===== ROUTE (textarea) + JSON =====
 def parse_route_text(txt:str) -> List[str]:
-    tokens = re.split(r"[,\s→\-]+", (txt or "").strip())
+    tokens = re.split(r"[,\s→\\-]+", (txt or "").strip())
     return [t for t in tokens if t]
 
 st.markdown("### Route (DEP … ARR)")
@@ -325,7 +318,7 @@ for i,row in enumerate(legs_view):
 
 N = len(legs)
 
-# ===== Cálculo (TOC/TOD cortados dentro do leg) =====
+# ===== Cálculo (perfil vertical, cortes dentro do leg) =====
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
 
 dep_elev = aero_elev(dept); arr_elev = aero_elev(arr)
@@ -357,7 +350,7 @@ gs_climb   = [gs_for(legs[i]["TC"], tas_climb)   for i in range(N)]
 gs_cruise  = [gs_for(legs[i]["TC"], tas_cruise)  for i in range(N)]
 gs_descent = [gs_for(legs[i]["TC"], tas_descent) for i in range(N)]
 
-# ---- CLIMB distribuído para a frente
+# ---- Distribuir CLIMB para a frente
 climb_nm   = [0.0]*N
 idx_toc = None
 rem_t = float(t_climb_total)
@@ -372,7 +365,7 @@ for i in range(N):
         idx_toc = i
         break
 
-# ---- DESCENT distribuído para trás
+# ---- Distribuir DESCENT para trás
 descent_nm = [0.0]*N
 idx_tod = None
 rem_t = float(t_desc_total)
@@ -387,90 +380,112 @@ for j in range(N-1, -1, -1):
         idx_tod = j
         break
 
-# ===== Linhas da APP: apenas From→To, com fases e ALT start→end =====
+# ===== APP: linhas por SEGMENTO (ex.: LPSO→TOC / TOC→VACOR) =====
 startup = parse_hhmm(startup_str)
 takeoff = add_minutes(startup,15) if startup else None
 clock = takeoff
 
-def ceil_pos_minutes(x):  # arredonda p/ cima ≥1 min quando há distância
+def ceil_pos_minutes(x):  # arredonda ↑ e garante 1 min quando >0
     return max(1, int(math.ceil(x - 1e-9))) if x > 0 else 0
 
-rows=[]
+rows=[]; seq_points=[]  # seq_points será usada no PDF
 
-PH_ICON = {True: "↑", False: "", "cruise":"→", "descent":"↓"}
+PH_ICON = {"CLIMB":"↑","CRUISE":"→","DESCENT":"↓"}
 
 alt_cursor = float(start_alt)
 total_dist = sum(dist); total_ete = total_burn = 0.0; efob=float(start_fuel)
 
-for i in range(N):
-    tc = float(legs[i]["TC"])
-    d_total = dist[i]
-    d_cl = min(climb_nm[i], d_total)
-    d_ds = min(descent_nm[i], d_total - d_cl)
-    d_cr = max(0.0, d_total - d_cl - d_ds)
+def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:float, ff_lph:float):
+    """Acrescenta um segmento de um leg; atualiza relógio, ALT, totais e constrói ponto PDF."""
+    global clock, total_ete, total_burn, efob, alt_cursor
 
-    # tempos reais por fase (min)
-    t_cl = 60.0 * d_cl / max(gs_climb[i],  1e-6)
-    t_cr = 60.0 * d_cr / max(gs_cruise[i], 1e-6)
-    t_ds = 60.0 * d_ds / max(gs_descent[i],1e-6)
+    if d_nm <= 1e-9: return
 
-    # ALT end (aplica climb depois descent, com travas)
+    tc = float(legs[i_leg]["TC"])
+    wca, th, gs = wind_triangle(tc, tas, wind_from, wind_kt)
+
+    ete_raw = 60.0 * d_nm / max(gs,1e-6)
+    ete = ceil_pos_minutes(ete_raw)
+    burn = ff_lph * (ete_raw/60.0)
+
     alt_start = alt_cursor
-    alt_mid   = min(cruise_alt, alt_start + roc * (t_cl/60.0))
-    alt_end   = max(end_alt,    alt_mid   - rod_fpm * (t_ds/60.0))
-    alt_cursor = alt_end
+    if phase == "CLIMB":
+        alt_end = min(cruise_alt, alt_start + roc * (ete_raw/60.0))
+    elif phase == "DESCENT":
+        alt_end = max(end_alt,   alt_start - rod_fpm * (ete_raw/60.0))
+    else:
+        alt_end = alt_start
 
-    # consumo por leg (L)
-    burn = ff_climb*(t_cl/60.0) + ff_cruise*(t_cr/60.0) + ff_descent*(t_ds/60.0)
-
-    # GS média do leg
-    t_tot_real = t_cl + t_cr + t_ds
-    gs_avg = (d_total / (t_tot_real/60.0)) if t_tot_real > 1e-9 else gs_cruise[i]
-
-    # ETE mostrado (min inteiros, arred. para cima)
-    ete = ceil_pos_minutes(t_tot_real)
-
-    # fases do leg
-    phases = "".join([PH_ICON[True] if d_cl>1e-6 else "",
-                      PH_ICON["cruise"] if d_cr>1e-6 else "",
-                      PH_ICON["descent"] if d_ds>1e-6 else ""])
-    if phases == "": phases = "→"  # se tudo zero, assume cruzeiro
+    detail = f"{phase.capitalize()} {d_nm:.1f} nm"
 
     eto = ""
     if clock:
         clock = add_minutes(clock, ete); eto = clock.strftime("%H:%M")
-
     total_ete += ete; total_burn += burn; efob = max(0.0, efob - burn)
+    alt_cursor = alt_end
 
     rows.append({
-        "Fase": phases,
-        "Leg/Marker": f"{legs[i]['From']}→{legs[i]['To']}",
-        "To (Name)": legs[i]["To"],
+        "Fase": PH_ICON[phase],
+        "Leg/Marker": f"{from_nm}→{to_nm}",
+        "To (Name)": to_nm,
         "ALT (ft)": f"{int(round(alt_start))}→{int(round(alt_end))}",
+        "Detalhe": detail,
         "TC (°T)": round(tc,0),
-        "TH (°T)": round(wind_triangle(tc, tas_cruise, wind_from, wind_kt)[1],0),
-        "MH (°M)": round(apply_var(wind_triangle(tc, tas_cruise, wind_from, wind_kt)[1], var_deg, var_is_e),0),
-        "TAS (kt)": round(tas_cruise,0),
-        "GS (kt)": round(gs_avg,0),
-        "FF (L/h)": round(ff_cruise,1),  # referência
-        "Dist (nm)": round(d_total,1),
-        "ETE (min)": ete,
-        "ETO": eto,
-        "Burn (L)": round(burn,1),
-        "EFOB (L)": round(efob,1),
+        "TH (°T)": round(th,0),
+        "MH (°M)": round(apply_var(th, var_deg, var_is_e),0),
+        "TAS (kt)": round(tas,0), "GS (kt)": round(gs,0),
+        "FF (L/h)": round(ff_lph,1),
+        "Dist (nm)": round(d_nm,1), "ETE (min)": ete, "ETO": eto,
+        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
     })
+
+    # Ponto para o PDF (nome a nome): o “to_nm” torna-se o próximo ponto
+    seq_points.append({
+        "name": to_nm, "alt": int(round(alt_end)),
+        "tc": int(round(tc)), "th": int(round(th)),
+        "mh": int(round(apply_var(th, var_deg, var_is_e))),
+        "tas": int(round(tas)), "gs": int(round(gs)),
+        "dist": d_nm, "ete": ete, "eto": eto, "burn": burn
+    })
+
+# Ponto inicial para o PDF
+seq_points.append({"name": dept, "alt": int(round(start_alt)),
+                   "tc":"", "th":"", "mh":"", "tas":"", "gs":"", "dist":"", "ete":"", "eto": (clock.strftime("%H:%M") if clock else ""), "burn":""})
+
+for i in range(N):
+    leg_from, leg_to = legs[i]["From"], legs[i]["To"]
+    d_total  = dist[i]
+    d_cl = min(climb_nm[i], d_total)
+    d_ds = min(descent_nm[i], d_total - d_cl)
+    d_cr = max(0.0, d_total - d_cl - d_ds)
+
+    cur_from = leg_from
+
+    if d_cl > 0:
+        to_name = "TOC" if (idx_toc == i and d_cl < d_total) else leg_to
+        add_segment("CLIMB", cur_from, to_name, i, d_cl, tas_climb, ff_climb)
+        cur_from = to_name
+
+    if d_cr > 0:
+        to_name = "TOD" if (idx_tod == i and d_ds > 0) else leg_to
+        add_segment("CRUISE", cur_from, to_name, i, d_cr, tas_cruise, ff_cruise)
+        cur_from = to_name
+
+    if d_ds > 0:
+        add_segment("DESCENT", cur_from, leg_to, i, d_ds, float(descent_ref_kt), ff_descent)
 
 eta = clock
 landing = eta
 shutdown = add_minutes(eta,5) if eta else None
 
 # ===== Tabela da APP =====
-st.markdown("### Flight plan (TOC/TOD auto, APP = só From→To)")
+st.markdown("### Flight plan — cortes dentro do leg (App)")
 cfg={
     "Fase":      st.column_config.TextColumn("Fase"),
     "Leg/Marker": st.column_config.TextColumn("Leg / Marker"),
     "To (Name)":  st.column_config.TextColumn("To (Name)", disabled=True),
     "ALT (ft)":   st.column_config.TextColumn("ALT (ft)"),
+    "Detalhe":    st.column_config.TextColumn("Detalhe"),
     "TC (°T)":    st.column_config.NumberColumn("TC (°T)", disabled=True),
     "TH (°T)":    st.column_config.NumberColumn("TH (°T)", disabled=True),
     "MH (°M)":    st.column_config.NumberColumn("MH (°M)", disabled=True),
@@ -485,90 +500,41 @@ cfg={
 }
 st.data_editor(rows, hide_index=True, use_container_width=True, num_rows="fixed", column_config=cfg, key="fp_table")
 
-tot_line = f"**Totais** — Dist {total_dist:.1f} nm • ETE {int(total_ete)//60}h{int(total_ete)%60:02d} • Burn {total_burn:.1f} L • EFOB {efob:.1f} L"
+tot_line = f"**Totais** — Dist {sum(float(r['Dist (nm)']) for r in rows):.1f} nm • ETE {int(sum(int(r['ETE (min)']) for r in rows))//60:02d}:{int(sum(int(r['ETE (min)']) for r in rows))%60:02d} • Burn {sum(float(r['Burn (L)']) for r in rows):.1f} L • EFOB {efob:.1f} L"
 if eta:
     tot_line += f" • **ETA {eta.strftime('%H:%M')}** • **Landing {landing.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
 st.markdown(tot_line)
 
-# ===== PDF export =====
+# ===== PDF export (nome a nome; inclui TH) =====
 st.markdown("### PDF export")
 show_fields = st.checkbox("Mostrar nomes de campos do PDF (debug)")
-
-# ---- Gerar sequência “nome a nome” para o PDF (com TOC/TOD inseridos quando caem no meio do leg)
-def build_pdf_points():
-    pts = []  # cada item: dict com: name, alt, tc_to_next, tas_to_next, gs_to_next, dist_to_next, ete_to_next, burn_to_next, mh_to_next, eto_at_point
-    alt_cur = float(start_alt)
-    # relógio (usamos o mesmo 'clock' usado na APP, mas recalculamos a partir de takeoff)
-    clk = add_minutes(parse_hhmm(startup_str), 15) if startup_str else None
-
-    def append_point(name, alt):
-        pts.append({
-            "name": name, "alt": int(round(alt)),
-            "tc": "", "tas": "", "gs": "", "dist": "", "ete": "", "eto": (clk.strftime("%H:%M") if clk else ""),
-            "burn": "", "mh": ""
-        })
-
-    append_point(dept, alt_cur)
-
-    for i in range(N):
-        leg_from = legs[i]["From"]; leg_to = legs[i]["To"]; tc = float(legs[i]["TC"])
-        d_total = dist[i]
-        d_cl = min(climb_nm[i], d_total)
-        d_ds = min(descent_nm[i], d_total - d_cl)
-        d_cr = max(0.0, d_total - d_cl - d_ds)
-
-        # helper para fechar o segmento “do último ponto adicionado até NEXT_NAME”
-        def close_segment(next_name, d_nm, phase):
-            nonlocal alt_cur, clk
-            if d_nm <= 1e-9:
-                return
-            tas = {"CLIMB": vy_kt, "CRUISE": tas_cruise, "DESCENT": descent_ref_kt}[phase]
-            _, th, gs = wind_triangle(tc, tas, wind_from, wind_kt)
-            mh = apply_var(th, var_deg, var_is_e)
-            ete_raw = 60.0 * d_nm / max(gs,1e-6)
-            burn = {"CLIMB": ff_climb, "CRUISE": ff_cruise, "DESCENT": ff_descent}[phase] * (ete_raw/60.0)
-            ete_show = max(1, int(math.ceil(ete_raw - 1e-9))) if ete_raw>0 else 0
-
-            # preencher no ponto anterior (último da lista)
-            pts[-1]["tc"]   = f"{int(round(tc))}"
-            pts[-1]["tas"]  = f"{int(round(tas))}"
-            pts[-1]["gs"]   = f"{int(round(gs))}"
-            pts[-1]["mh"]   = f"{int(round(mh))}"
-            pts[-1]["dist"] = f"{d_nm:.1f}"
-            pts[-1]["ete"]  = f"{ete_show}"
-            pts[-1]["burn"] = f"{burn:.1f}"
-
-            # avançar relógio até o “next point”
-            if clk: clk = add_minutes(clk, ete_show)
-
-            # avançar altitude contínua
-            if phase == "CLIMB":
-                alt_cur = min(cruise_alt, alt_cur + roc*(ete_raw/60.0))
-            elif phase == "DESCENT":
-                alt_cur = max(end_alt,   alt_cur - rod_fpm*(ete_raw/60.0))
-            # CRUISE: alt_cur mantém
-
-            append_point(next_name, alt_cur)
-
-        # segmentos: CLIMB (até TOC?), CRUISE (até TOD?), DESCENT até To
-        if d_cl > 0:
-            next_name = "TOC" if (idx_toc == i and d_cr + d_ds >= 0) else leg_to
-            close_segment(next_name, d_cl, "CLIMB")
-
-        if d_cr > 0:
-            next_name = "TOD" if (idx_tod == i and d_ds > 0) else leg_to
-            close_segment(next_name, d_cr, "CRUISE")
-
-        if d_ds > 0:
-            close_segment(leg_to, d_ds, "DESCENT")
-
-    return pts
 
 try:
     template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
 except Exception as e:
     template_bytes = None
     st.error(f"Não foi possível ler o PDF: {e}")
+
+def build_pdf_items_from_points(points):
+    """Converte seq_points (primeiro é o DEP) em linhas para o PDF.
+       Cada linha i (i>=2) leva Dist/ETE/ETO/TC/TH/MH/TAS/GS do segmento entre o ponto i-1 e i."""
+    items = []
+    for idx, p in enumerate(points, start=1):
+        it = {
+            "Name": p["name"],
+            "Alt": str(int(round(p["alt"]))),
+            "TC":  (str(p["tc"]) if idx>1 else ""),
+            "TH":  (str(p["th"]) if idx>1 else ""),
+            "MH":  (str(p["mh"]) if idx>1 else ""),
+            "TAS": (str(p["tas"]) if idx>1 else ""),
+            "GS":  (str(p["gs"])  if idx>1 else ""),
+            "Dist": (f"{p['dist']:.1f}" if idx>1 else ""),
+            "ETE":  (str(p["ete"]) if idx>1 else ""),
+            "ETO":  (p["eto"] if idx>1 else (p["eto"] or "")),
+            "Burn": (f"{p['burn']:.1f}" if idx>1 else ""),
+        }
+        items.append(it)
+    return items
 
 if template_bytes:
     fieldset, maxlens = get_fields_and_meta(template_bytes)
@@ -578,91 +544,63 @@ if template_bytes:
         named: Dict[str,str] = {}
 
         # Cabeçalho
-        put(named, fieldset, "Aircraft", aircraft, maxlens)
-        put(named, fieldset, "Registration", registration, maxlens)
-        put(named, fieldset, "Callsign", callsign, maxlens)
-        put(named, fieldset, "Student", student, maxlens)
-        put(named, fieldset, "Lesson", lesson, maxlens)
-        put(named, fieldset, "Instrutor", instrutor, maxlens)
+        for k,v in {
+            "Aircraft": aircraft,
+            "Registration": registration,
+            "Callsign": callsign,
+            "Student": student, "Lesson": lesson, "Instrutor": instrutor,
+            "Dept_Airfield": dept, "Arrival_Airfield": arr,
+            "Alternate": altn, "Alt_Alternate": str(aero_elev(altn)),
+            "Dept_Comm": aero_freq(dept), "Arrival_comm": aero_freq(arr),
+            "Enroute_comm": "123.755",
+            "QNH": f"{int(round(qnh))}",
+            "temp_isa_dev": f"{int(round(temp_c))} / {round(temp_c - isa_temp(pressure_alt(aero_elev(dept), qnh)))}",
+            "wind": f"{int(round(wind_from)):03d}/{int(round(wind_kt)):02d}",
+            "mag_var": f"{var_deg:.1f}{'E' if var_is_e else 'W'}",
+            "flt_lvl_altitude": f"{int(round(cruise_alt))}",
+            "Startup": startup_str,
+            "Takeoff": add_minutes(parse_hhmm(startup_str),15).strftime("%H:%M") if startup_str else "",
+        }.items():
+            put(named, fieldset, k, v, maxlens)
 
-        put(named, fieldset, "Dept_Airfield", dept, maxlens)
-        put(named, fieldset, "Arrival_Airfield", arr, maxlens)
-        put(named, fieldset, "Alternate", altn, maxlens)
-        put(named, fieldset, "Alt_Alternate", str(aero_elev(altn)), maxlens)
+        # Pontos para o PDF
+        pdf_items = build_pdf_items_from_points(seq_points)
 
-        put(named, fieldset, "Dept_Comm", aero_freq(dept), maxlens)
-        put(named, fieldset, "Arrival_comm", aero_freq(arr), maxlens)
-        put(named, fieldset, "Enroute_comm", "123.755", maxlens)
-
-        isa_dev = round(temp_c - isa_temp(pressure_alt(aero_elev(dept), qnh)))
-        put(named, fieldset, "QNH", f"{int(round(qnh))}", maxlens)
-        put(named, fieldset, "temp_isa_dev", f"{int(round(temp_c))} / {isa_dev}", maxlens)
-        put(named, fieldset, "wind", f"{int(round(wind_from)):03d}/{int(round(wind_kt)):02d}", maxlens)
-        put(named, fieldset, "mag_var", f"{var_deg:.1f}{'E' if var_is_e else 'W'}", maxlens)
-        put(named, fieldset, "flt_lvl_altitude", f"{int(round(cruise_alt))}", maxlens)
-
-        put(named, fieldset, "Startup", startup_str, maxlens)
-        takeoff_pdf = add_minutes(parse_hhmm(startup_str),15) if startup_str else None
-        put(named, fieldset, "Takeoff", takeoff_pdf.strftime("%H:%M") if takeoff_pdf else "", maxlens)
-
-        # Construir pontos PDF (nome a nome)
-        pdf_pts = build_pdf_points()
-        # A ETA final é o ETO do último ponto
-        last_eto = pdf_pts[-1]["eto"] if pdf_pts else ""
+        # ETA/Shutdown
+        last_eto = pdf_items[-1]["ETO"] if pdf_items else ""
         put(named, fieldset, "Landing", last_eto, maxlens)
         put(named, fieldset, "Shutdown", (add_minutes(parse_hhmm(last_eto),5).strftime("%H:%M") if last_eto else ""), maxlens)
-        put(named, fieldset, "ETD/ETA", f"{(takeoff_pdf.strftime('%H:%M') if takeoff_pdf else '')} / {last_eto}", maxlens)
+        put(named, fieldset, "ETD/ETA", f"{(add_minutes(parse_hhmm(startup_str),15).strftime('%H:%M') if startup_str else '')} / {last_eto}", maxlens)
 
-        # Campos agregados aproximados
-        flt_minutes = 0
-        pl_bo_total = 0.0
-        for p in pdf_pts[:-1]:
-            try:
-                flt_minutes += int(p["ete"] or "0")
-                pl_bo_total += float(p["burn"] or "0")
-            except: pass
-        put(named, fieldset, "FLT TIME", f"{flt_minutes//60:02d}:{flt_minutes%60:02d}", maxlens)
+        # Totais (a partir dos pontos)
+        tot_min = sum(int(it["ETE"] or "0") for it in pdf_items)
+        tot_nm  = sum(float(it["Dist"] or 0.0) for it in pdf_items)
+        tot_bo  = sum(float(it["Burn"] or 0.0) for it in pdf_items)
+        put(named, fieldset, "FLT TIME", f"{tot_min//60:02d}:{tot_min%60:02d}", maxlens)
         for key in ("LEVEL F/F","LEVEL_FF","Level_FF","Level F/F"):
             put(named, fieldset, key, f"{int(round(cruise_alt))} / {ff_cruise:.1f}", maxlens)
-        climb_fuel = ff_climb*(t_climb_total/60.0)
-        for key in ("CLIMB FUEL","CLIMB_FUEL","Climb_Fuel"):
-            put(named, fieldset, key, f"{climb_fuel:.1f}", maxlens)
-
-        # Nº de legs originais
+        put(named, fieldset, "CLIMB FUEL", f"{ff_climb*(t_climb_total/60.0):.1f}", maxlens)
+        put(named, fieldset, "ETE_Total", f"{tot_min}", maxlens)
+        put(named, fieldset, "Dist_Total", f"{tot_nm:.1f}", maxlens)
+        put(named, fieldset, "PL_BO_TOTAL", f"{tot_bo:.1f}", maxlens)
+        put(named, fieldset, "EFOB_TOTAL", f"{max(0.0, float(start_fuel)-tot_bo):.1f}", maxlens)
         put(named, fieldset, "Leg_Number", str(N), maxlens)
 
-        # Preencher até 11 linhas conforme o template:
-        # Cada linha i é o PONTO i (Namei/Alti/...), e seus campos Dist/ETE/ETO referem-se ao
-        # segmento até o PONTO i (i > 1). A primeira linha (DEP) tem Dist/ETE vazios.
-        # (Ajusta se o teu template esperar “do ponto i para o próximo”).
-        max_rows = 11
-        # Garantir que temos pelo menos 1 ponto
-        if not pdf_pts:
-            pdf_pts = [{"name":dept, "alt":int(round(start_alt)), "tc":"", "tas":"","gs":"", "dist":"", "ete":"", "eto":"", "burn":"", "mh":""}]
-
-        for i, p in enumerate(pdf_pts[:max_rows], start=1):
-            s = str(i)
-            put(named, fieldset, f"Name{s}", p["name"], maxlens)
-            put(named, fieldset, f"Alt{s}",  str(p["alt"]), maxlens)
+        # Escrever até 11 linhas (ajusta ao teu template)
+        for i, r in enumerate(pdf_items[:11], start=1):
+            s=str(i)
+            put(named, fieldset, f"Name{s}", r["Name"], maxlens)
+            put(named, fieldset, f"Alt{s}",  r["Alt"], maxlens)
             put(named, fieldset, f"FREQ{s}", "", maxlens)
-
-            # Para manter consistência com o template “nome a nome”: TC/GS/Dist/ETE/ETO do caminho ATÉ este ponto
-            # (vazio para o primeiro).
-            if i > 1:
-                put(named, fieldset, f"TCRS{s}", p.get("tc",""), maxlens)
-                put(named, fieldset, f"TAS{s}",  p.get("tas",""), maxlens)
-                put(named, fieldset, f"GS{s}",   p.get("gs",""), maxlens)
-                put(named, fieldset, f"MHDG{s}", p.get("mh",""), maxlens)
-                put(named, fieldset, f"Dist{s}", p.get("dist",""), maxlens)
-                put(named, fieldset, f"ETE{s}",  p.get("ete",""), maxlens)
-                put(named, fieldset, f"ETO{s}",  p.get("eto",""), maxlens)
-                put(named, fieldset, f"PL_BO{s}",p.get("burn",""), maxlens)
-
-        # Totais (da APP)
-        put(named, fieldset, "ETE_Total", f"{int(round(sum(int(p['ete'] or '0') for p in pdf_pts)))}", maxlens)
-        put(named, fieldset, "Dist_Total", f"{sum(float(p['dist'] or 0.0) for p in pdf_pts):.1f}", maxlens)
-        put(named, fieldset, "PL_BO_TOTAL", f"{pl_bo_total:.1f}", maxlens)
-        put(named, fieldset, "EFOB_TOTAL", f"{max(0.0, float(start_fuel)-pl_bo_total):.1f}", maxlens)
+            if r["TC"]!="":   put(named, fieldset, f"TCRS{s}", r["TC"], maxlens)
+            if r["TH"]!="":   put(named, fieldset, f"THDG{s}", r["TH"], maxlens)  # <- TH agora preenchido
+            if r["MH"]!="":   put(named, fieldset, f"MHDG{s}", r["MH"], maxlens)
+            if r["TAS"]!="":  put(named, fieldset, f"TAS{s}",  r["TAS"], maxlens)
+            if r["GS"]!="":   put(named, fieldset, f"GS{s}",   r["GS"], maxlens)
+            if r["Dist"]!="": put(named, fieldset, f"Dist{s}", r["Dist"], maxlens)
+            if r["ETE"]!="":  put(named, fieldset, f"ETE{s}",  r["ETE"], maxlens)
+            if r["ETO"]!="":  put(named, fieldset, f"ETO{s}",  r["ETO"], maxlens)
+            if r["Burn"]!="": put(named, fieldset, f"PL_BO{s}", r["Burn"], maxlens)
 
         if st.button("Gerar PDF preenchido", type="primary"):
             out = fill_pdf(template_bytes, named)
@@ -673,3 +611,4 @@ if template_bytes:
             st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
+
