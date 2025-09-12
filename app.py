@@ -1,3 +1,4 @@
+
 # app.py — Briefings com editor de NOTAMs, GAMET e SIGMET (via Gist)
 # + Charts (Weather) + PDFs (Detailed/PT e Final/EN) + PowerPoint (EN)
 # + Emparelhamento Navlog↔VFR por Rota + Flight Plan + Mass & Balance
@@ -502,7 +503,7 @@ if 'gen_det' in locals() and gen_det:
                     except Exception: analysis_txt = "Analise indisponivel."
                 det.chart_block(title, subtitle, img_png, analysis_txt)
 
-    # (Opcional) METAR/TAF resumido — se quiseres manter no Detailed
+    # (Opcional) METAR/TAF resumido
     icaos_metar_local = locals().get("icaos_metar", [])
     if icaos_metar_local:
         det.add_page(orientation="P"); draw_header(det, "METAR / TAF — Interpretacao (PT, resumida)")
@@ -560,64 +561,68 @@ if 'gen_final' in locals() and gen_final:
 
     # Base PDF (forçar bytes)
     fb_bytes: bytes = fpdf_to_bytes(fb)
-    fb_bytes = bytes(fb_bytes)  # garante tipo bytes
+    fb_bytes = bytes(fb_bytes)
     final_bytes = fb_bytes
 
-    # Merge com Flight Plan, Pares Navlog/VFR e M&B (tal como são)
+    # Merge append-only: FP, Pares Nav/VFR e M&B
     nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
     fp_upload = locals().get("fp_upload", None)
     mb_upload = locals().get("mb_upload", None)
+
+    def _append_pdf(main_doc: fitz.Document, other_doc: fitz.Document) -> None:
+        """Acrescenta 'other_doc' ao fim de 'main_doc' (compatível com APIs antigas)."""
+        try:
+            main_doc.insert_pdf(other_doc)  # versões recentes
+        except TypeError:
+            main_doc.insert_pdf(other_doc, from_page=0, to_page=other_doc.page_count - 1)  # fallback
+
     try:
-        main = fitz.open(stream=fb_bytes, filetype="pdf"); insert_pos = main.page_count
+        main = fitz.open(stream=fb_bytes, filetype="pdf")
 
         # Flight Plan
         if fp_upload is not None:
-            raw = read_upload_bytes(fp_upload)
+            raw = read_upload_bytes(fp_upload) or b""
             if (fp_upload.type or "").lower() == "application/pdf":
                 fp_doc = fitz.open(stream=raw, filetype="pdf")
-                main.insert_pdf(fp_doc, start_at=insert_pos); insert_pos += fp_doc.page_count; fp_doc.close()
             else:
-                fp_bytes = image_bytes_to_pdf_bytes_fullbleed(raw or b"", orientation="P")
-                fp_doc = fitz.open(stream=fp_bytes, filetype="pdf")
-                main.insert_pdf(fp_doc, start_at=insert_pos); insert_pos += fp_doc.page_count; fp_doc.close()
+                fp_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw, orientation="P"), filetype="pdf")
+            _append_pdf(main, fp_doc); fp_doc.close()
 
-        # Pares Navlog/VFR
+        # Pares Navlog / VFR
         for p in (nav_pairs or []):
             nv = p.get("nav"); vf = p.get("vfr")
+
             if nv is not None:
-                raw = read_upload_bytes(nv)
+                raw = read_upload_bytes(nv) or b""
                 if (nv.type or "").lower() == "application/pdf":
                     nv_doc = fitz.open(stream=raw, filetype="pdf")
                 else:
-                    nv_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw or b"", "P"), filetype="pdf")
-                main.insert_pdf(nv_doc, start_at=insert_pos); insert_pos += nv_doc.page_count; nv_doc.close()
+                    nv_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw, "P"), filetype="pdf")
+                _append_pdf(main, nv_doc); nv_doc.close()
+
             if vf is not None:
-                raw = read_upload_bytes(vf)
+                raw = read_upload_bytes(vf) or b""
                 if (vf.type or "").lower() == "application/pdf":
                     vf_doc = fitz.open(stream=raw, filetype="pdf")
                 else:
-                    vf_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw or b"", "L"), filetype="pdf")
-                main.insert_pdf(vf_doc, start_at=insert_pos); insert_pos += vf_doc.page_count; vf_doc.close()
+                    vf_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw, "L"), filetype="pdf")
+                _append_pdf(main, vf_doc); vf_doc.close()
 
         # Mass & Balance
         if mb_upload is not None:
-            raw = read_upload_bytes(mb_upload)
+            raw = read_upload_bytes(mb_upload) or b""
             if (mb_upload.type or "").lower() == "application/pdf":
                 mb_doc = fitz.open(stream=raw, filetype="pdf")
-                main.insert_pdf(mb_doc, start_at=insert_pos); insert_pos += mb_doc.page_count; mb_doc.close()
             else:
-                mb_bytes = image_bytes_to_pdf_bytes_fullbleed(raw or b"", orientation="P")
-                mb_doc = fitz.open(stream=mb_bytes, filetype="pdf")
-                main.insert_pdf(mb_doc, start_at=insert_pos); insert_pos += mb_doc.page_count; mb_doc.close()
+                mb_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw, orientation="P"), filetype="pdf")
+            _append_pdf(main, mb_doc); mb_doc.close()
 
         final_bytes = main.tobytes()
-        final_bytes = bytes(final_bytes)  # força bytes, mesmo que memoryview/bytearray
         main.close()
-    except Exception:
-        # mesmo que falhe o merge, garantir bytes na saída base
-        final_bytes = bytes(final_bytes)
+    except Exception as e:
+        st.warning(f"Não foi possível juntar anexos ao PDF final: {e}")
 
-    final_bytes = bytes(final_bytes)  # redundância segura
+    final_bytes = bytes(final_bytes)
     final_name = f"Briefing - Missao {locals().get('mission_no') or 'X'}.pdf"
     st.download_button("Download Final Briefing (EN)", data=final_bytes, file_name=final_name, mime="application/pdf", use_container_width=True)
 
@@ -711,7 +716,7 @@ if 'gen_ppt' in locals() and gen_ppt:
     ppt_name = f"Briefing - Mission {safe_str(locals().get('mission_no') or 'X')}.pptx"
     with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
         prs.save(tmp.name); tmp.seek(0); ppt_bytes = tmp.read(); tmp_path = tmp.name
-    ppt_bytes = bytes(ppt_bytes)  # garante tipo bytes
+    ppt_bytes = bytes(ppt_bytes)
     st.download_button("Download PowerPoint (EN)", data=ppt_bytes, file_name=ppt_name,
                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                        use_container_width=True)
