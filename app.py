@@ -558,8 +558,9 @@ if 'gen_final' in locals() and gen_final:
         ordered = [(c["title"], c["subtitle"], c["img_png"]) for c in sorted(charts_local, key=_chart_sort_key)]
         fb.charts_only(ordered)
 
-    # Base PDF
+    # Base PDF (forçar bytes)
     fb_bytes: bytes = fpdf_to_bytes(fb)
+    fb_bytes = bytes(fb_bytes)  # garante tipo bytes
     final_bytes = fb_bytes
 
     # Merge com Flight Plan, Pares Navlog/VFR e M&B (tal como são)
@@ -609,10 +610,14 @@ if 'gen_final' in locals() and gen_final:
                 mb_doc = fitz.open(stream=mb_bytes, filetype="pdf")
                 main.insert_pdf(mb_doc, start_at=insert_pos); insert_pos += mb_doc.page_count; mb_doc.close()
 
-        final_bytes = main.tobytes(); main.close()
+        final_bytes = main.tobytes()
+        final_bytes = bytes(final_bytes)  # força bytes, mesmo que memoryview/bytearray
+        main.close()
     except Exception:
-        pass
+        # mesmo que falhe o merge, garantir bytes na saída base
+        final_bytes = bytes(final_bytes)
 
+    final_bytes = bytes(final_bytes)  # redundância segura
     final_name = f"Briefing - Missao {locals().get('mission_no') or 'X'}.pdf"
     st.download_button("Download Final Briefing (EN)", data=final_bytes, file_name=final_name, mime="application/pdf", use_container_width=True)
 
@@ -702,13 +707,13 @@ if 'gen_ppt' in locals() and gen_ppt:
         else:
             _ppt_add_fullbleed_image_slide(prs, raw)
 
-    # Guardar PPTX
+    # Guardar PPTX (forçar bytes)
     ppt_name = f"Briefing - Mission {safe_str(locals().get('mission_no') or 'X')}.pptx"
     with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
         prs.save(tmp.name); tmp.seek(0); ppt_bytes = tmp.read(); tmp_path = tmp.name
+    ppt_bytes = bytes(ppt_bytes)  # garante tipo bytes
     st.download_button("Download PowerPoint (EN)", data=ppt_bytes, file_name=ppt_name,
                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                        use_container_width=True)
     try: os.remove(tmp_path)
     except Exception: pass
-
