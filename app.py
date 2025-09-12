@@ -503,7 +503,7 @@ if 'gen_det' in locals() and gen_det:
                     except Exception: analysis_txt = "Analise indisponivel."
                 det.chart_block(title, subtitle, img_png, analysis_txt)
 
-    # (Opcional) METAR/TAF resumido
+    # (Opcional) METAR/TAF resumido — se quiseres manter no Detailed
     icaos_metar_local = locals().get("icaos_metar", [])
     if icaos_metar_local:
         det.add_page(orientation="P"); draw_header(det, "METAR / TAF — Interpretacao (PT, resumida)")
@@ -541,6 +541,41 @@ if 'gen_det' in locals() and gen_det:
     with open(det_name, "rb") as f:
         st.download_button("Download Detailed (PT)", data=f.read(), file_name=det_name, mime="application/pdf", use_container_width=True)
 
+# ---------- Helpers robustos para merge de PDFs ----------
+def _open_pdf_from_bytes_safe(b: bytes) -> Tuple[Optional[fitz.Document], Optional[str]]:
+    """
+    Tenta abrir via stream; se falhar, grava para um ficheiro temporário e abre por caminho.
+    Devolve (documento, temp_path). Se temp_path != None, remover depois de fechar.
+    """
+    if not b:
+        return None, None
+    try:
+        doc = fitz.open(stream=b, filetype="pdf")
+        return doc, None
+    except Exception:
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(b)
+                tmp.flush()
+                tmp_path = tmp.name
+            doc = fitz.open(tmp_path)
+            return doc, tmp_path
+        except Exception:
+            if tmp_path:
+                try: os.remove(tmp_path)
+                except Exception: pass
+            return None, None
+
+def _append_pdf(main_doc: fitz.Document, other_doc: fitz.Document) -> None:
+    """Acrescenta 'other_doc' ao fim de 'main_doc' com compatibilidade de APIs."""
+    if other_doc is None or other_doc.page_count == 0:
+        return
+    try:
+        main_doc.insert_pdf(other_doc)  # versões recentes
+    except TypeError:
+        main_doc.insert_pdf(other_doc, from_page=0, to_page=other_doc.page_count - 1)  # fallback
+
 # ---------- Final Briefing (EN) ----------
 if 'gen_final' in locals() and gen_final:
     fb = FinalBriefPDF()
@@ -564,29 +599,36 @@ if 'gen_final' in locals() and gen_final:
     fb_bytes = bytes(fb_bytes)
     final_bytes = fb_bytes
 
-    # Merge append-only: FP, Pares Nav/VFR e M&B
+    # Merge append-only: FP, Pares Nav/VFR e M&B (robusto com ficheiros temporários)
     nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
     fp_upload = locals().get("fp_upload", None)
     mb_upload = locals().get("mb_upload", None)
 
-    def _append_pdf(main_doc: fitz.Document, other_doc: fitz.Document) -> None:
-        """Acrescenta 'other_doc' ao fim de 'main_doc' (compatível com APIs antigas)."""
-        try:
-            main_doc.insert_pdf(other_doc)  # versões recentes
-        except TypeError:
-            main_doc.insert_pdf(other_doc, from_page=0, to_page=other_doc.page_count - 1)  # fallback
-
     try:
         main = fitz.open(stream=fb_bytes, filetype="pdf")
+
+        def _close_and_cleanup(doc: Optional[fitz.Document], tmp_path: Optional[str]) -> None:
+            try:
+                if doc is not None:
+                    doc.close()
+            finally:
+                if tmp_path:
+                    try: os.remove(tmp_path)
+                    except Exception: pass
 
         # Flight Plan
         if fp_upload is not None:
             raw = read_upload_bytes(fp_upload) or b""
             if (fp_upload.type or "").lower() == "application/pdf":
-                fp_doc = fitz.open(stream=raw, filetype="pdf")
+                src_doc, tmp = _open_pdf_from_bytes_safe(raw)
             else:
-                fp_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw, orientation="P"), filetype="pdf")
-            _append_pdf(main, fp_doc); fp_doc.close()
+                pdf_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation="P")
+                src_doc, tmp = _open_pdf_from_bytes_safe(pdf_bytes)
+            if src_doc and not getattr(src_doc, "needs_pass", False):
+                _append_pdf(main, src_doc)
+            elif src_doc and getattr(src_doc, "needs_pass", False):
+                st.warning("Flight Plan está protegido por palavra-passe – ignorado.")
+            _close_and_cleanup(src_doc, tmp)
 
         # Pares Navlog / VFR
         for p in (nav_pairs or []):
@@ -595,32 +637,48 @@ if 'gen_final' in locals() and gen_final:
             if nv is not None:
                 raw = read_upload_bytes(nv) or b""
                 if (nv.type or "").lower() == "application/pdf":
-                    nv_doc = fitz.open(stream=raw, filetype="pdf")
+                    src_doc, tmp = _open_pdf_from_bytes_safe(raw)
                 else:
-                    nv_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw, "P"), filetype="pdf")
-                _append_pdf(main, nv_doc); nv_doc.close()
+                    pdf_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, "P")
+                    src_doc, tmp = _open_pdf_from_bytes_safe(pdf_bytes)
+                if src_doc and not getattr(src_doc, "needs_pass", False):
+                    _append_pdf(main, src_doc)
+                elif src_doc and getattr(src_doc, "needs_pass", False):
+                    st.warning(f"Navlog ({safe_str(p.get('route',''))}) protegido – ignorado.")
+                _close_and_cleanup(src_doc, tmp)
 
             if vf is not None:
                 raw = read_upload_bytes(vf) or b""
                 if (vf.type or "").lower() == "application/pdf":
-                    vf_doc = fitz.open(stream=raw, filetype="pdf")
+                    src_doc, tmp = _open_pdf_from_bytes_safe(raw)
                 else:
-                    vf_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw, "L"), filetype="pdf")
-                _append_pdf(main, vf_doc); vf_doc.close()
+                    pdf_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, "L")
+                    src_doc, tmp = _open_pdf_from_bytes_safe(pdf_bytes)
+                if src_doc and not getattr(src_doc, "needs_pass", False):
+                    _append_pdf(main, src_doc)
+                elif src_doc and getattr(src_doc, "needs_pass", False):
+                    st.warning(f"VFR Map ({safe_str(p.get('route',''))}) protegido – ignorado.")
+                _close_and_cleanup(src_doc, tmp)
 
         # Mass & Balance
         if mb_upload is not None:
             raw = read_upload_bytes(mb_upload) or b""
             if (mb_upload.type or "").lower() == "application/pdf":
-                mb_doc = fitz.open(stream=raw, filetype="pdf")
+                src_doc, tmp = _open_pdf_from_bytes_safe(raw)
             else:
-                mb_doc = fitz.open(stream=image_bytes_to_pdf_bytes_fullbleed(raw, orientation="P"), filetype="pdf")
-            _append_pdf(main, mb_doc); mb_doc.close()
+                pdf_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation="P")
+                src_doc, tmp = _open_pdf_from_bytes_safe(pdf_bytes)
+            if src_doc and not getattr(src_doc, "needs_pass", False):
+                _append_pdf(main, src_doc)
+            elif src_doc and getattr(src_doc, "needs_pass", False):
+                st.warning("M&B está protegido por palavra-passe – ignorado.")
+            _close_and_cleanup(src_doc, tmp)
 
         final_bytes = main.tobytes()
         main.close()
+
     except Exception as e:
-        st.warning(f"Não foi possível juntar anexos ao PDF final: {e}")
+        st.warning(f"Não foi possível juntar anexos ao PDF final (modo robusto): {e}")
 
     final_bytes = bytes(final_bytes)
     final_name = f"Briefing - Missao {locals().get('mission_no') or 'X'}.pdf"
