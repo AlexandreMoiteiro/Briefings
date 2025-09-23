@@ -1,3 +1,5 @@
+
+
 # app.py — NAVLOG com cortes dentro do leg (TOC/TOD) e PDF alinhado com a APP
 # Reqs: streamlit, pypdf, pytz
 
@@ -6,7 +8,7 @@ import datetime as dt
 import pytz, io, json, unicodedata, re, math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from math import sin, asin, radians, degrees, fmod
+from math import fmod  # mantemos fmod; restantes funções via math.
 
 # =============== PDF helpers ===============
 try:
@@ -73,26 +75,46 @@ def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
             s = s[:maxlens[key]]
         out[key] = s
 
-# =============== Wind & helpers ===============
-def wrap360(x): x=fmod(x,360.0); return x+360 if x<0 else x
-def angle_diff(a,b): return (a-b+180)%360-180
+# =============== Wind & helpers (corrigido) ===============
+def wrap360(x: float) -> float:
+    x = fmod(x, 360.0)
+    return x + 360.0 if x < 0.0 else x
 
-# Triângulo do vento (vento-para = from+180)
+def angle_diff(a: float, b: float) -> float:
+    """ devolve (a-b) em [-180, +180) """
+    return (a - b + 180.0) % 360.0 - 180.0
+
 def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: float):
-    if tas_kt <= 0:
+    """
+    Triângulo do vento com sinais consistentes:
+      - Entrada: vento informado como FROM (°T), como em METAR/TAF.
+      - WCA positiva => vento vem da esquerda (tens de apontar mais para a direita).
+      - head/tail: positivo tailwind (a favor), negativo headwind (contra).
+    Saídas: (wca_deg, th_deg, gs_kt)
+    """
+    if tas_kt <= 0.0:
         return 0.0, wrap360(tc_deg), 0.0
-    wind_to = wrap360(wind_from_deg + 180.0)
-    beta = radians(angle_diff(wind_to, tc_deg))
-    cross = wind_kt * sin(beta)              # +vento da esquerda
-    head  = wind_kt * math.cos(beta)         # +tailwind / −headwind
-    s = max(-1.0, min(1.0, cross/max(tas_kt,1e-9)))
-    wca = degrees(asin(s))
-    th  = wrap360(tc_deg + wca)
-    gs  = max(0.0, tas_kt*math.cos(radians(wca)) + head)
+
+    wind_to_deg = wrap360(wind_from_deg + 180.0)         # convertemos FROM -> TO p/ o vetor
+    beta_rad = math.radians(angle_diff(wind_to_deg, tc_deg))
+
+    cross = wind_kt * math.sin(beta_rad)                 # + vento da esquerda
+    head  = wind_kt * math.cos(beta_rad)                 # + tailwind / − headwind
+
+    # Wind Correction Angle
+    s   = max(-1.0, min(1.0, cross / max(tas_kt, 1e-9)))
+    wca = math.degrees(math.asin(s))
+
+    th  = wrap360(tc_deg + wca)                          # True Heading
+    gs  = max(0.0, tas_kt * math.cos(math.radians(wca)) + head)
+
     return wca, th, gs
 
-def apply_var(true_deg,var_deg,east_is_negative=False):
-    return wrap360(true_deg - var_deg if east_is_negative else true_deg + var_deg)
+def apply_var(true_deg: float, var_deg: float, var_is_east: bool) -> float:
+    """
+    Magnético = Verdadeiro − var (E)  /  + var (W)
+    """
+    return wrap360(true_deg - var_deg if var_is_east else true_deg + var_deg)
 
 def parse_hhmm(s:str):
     s=(s or "").strip()
@@ -225,14 +247,17 @@ with c7:
     rpm_cruise = st.number_input("Cruise RPM (AFM)",1800,2388,2000,step=10)
 with c8:
     rpm_descent= st.number_input("Descent RPM (se NÃO idle)",1700,2300,1800,step=10)
-    idle_mode  = st.checkbox("Descent mostly IDLE", value=True)
+    # Por defeito: descida NÃO é idle
+    idle_mode  = st.checkbox("Descent mostly IDLE", value=False)
 with c9:
     rod_fpm=st.number_input("ROD (ft/min)",200,1500,700,step=10)
-    idle_ff=st.number_input("Idle FF (L/h)", 0.0, 20.0, 5.0, step=0.1)
+    # Por defeito: 15 L/h (aplicado quando NÃO idle)
+    descent_ff_default = st.number_input("Descent FF default (L/h)", 0.0, 40.0, 15.0, step=0.1)
+    idle_ff=st.number_input("Idle FF (L/h)", 0.0, 20.0, 15.0, step=0.1)
     start_fuel=st.number_input("Fuel inicial (EFOB_START) [L]",0.0,1000.0,85.0,step=0.1)
 
 # Velocidades ref
-cruise_ref_kt = st.number_input("Cruise speed (kt)", 40, 140, 80, step=1)
+cruise_ref_kt = st.number_input("Cruise speed (kt)", 40, 140, 90, step=1)  # default 90
 descent_ref_kt= st.number_input("Descent speed (kt)", 40, 120, 65, step=1)
 
 # ===== ROUTE (textarea) + JSON =====
@@ -333,12 +358,12 @@ delta_desc  = max(0.0, cruise_alt - end_alt)
 t_climb_total = delta_climb / max(roc,1e-6)
 t_desc_total  = delta_desc  / max(rod_fpm,1e-6)
 
-# FFs (AFM)
+# FFs (AFM) — subida/cruzeiro por lookup; descida: 15 L/h por defeito quando NÃO idle
 pa_mid_climb = start_alt + 0.5*delta_climb
 pa_mid_desc  = end_alt   + 0.5*delta_desc
 _, ff_climb  = cruise_lookup(pa_mid_climb, int(rpm_climb),  temp_c)
 _, ff_cruise = cruise_lookup(pa_cruise,   int(rpm_cruise),  temp_c)
-ff_descent   = float(idle_ff) if idle_mode else cruise_lookup(pa_mid_desc, int(rpm_descent), temp_c)[1]
+ff_descent   = float(idle_ff) if idle_mode else float(descent_ff_default)
 
 def gs_for(tc, tas): return wind_triangle(float(tc), float(tas), wind_from, wind_kt)[2]
 
@@ -428,7 +453,7 @@ def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:fl
         "ALT (ft)": f"{int(round(alt_start))}→{int(round(alt_end))}",
         "Detalhe": f"{phase.capitalize()} {d_nm:.1f} nm",
         "TC (°T)": round(tc,0),
-        "TH (°T)": round(th,0),
+        "TH (°T)": round(th,0),                                    # arredonda só na apresentação
         "MH (°M)": round(apply_var(th, var_deg, var_is_e),0),
         "TAS (kt)": round(tas,0), "GS (kt)": round(gs,0),
         "FF (L/h)": round(ff_lph,1),
@@ -613,7 +638,5 @@ if template_bytes:
             st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
         st.error(f"Erro ao preparar/gerar PDF: {e}")
-
-
 
 
