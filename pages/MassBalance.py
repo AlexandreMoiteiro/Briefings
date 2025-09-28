@@ -1,4 +1,4 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v4.1
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v4.2
 # Works on Streamlit Cloud
 # Requirements:
 #   streamlit
@@ -10,6 +10,7 @@
 # NOTES:
 # - Windy key must be set in Streamlit secrets as: WINDY_API_KEY
 # - PDF template file must be in repo root: TecnamP2008MBPerformanceSheet_MissionX.pdf
+# - Times you input are **UTC**. Windy data are **hourly**; ETD is rounded to the nearest hour.
 
 import streamlit as st
 import datetime as dt
@@ -246,8 +247,8 @@ def windy_point_forecast(lat, lon, model, params, api_key):
     body = {
         "lat": round(float(lat), 3),
         "lon": round(float(lon), 3),
-        "model": model,
-        "parameters": params,
+        "model": model,                 # e.g., "iconEu", "gfs", "arome"
+        "parameters": params,           # e.g., ["wind","temp","pressure","windGust"]
         "levels": ["surface"],
         "key": api_key,
     }
@@ -275,7 +276,6 @@ def windy_pick_time(resp, when_utc):
         return None, None
     times = [dt.datetime.utcfromtimestamp(t/1000.0).replace(tzinfo=dt.timezone.utc) for t in resp["ts"]]
     target = round_to_nearest_hour(when_utc.replace(tzinfo=dt.timezone.utc))
-    # pick exact if present, else nearest
     if target in times:
         idx = times.index(target)
         return idx, target
@@ -292,12 +292,24 @@ def windy_unpack_at(resp, idx):
     speed_ms = sqrt(u*u + v*v)
     dir_deg = (degrees(atan2(-u, -v)) + 360.0) % 360.0
     speed_kt = speed_ms * 1.94384
-    temp_c = getv("temp-surface")
+    temp_val = getv("temp-surface")
+    # Convert Kelvin->C if needed (Windy temp often in Kelvin)
+    temp_c = None
+    if temp_val is not None:
+        temp_c = float(temp_val)
+        if temp_c > 100:  # likely Kelvin
+            temp_c = temp_c - 273.15
+    if temp_c is not None:
+        temp_c = round(temp_c, 1)
     pres_pa = getv("pressure-surface")
-    qnh_hpa = pres_pa/100.0 if pres_pa is not None else None
-    return {"wind_dir": dir_deg, "wind_kt": speed_kt,
-            "wind_gust_kt": (gust * 1.94384) if gust is not None else None,
-            "temp": temp_c, "qnh": qnh_hpa}
+    qnh_hpa = round(pres_pa/100.0, 1) if pres_pa is not None else None
+    return {
+        "wind_dir": round(dir_deg) if dir_deg is not None else None,
+        "wind_kt": round(speed_kt) if speed_kt is not None else None,
+        "wind_gust_kt": round(gust * 1.94384) if gust is not None else None,
+        "temp": temp_c,
+        "qnh": qnh_hpa
+    }
 
 # ---------------------------------
 # Session defaults
@@ -321,13 +333,32 @@ DEFAULT_LEGS = [
 if "legs" not in st.session_state:
     st.session_state.legs = [dict(x) for x in DEFAULT_LEGS]
 
+# Per-leg MET store (so we can safely apply to widgets after fetch)
+if "met" not in st.session_state:
+    st.session_state.met = [
+        {"temp": 15.0, "qnh": 1013.0, "wind_dir": 0.0, "wind_kt": 0.0, "model": "iconEu", "stamp": None}
+        for _ in range(3)
+    ]
+
+# If a fetch happened previously, apply to widget state BEFORE widgets are created
+if st.session_state.get("_apply_met_to_widgets", False):
+    for i in range(3):
+        m = st.session_state.met[i]
+        st.session_state[f"temp_{i}"] = float(m["temp"])
+        st.session_state[f"qnh_{i}"]  = float(m["qnh"])
+        st.session_state[f"wdir_{i}"] = float(m["wind_dir"])
+        st.session_state[f"wspd_{i}"] = float(m["wind_kt"])
+    st.session_state["_apply_met_to_widgets"] = False
+
 # ---------------------------------
-# Sidebar (fleet hidden in expander; API key from secrets)
+# Sidebar (fleet editor tucked away; API key from secrets only)
 # ---------------------------------
 with st.sidebar:
     st.subheader("⚙️ Settings")
     st.caption("Windy key is read from secrets: `WINDY_API_KEY`")
-    WINDY_KEY = st.secrets["WINDY_API_KEY"] if "WINDY_API_KEY" in st.secrets else ""
+    if "WINDY_API_KEY" not in st.secrets:
+        st.error("Missing WINDY_API_KEY in your Streamlit secrets!")
+
     with st.expander("Fleet settings (EW & Moment)", expanded=False):
         regs_all = list(st.session_state.fleet.keys())
         add_reg = st.text_input("Add/Update registration (e.g., CS-ABC)", value="")
@@ -406,18 +437,18 @@ def choose_best_runway(ad, temp_c, qnh, wind_dir, wind_kt):
     # Prefer feasible with highest headwind; else highest headwind
     feasibles = [c for c in candidates if c["feasible"]]
     pool = feasibles if feasibles else candidates
-    best = max(pool, key=lambda c: (c["hw_comp"], c["toda_av"] + c["lda_av"]))
+    best = max(pool, key=lambda c: (c["feasible"], c["hw_comp"]))  # feasible first, then headwind
     return best, candidates
 
 # ---- 2) Aerodromes & MET ----
 with tab_aero:
     st.markdown("### Aerodromes (fixed: Departure, Arrival, Alternate) + MET")
-    st.caption("Wind is used to auto-select the best runway direction for each aerodrome.")
+    st.caption("Program auto-selects the best runway direction per aerodrome using wind/headwind & declared distances. Model default is ICON-EU.")
 
     perf_rows = []
     for i, leg in enumerate(st.session_state.legs):
         role = leg.get("role", ["Departure","Arrival","Alternate"][i])
-        c1, c2, c3 = st.columns([0.35, 0.35, 0.30])
+        c1, c2, c3 = st.columns([0.36, 0.36, 0.28])
 
         with c1:
             icao_options = sorted(AERODROMES_DB.keys())
@@ -428,25 +459,25 @@ with tab_aero:
             ad = AERODROMES_DB[icao]
             st.write(f"**{ad['name']}**  \nLat {ad['lat']:.5f}, Lon {ad['lon']:.5f}  \nElev {ad['elev_ft']:.0f} ft")
 
-        # Manual MET defaults (user inputs or fetch)
+        # MET widgets – values come from session_state if previously fetched
         with c2:
-            temp_c = st.number_input("OAT (°C)", value=15.0, step=0.1, key=f"temp_{i}")
-            qnh = st.number_input("QNH (hPa)", min_value=900.0, max_value=1050.0, value=1013.0, step=0.1, key=f"qnh_{i}")
-            wind_dir = st.number_input("Wind FROM (°)", min_value=0.0, max_value=360.0, value=0.0, step=1.0, key=f"wdir_{i}")
-            wind_kt = st.number_input("Wind speed (kt)", min_value=0.0, value=0.0, step=1.0, key=f"wspd_{i}")
+            temp_c = st.number_input("OAT (°C)", value=st.session_state.get(f"temp_{i}", st.session_state.met[i]["temp"]), step=0.1, key=f"temp_{i}")
+            qnh    = st.number_input("QNH (hPa)", min_value=900.0, max_value=1050.0, value=st.session_state.get(f"qnh_{i}", st.session_state.met[i]["qnh"]), step=0.1, key=f"qnh_{i}")
+            wind_dir = st.number_input("Wind FROM (°)", min_value=0.0, max_value=360.0, value=st.session_state.get(f"wdir_{i}", st.session_state.met[i]["wind_dir"]), step=1.0, key=f"wdir_{i}")
+            wind_kt  = st.number_input("Wind speed (kt)", min_value=0.0, value=st.session_state.get(f"wspd_{i}", st.session_state.met[i]["wind_kt"]), step=1.0, key=f"wspd_{i}")
 
         with c3:
-            # Show nice labels, map to Windy codes; default = ICON-EU
+            # Nice labels; default = ICON-EU
             model_labels = ["ICON-EU (default)", "GFS", "AROME"]
             model_map = {"ICON-EU (default)": "iconEu", "GFS": "gfs", "AROME": "arome"}
             model_label = st.selectbox("Windy model", options=model_labels, index=0, key=f"model_{i}")
             model = model_map[model_label]
-            fetch_click = st.button("Fetch MET (Windy)", key=f"fetch_{i}")
-            if fetch_click:
-                if not WINDY_KEY:
+            if st.button("Fetch MET (Windy)", key=f"fetch_{i}"):
+                api_key = st.secrets.get("WINDY_API_KEY", "")
+                if not api_key:
                     st.error("Windy API key not found in secrets (WINDY_API_KEY).")
                 else:
-                    resp = windy_point_forecast(ad["lat"], ad["lon"], model, ["wind","temp","pressure","windGust"], WINDY_KEY)
+                    resp = windy_point_forecast(ad["lat"], ad["lon"], model, ["wind","temp","pressure","windGust"], api_key)
                     if "error" in resp:
                         st.error(f"Windy error: {resp.get('error')} {resp.get('detail','')}")
                     else:
@@ -454,32 +485,36 @@ with tab_aero:
                         idx, ts_pick = windy_pick_time(resp, etd)
                         met = windy_unpack_at(resp, idx)
                         if met:
-                            temp_c   = met["temp"] if met["temp"] is not None else temp_c
-                            qnh      = met["qnh"] if met["qnh"] is not None else qnh
-                            wind_dir = met["wind_dir"] if met["wind_dir"] is not None else wind_dir
-                            wind_kt  = met["wind_kt"] if met["wind_kt"] is not None else wind_kt
-                            # Inform about hourly rounding
+                            # Update per-leg MET store
+                            st.session_state.met[i].update({
+                                "temp": met["temp"] if met["temp"] is not None else temp_c,
+                                "qnh": met["qnh"] if met["qnh"] is not None else qnh,
+                                "wind_dir": met["wind_dir"] if met["wind_dir"] is not None else wind_dir,
+                                "wind_kt": met["wind_kt"] if met["wind_kt"] is not None else wind_kt,
+                                "model": model,
+                                "stamp": ts_pick.strftime("%Y-%m-%d %H:%MZ") if ts_pick else None
+                            })
+                            # Signal that we need to push values into widget state on next run
+                            st.session_state["_apply_met_to_widgets"] = True
+                            # Info message, including hourly rounding note
                             rounded_target = round_to_nearest_hour(etd)
-                            delta_min = int(abs((ts_pick - rounded_target).total_seconds())/60)
+                            delta_min = int(abs((ts_pick - rounded_target).total_seconds())/60) if ts_pick else 0
                             st.success(
-                                f"Windy @ {ts_pick.strftime('%Y-%m-%d %H:%MZ')} "
+                                f"Windy @ {ts_pick.strftime('%Y-%m-%d %H:%MZ') if ts_pick else '—'} "
                                 f"(rounded from ETD {rounded_target.strftime('%H:%MZ')}, Δ≈{delta_min} min): "
-                                f"{round(wind_kt) if wind_kt is not None else '—'} kt / "
-                                f"{round(wind_dir) if wind_dir is not None else '—'}° | "
-                                f"{temp_c} °C | QNH {round(qnh,1) if qnh is not None else '—'} hPa"
+                                f"{st.session_state.met[i]['wind_kt']} kt / "
+                                f"{st.session_state.met[i]['wind_dir']}° | "
+                                f"{st.session_state.met[i]['temp']} °C | QNH {st.session_state.met[i]['qnh']} hPa"
                             )
+                            st.rerun()
                         else:
                             st.warning("No usable data at selected time.")
-                    # write back to widget state immediately
-                    st.session_state[f"temp_{i}"] = temp_c
-                    st.session_state[f"qnh_{i}"]  = qnh
-                    st.session_state[f"wdir_{i}"] = wind_dir
-                    st.session_state[f"wspd_{i}"] = wind_kt
 
-        # Auto-select best runway
-        best, all_rw = choose_best_runway(ad, temp_c, qnh, wind_dir, wind_kt)
+        # Auto-select best runway based on (possibly updated) MET
+        best, all_rw = choose_best_runway(ad, float(temp_c), float(qnh), float(wind_dir), float(wind_kt))
         feas = "✅" if best["feasible"] else "⚠️"
-        # Use markdown (not st.info) to allow HTML chips safely
+
+        # Markdown (HTML chips)
         st.markdown(
             f"🧭 **Selected runway:** {best['id']} "
             f"<span class='chip'>QFU {best['qfu']:.0f}°</span>"
@@ -498,7 +533,7 @@ with tab_aero:
             "lat": ad["lat"], "lon": ad["lon"], "elev_ft": ad["elev_ft"],
             "rwy": best["id"], "qfu": best["qfu"], "toda_av": best["toda_av"], "lda_av": best["lda_av"],
             "slope_pc": best["slope_pc"], "paved": best["paved"],
-            "temp": temp_c, "qnh": qnh, "wind_dir": wind_dir, "wind_kt": wind_kt,
+            "temp": float(temp_c), "qnh": float(qnh), "wind_dir": float(wind_dir), "wind_kt": float(wind_kt),
             "pa_ft": best["pa_ft"], "da_ft": best["da_ft"],
             "to_gr": best["to_gr"], "to_50": best["to_50"], "ldg_gr": best["ldg_gr"], "ldg_50": best["ldg_50"],
             "hw_comp": best["hw_comp"], "feasible": best["feasible"]
@@ -606,6 +641,7 @@ with tab_wb:
 # ---- 4) Performance & Fuel ----
 with tab_perf:
     st.markdown("### Fuel Planning")
+    # By default, simplified 90 L policy
     policy = st.radio("Policy", options=["Simplified (fixed 90 L ramp)", "Detailed (rate-based)"], index=0, horizontal=True)
 
     if policy.startswith("Simplified"):
@@ -751,6 +787,7 @@ with tab_pdf:
         st.success("PDF generated!")
         with open(out_main_path, "rb") as f:
             st.download_button("Download PDF", f, file_name=out_main_path, mime="application/pdf")
+
 
 
 
