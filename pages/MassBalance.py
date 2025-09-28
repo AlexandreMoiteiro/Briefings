@@ -1,3 +1,4 @@
+
 # Streamlit app – Tecnam P2008 (M&B + Performance) – v2 refactor
 # Compatível com GitHub + Streamlit Cloud
 # Requisitos (requirements.txt):
@@ -8,11 +9,12 @@
 #   fpdf
 #   requests
 #   python-dateutil
+#
+# Sugestão: guardar a chave do Windy em st.secrets:
+#   WINDY_POINT_API_KEY = "a-tua-chave-aqui"
 
 import streamlit as st
 import datetime as dt
-from dateutil import tz
-from dateutil.parser import isoparse
 from pathlib import Path
 import pytz
 import unicodedata
@@ -20,7 +22,9 @@ from math import cos, radians, sqrt, atan2, degrees
 import json
 import requests
 
+# =========================
 # PDF form filling / merging
+# =========================
 from pdfrw import PdfReader as Rd_pdfrw, PdfWriter as Wr_pdfrw, PdfDict
 from pypdf import PdfReader as Rd_pypdf, PdfWriter as Wr_pypdf
 from fpdf import FPDF
@@ -56,8 +60,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---- Utilities ----
-
 def ascii_safe(text):
     if not isinstance(text, str):
         return str(text)
@@ -85,12 +87,10 @@ AC = {
 
 # =========================
 # Aerodromes DB (Portugal, seed set)
-# Coordinates: decimal degrees; Elev ft; QFU aproximado para headwind
-# Declared distances são valores usuais redondos — confirme para sua operação.
-# Dados de coordenadas obtidos do eAIP NAV Portugal.
+# Coordinates: decimal degrees; Elev ft; QFU aproximado
+# Declared distances: valores usuais (confirme para a operação).
 # =========================
 AERODROMES_DB = {
-    # Starter set (podes editar/adicionar no UI)
     "LPSO": {"name":"Ponte de Sor","lat":39.211667,"lon":-8.057778,"elev_ft":390.0,"qfu":30.0, "toda":1800.0, "lda":1800.0, "paved":True},
     "LPEV": {"name":"Évora","lat":38.529722,"lon":-7.891944,"elev_ft":807.0,"qfu":10.0, "toda":1300.0, "lda":1245.0, "paved":True},
     "LPCB": {"name":"Castelo Branco","lat":39.848333,"lon":-7.441667,"elev_ft":1251.0,"qfu":160.0,"toda":1520.0, "lda":1460.0, "paved":True},
@@ -98,12 +98,10 @@ AERODROMES_DB = {
     "LPPT": {"name":"Lisboa","lat":38.774167,"lon":-9.134167,"elev_ft":355.0,"qfu":170.0,"toda":3805.0,"lda":3715.0,"paved":True},
     "LPPR": {"name":"Porto","lat":41.248056,"lon":-8.681111,"elev_ft":227.0,"qfu":170.0,"toda":3480.0,"lda":3200.0,"paved":True},
     "LPFR": {"name":"Faro","lat":37.014444,"lon":-7.965833,"elev_ft":24.0,"qfu":100.0,"toda":2490.0,"lda":2490.0,"paved":True},
-    # add more as needed
 }
 
 # =========================
-# Performance Tables (AFM extracts) – Distances em metros; ROC em ft/min
-# (iguais aos do rascunho original)
+# Performance Tables – Distances em metros; ROC em ft/min
 # =========================
 TAKEOFF = {
     0:     {"GR":{-25:144, 0:182, 25:224, 50:272, "ISA":207}, "50ft":{-25:304,0:379,25:463,50:557,"ISA":428}},
@@ -175,17 +173,14 @@ VY = {
 # =========================
 # Math helpers
 # =========================
-
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
-
 
 def interp1(x, x0, x1, y0, y1):
     if x1 == x0:
         return y0
     t = (x - x0) / (x1 - x0)
     return y0 + t * (y1 - y0)
-
 
 def bilinear(pa, temp, table, key):
     pas = sorted(table.keys())
@@ -207,7 +202,6 @@ def bilinear(pa, temp, table, key):
     v0 = interp1(t, t0, t1, v00, v01)
     v1 = interp1(t, t0, t1, v10, v11)
     return interp1(pa, p0, p1, v0, v1)
-
 
 def roc_interp(pa, temp, weight):
     w = clamp(weight, 550.0, 650.0)
@@ -237,26 +231,20 @@ def roc_interp(pa, temp, weight):
     else:
         return interp1(w, 600, 650, roc_for_w(600), roc_for_w(650))
 
-
 def wind_head_component(runway_qfu_deg, wind_dir_deg, wind_speed):
     if runway_qfu_deg is None or wind_dir_deg is None:
         return 0.0
     diff = radians((wind_dir_deg - runway_qfu_deg) % 360)
     return wind_speed * cos(diff)
 
-
 # =========================
 # Windy Point Forecast API
 # =========================
-
 WINDY_ENDPOINT = "https://api.windy.com/api/point-forecast/v2"
 
 @st.cache_data(show_spinner=False, ttl=15*60)
 def windy_point_forecast(lat, lon, model, params, api_key):
-    """Call Windy Point Forecast API and return parsed dict or None on error.
-    Response has arrays keyed by 'ts' (ms since epoch, LOCAL to the point).
-    We'll pass through raw and let caller select the time index.
-    """
+    """Chama o Windy Point Forecast API e devolve dict (ou erro)."""
     headers = {"Content-Type": "application/json"}
     body = {
         "lat": round(float(lat), 3),
@@ -274,43 +262,32 @@ def windy_point_forecast(lat, lon, model, params, api_key):
     except Exception as e:
         return {"error": str(e)}
 
-
 def windy_pick_time(s, when_utc: dt.datetime):
-    """Given Windy response and a UTC datetime, pick closest index.
-    Windy 'ts' are in milliseconds since epoch of *local time of the point* per docs,
-    but epoch-based so we can parse as UTC timestamps.
-    Returns (idx, ts_dt_utc) or (None, None).
-    """
+    """Escolhe o índice de timestamp mais próximo do when_utc (aware UTC)."""
     if not s or "ts" not in s:
         return None, None
     ts_list = s["ts"]
-    # Convert ms timestamps to aware UTC datetimes
     times = [dt.datetime.utcfromtimestamp(t/1000.0).replace(tzinfo=UTC) for t in ts_list]
-    # Pick nearest
     target = when_utc.astimezone(UTC)
     idx = min(range(len(times)), key=lambda i: abs(times[i] - target))
     return idx, times[idx]
 
-
-def windy_unpack_at(s, idx, want_units=True):
-    """Return wind_dir (deg), wind_speed_kt, temp_C, pressure_hPa for given index.
-    Wind from u/v vectors; convert m/s to kt.
-    """
+def windy_unpack_at(s, idx):
+    """Extrai vento (dir/kt), rajada, temp (°C) e pressão QNH (hPa) no índice."""
     if idx is None:
         return None
     def comp(key):
-        return s.get(key, [None]*0)
-    # u/v components at surface
-    u = comp("wind_u-surface")[idx]
-    v = comp("wind_v-surface")[idx]
-    gust = comp("gust-surface")[idx] if "gust-surface" in s else None
+        return s.get(key, [])
+    u = comp("wind_u-surface")[idx] if len(comp("wind_u-surface"))>idx else None
+    v = comp("wind_v-surface")[idx] if len(comp("wind_v-surface"))>idx else None
+    gust = comp("gust-surface")[idx] if "gust-surface" in s and len(comp("gust-surface"))>idx else None
     speed_ms = sqrt((u or 0)**2 + (v or 0)**2) if (u is not None and v is not None) else None
     dir_deg = (degrees(atan2(-(u or 0), -(v or 0))) + 360) % 360 if (u is not None and v is not None) else None
     speed_kt = speed_ms * 1.94384 if speed_ms is not None else None
-    temp_C = s.get("temp-surface", [None]*0)
-    temp_C = temp_C[idx] if temp_C else None
-    pres = s.get("pressure-surface", [None]*0)
-    qnh_hpa = pres[idx]/100.0 if pres else None  # Pa -> hPa
+    temp_arr = comp("temp-surface")
+    temp_C = temp_arr[idx] if temp_arr and len(temp_arr)>idx else None
+    pres_arr = comp("pressure-surface")
+    qnh_hpa = pres_arr[idx]/100.0 if pres_arr and len(pres_arr)>idx else None  # Pa -> hPa
     return {
         "wind_dir": dir_deg,
         "wind_kt": speed_kt,
@@ -320,60 +297,57 @@ def windy_unpack_at(s, idx, want_units=True):
     }
 
 # =========================
-# UI Skeleton – Logical flow with tabs
+# Session scaffolding
 # =========================
+if "_perf_rows" not in st.session_state:
+    st.session_state["_perf_rows"] = []
 
+# =========================
+# UI Skeleton – Tabs por ordem lógica
+# =========================
 st.markdown('<div class="mb-header">Tecnam P2008 – Mass & Balance & Performance</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.subheader("🧭 Fluxo")
-    st.markdown("1. Definir voo e horários  \n2. Aeródromos & MET  \n3. Pesos & CG  \n4. Performance & Fuel  \n5. PDF")
-    # Windy API key (guardar em secrets em produção)
-    default_key = st.secrets.get("WINDY_POINT_API_KEY", "")
+    st.markdown("1. Voo & horário  \n2. Aeródromos & MET  \n3. Peso & CG  \n4. Performance & Fuel  \n5. PDF")
+    # Windy API key (usar st.secrets em produção)
+    default_key = st.secrets["WINDY_POINT_API_KEY"] if "WINDY_POINT_API_KEY" in st.secrets else ""
     WINDY_KEY = st.text_input("Windy Point Forecast API key", value=default_key, type="password")
-    st.caption("Sugestão: guarde em `st.secrets` com a chave `WINDY_POINT_API_KEY`.")
+    st.caption("Sugestão: guarde em st.secrets como 'WINDY_POINT_API_KEY'.")
 
-# ---- Tabs ----
 setup_tab, aerodrome_tab, wb_tab, perf_tab, pdf_tab = st.tabs([
     "1) Voo & Horário", "2) Aeródromos & MET", "3) Peso & Balance", "4) Performance & Fuel", "5) PDF"
 ])
 
-# ---- 1) Flight setup ----
+# ---- 1) Voo & Horário ----
 with setup_tab:
     col1, col2 = st.columns([0.55, 0.45])
     with col1:
         st.markdown("### Dados do Voo")
-        reg = st.text_input("Aircraft Registration", value="CS-XXX")
-        mission = st.text_input("Mission #", value="001")
-        # Data & hora zulu (planeamento)
+        reg = st.text_input("Aircraft Registration", value="CS-XXX", key="reg")
+        mission = st.text_input("Mission #", value="001", key="mission")
         now_local = dt.datetime.now(TZ_LISBON)
         date_default = now_local.date()
         time_default = (now_local + dt.timedelta(hours=1)).time().replace(second=0, microsecond=0)
-        f_date = st.date_input("Data (local Portugal)", value=date_default)
-        f_time = st.time_input("Hora de descolagem (local Portugal)", value=time_default, step=300)
+        f_date = st.date_input("Data (local Portugal)", value=date_default, key="f_date")
+        f_time = st.time_input("Hora de descolagem (local Portugal)", value=time_default, step=300, key="f_time")
         local_dt = TZ_LISBON.localize(dt.datetime.combine(f_date, f_time))
         etd_utc = local_dt.astimezone(UTC)
         st.info(f"ETD UTC: {etd_utc.strftime('%Y-%m-%d %H:%MZ')}")
-
     with col2:
         st.markdown("### Legs")
-        roles = ["Departure", "Arrival", "Alternate"]
         if 'legs' not in st.session_state:
-            # initialize from seed
             st.session_state.legs = [
                 {"role":"Departure","icao":"LPSO"},
                 {"role":"Arrival","icao":"LPEV"},
                 {"role":"Alternate","icao":"LPCB"},
             ]
-        # editable number of legs
         nlegs = st.number_input("N.º de aeródromos a avaliar", min_value=1, max_value=6, value=len(st.session_state.legs), step=1)
-        # Adjust list length
         if nlegs > len(st.session_state.legs):
             for _ in range(nlegs - len(st.session_state.legs)):
                 st.session_state.legs.append({"role": f"Leg {len(st.session_state.legs)+1}", "icao": "LPSO"})
         elif nlegs < len(st.session_state.legs):
             st.session_state.legs = st.session_state.legs[:nlegs]
-
         for i, leg in enumerate(st.session_state.legs):
             c1, c2 = st.columns([0.35, 0.65])
             with c1:
@@ -381,16 +355,14 @@ with setup_tab:
             with c2:
                 st.session_state.legs[i]["icao"] = st.text_input("ICAO", value=leg["icao"], key=f"legicao_{i}").upper().strip()
 
-# ---- 2) Aerodromes & MET ----
+# ---- 2) Aeródromos & MET ----
 with aerodrome_tab:
     st.markdown("### Base de Aeródromos (Portugal)")
-    st.caption("Pode editar valores. As coordenadas são do eAIP NAV Portugal. QFU é aproximado para cálculo de componente de vento.")
+    st.caption("Pode editar valores. Coordenadas do eAIP. QFU aproximado para componente de vento.")
 
     if 'aerodromes' not in st.session_state:
-        # take DB copy into session-state so user can edit sem mexer no seed
         st.session_state.aerodromes = {k: dict(v) for k, v in AERODROMES_DB.items()}
 
-    # Add/remove editor
     with st.expander("Adicionar/Editar aeródromo"):
         c1, c2, c3, c4 = st.columns([0.22,0.22,0.28,0.28])
         new_icao = c1.text_input("ICAO", value="LPXX").upper().strip()
@@ -417,7 +389,6 @@ with aerodrome_tab:
     st.markdown("### Seleção por Leg + MET (Windy)")
     model = st.selectbox("Modelo Windy", options=["gfs","iconEu","arome"], index=0, help="GFS global; IconEU Europa; AROME França+limítrofes")
 
-    # Grid of legs with lookup and MET fetch
     perf_rows = []
     for i, leg in enumerate(st.session_state.legs):
         icao = leg["icao"].upper().strip()
@@ -452,17 +423,15 @@ with aerodrome_tab:
                 qnh_manual = st.number_input("QNH (hPa)", min_value=900.0, max_value=1050.0, value=1013.0, step=0.1, key=f"qnh_{i}")
 
             met = {"temp": temp_manual, "qnh": qnh_manual, "wind_dir": 0.0, "wind_kt": 0.0}
-            info_txt = ""
             if do_fetch and WINDY_KEY:
                 resp = windy_point_forecast(lat, lon, model, ["wind","temp","pressure","windGust"], WINDY_KEY)
                 if "error" in resp:
-                    st.error(f"Windy erro: {resp['error']}")
+                    st.error(f"Windy erro: {resp.get('error')} {resp.get('detail','')}")
                 else:
                     idx, ts_pick = windy_pick_time(resp, etd_utc)
                     if idx is not None:
                         m = windy_unpack_at(resp, idx)
                         if m:
-                            # Override manual with API values when available
                             met.update({k: v if v is not None else met.get(k) for k, v in m.items()})
                             st.success(f"Windy @ {ts_pick.strftime('%Y-%m-%d %H:%MZ')}: {met['wind_kt'] and round(met['wind_kt'])} kt / {met['wind_dir'] and round(met['wind_dir'])}° | {met['temp']}°C | QNH {met['qnh'] and round(met['qnh'],1)} hPa")
                         else:
@@ -475,14 +444,14 @@ with aerodrome_tab:
             isa_temp = 15 - 2*(pa_ft/1000)
             da_ft = pa_ft + (120*((met['temp'] or temp_manual) - isa_temp))
 
-            # Interpolate perf (sem correções de vento/slope nas 50 ft distances)
+            # Interpolate perf
             hw = wind_head_component(qfu, met['wind_dir'] or 0.0, met['wind_kt'] or 0.0)
-
             to_gr = bilinear(pa_ft, met['temp'] or temp_manual, TAKEOFF, 'GR')
             to_50 = bilinear(pa_ft, met['temp'] or temp_manual, TAKEOFF, '50ft')
             ldg_gr = bilinear(pa_ft, met['temp'] or temp_manual, LANDING, 'GR')
             ldg_50 = bilinear(pa_ft, met['temp'] or temp_manual, LANDING, '50ft')
 
+            # Correções
             def to_corrections_takeoff(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
                 gr = ground_roll
                 if headwind_kt >= 0:
@@ -510,15 +479,12 @@ with aerodrome_tab:
             to_gr_corr = to_corrections_takeoff(to_gr, hw, paved=paved, slope_pc=slope_pc)
             ldg_gr_corr = ldg_corrections(ldg_gr, hw, paved=paved, slope_pc=slope_pc)
 
-            TODR = to_50
-            LDR = ldg_50
-
             perf_rows.append({
                 'role': leg['role'], 'icao': icao, 'name': data.get('name',''), 'qfu': qfu,
                 'lat': lat, 'lon': lon,
                 'pa_ft': pa_ft, 'da_ft': da_ft,
-                'to_gr': to_gr_corr, 'to_50': TODR,
-                'ldg_gr': ldg_gr_corr, 'ldg_50': LDR,
+                'to_gr': to_gr_corr, 'to_50': to_50,
+                'ldg_gr': ldg_gr_corr, 'ldg_50': ldg_50,
                 'toda_av': toda_av, 'lda_av': lda_av,
                 'hw_comp': hw, 'temp': met['temp'] or temp_manual, 'qnh': met['qnh'] or qnh_manual,
             })
@@ -536,8 +502,10 @@ with aerodrome_tab:
         ]) + "</table>",
         unsafe_allow_html=True
     )
+    # Guardar para o PDF
+    st.session_state["_perf_rows"] = perf_rows
 
-# ---- 3) Weight & Balance ----
+# ---- 3) Peso & Balance ----
 with wb_tab:
     st.markdown("### Weight & Balance")
     c1, c2 = st.columns([0.55, 0.45])
@@ -582,7 +550,6 @@ with wb_tab:
         st.markdown(f"<div class='mb-summary-row'><div>Total Moment</div><div><b>{total_moment:.2f} kg·m</b></div></div>", unsafe_allow_html=True)
         st.markdown(f"<div class='mb-summary-row'><div>CG</div><div class='{cg_color_val(cg, AC['cg_limits'])}'><b>{cg:.3f} m</b></div></div>", unsafe_allow_html=True)
 
-    # Persist key outputs for later tabs
     st.session_state["_wb"] = {
         "total_weight": total_weight,
         "total_moment": total_moment,
@@ -637,7 +604,6 @@ with perf_tab:
 # ---- 5) PDF ----
 with pdf_tab:
     st.markdown("### PDF – M&B and Performance Data Sheet")
-    # Reuse registration and mission/date from setup
     reg = st.text_input("Aircraft Registration", value=st.session_state.get("reg", "CS-XXX"))
     mission = st.text_input("Mission #", value=st.session_state.get("mission", "001"))
 
@@ -646,11 +612,10 @@ with pdf_tab:
 
     # Fallback: permitir upload do template se não existir no repo
     uploaded = st.file_uploader("PDF template (opcional – se não estiver no repo)", type=["pdf"])
-    global PDF_TEMPLATE
     if uploaded is not None:
         tmp = APP_DIR / "template_uploaded.pdf"
         tmp.write_bytes(uploaded.getbuffer())
-        PDF_TEMPLATE = tmp
+        PDF_TEMPLATE = tmp  # sem usar 'global'
 
     def load_pdf_any(path: Path):
         try:
@@ -661,7 +626,6 @@ with pdf_tab:
             except Exception as e:
                 raise RuntimeError(f"Não consegui ler o PDF: {e}")
 
-    # Mapeamento mínimo de campos (ajusta ao teu template final, se nomes mudarem)
     FIELD_MAP = {
         "Textbox19": reg,       # Registration
         "Textbox18": date_str,  # Date
@@ -677,8 +641,7 @@ with pdf_tab:
         # --- Preparar resumo de cálculos para página adicional ---
         wb = st.session_state.get("_wb", {})
         fuel = st.session_state.get("_fuel", {})
-        # Nota: usamos perf_rows da tab 2; se não existir (página recarregada), geramos mínimo
-        perf_rows_local = globals().get('perf_rows', [])
+        perf_rows_local = st.session_state.get("_perf_rows", [])
 
         calc_pdf_path = APP_DIR / f"_calc_{reg}_{mission}.pdf"
         calc = FPDF()
@@ -703,7 +666,6 @@ with pdf_tab:
             calc.cell(0, 5, ascii_safe(f"PA: {r['pa_ft']:.0f} ft | DA: {r['da_ft']:.0f} ft | HW Comp: {r['hw_comp']:.0f} kt"), ln=True)
             calc.cell(0, 5, ascii_safe(f"TO GR*: {r['to_gr']:.0f} m | TODR 50ft: {r['to_50']:.0f} m | LND GR*: {r['ldg_gr']:.0f} m | LDR 50ft: {r['ldg_50']:.0f} m"), ln=True)
             calc.cell(0, 5, ascii_safe(f"TODA Avail: {r['toda_av']:.0f} m | LDA Avail: {r['lda_av']:.0f} m"), ln=True)
-            # ROC estimate at departure PA and ambient temp (simplificação)
             dep_temp = r.get('temp', 15.0)
             roc_val = roc_interp(r['pa_ft'], dep_temp, wb.get('total_weight', AC['max_takeoff_weight']))
             calc.cell(0, 5, ascii_safe(f"ROC (est.): {roc_val:.0f} ft/min"), ln=True)
@@ -734,7 +696,6 @@ with pdf_tab:
             fields = reader.Root.AcroForm.Fields
             for k, v in FIELD_MAP.items():
                 pdfrw_set_field(fields, k, v)
-            # cores para peso e CG
             wt_color = (30,150,30) if st.session_state.get('_wb',{}).get('total_weight',0) <= AC['max_takeoff_weight'] else (200,0,0)
             lo, hi = AC['cg_limits']
             cg_val = st.session_state.get('_wb',{}).get('cg',0)
@@ -746,8 +707,6 @@ with pdf_tab:
             pdfrw_set_field(fields, "Textbox14", f"{st.session_state.get('_wb',{}).get('total_weight',0):.1f}", wt_color)
             pdfrw_set_field(fields, "Textbox16", f"{cg_val:.3f}", cg_color)
             pdfrw_set_field(fields, "Textbox17", f"{AC['max_takeoff_weight']:.0f}")
-            # Página 2 (Partida) – usa primeiro leg se existir
-            perf_rows_local = globals().get('perf_rows', [])
             if perf_rows_local:
                 dep = perf_rows_local[0]
                 pdfrw_set_field(fields, "Textbox22", dep['icao'])
@@ -760,7 +719,6 @@ with pdf_tab:
             writer = Wr_pdfrw()
             writer.write(str(out_main_path), reader)
 
-            # Merge com a página de cálculos
             base = Rd_pypdf(str(out_main_path))
             calc_doc = Rd_pypdf(str(calc_pdf_path))
             merger = Wr_pypdf()
@@ -770,17 +728,13 @@ with pdf_tab:
                 merger.write(f)
 
         else:
-            # Cair para pypdf: preencher básicos e anexar página de cálculos
             base_r = Rd_pypdf(str(PDF_TEMPLATE))
             merger = Wr_pypdf()
             for p in base_r.pages: merger.add_page(p)
-            # NeedAppearances para mostrar valores
             if "/AcroForm" in base_r.trailer["/Root"]:
                 merger._root_object.update({"/AcroForm": base_r.trailer["/Root"]["/AcroForm"]})
                 merger._root_object["/AcroForm"].update({"/NeedAppearances": True})
-            # update primeiros campos da primeira página
             merger.update_page_form_field_values(base_r.pages[0], FIELD_MAP)
-            # anexar página cálculos
             calc_doc = Rd_pypdf(str(calc_pdf_path))
             for p in calc_doc.pages: merger.add_page(p)
             with open(out_main_path, "wb") as f:
