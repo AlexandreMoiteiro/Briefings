@@ -1,4 +1,3 @@
-
 # Streamlit app – Tecnam P2008 (M&B + Performance) – v4
 # Works on Streamlit Cloud
 # Requirements:
@@ -726,7 +725,5 @@ with tab_pdf:
         st.success("PDF generated!")
         with open(out_main_path, "rb") as f:
             st.download_button("Download PDF", f, file_name=out_main_path, mime="application/pdf")
-
-
 
 
