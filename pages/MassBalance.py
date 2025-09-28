@@ -1,4 +1,4 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v4
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v4.1
 # Works on Streamlit Cloud
 # Requirements:
 #   streamlit
@@ -7,9 +7,9 @@
 #   fpdf
 #   requests
 #
-# NOTE:
-# - Your Windy key must be in Streamlit secrets as: WINDY_API_KEY
-# - PDF template file must be present in repo root: TecnamP2008MBPerformanceSheet_MissionX.pdf
+# NOTES:
+# - Windy key must be set in Streamlit secrets as: WINDY_API_KEY
+# - PDF template file must be in repo root: TecnamP2008MBPerformanceSheet_MissionX.pdf
 
 import streamlit as st
 import datetime as dt
@@ -91,7 +91,6 @@ AERODROMES_DB = {
     "LPCB": {
         "name": "Castelo Branco",
         "lat": 39.848333, "lon": -7.441667, "elev_ft": 1251.0,
-        # Keep values editable if needed – directions may differ
         "runways": [
             {"id": "16", "qfu": 160.0, "toda": 1520.0, "lda": 1460.0, "slope_pc": 0.0, "paved": True},
             {"id": "34", "qfu": 340.0, "toda": 1520.0, "lda": 1460.0, "slope_pc": 0.0, "paved": True},
@@ -237,7 +236,7 @@ def ldg_corrections(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     return max(gr, 0.0)
 
 # ---------------------------------
-# Windy Point Forecast API
+# Windy Point Forecast API (hourly)
 # ---------------------------------
 WINDY_ENDPOINT = "https://api.windy.com/api/point-forecast/v2"
 
@@ -260,11 +259,26 @@ def windy_point_forecast(lat, lon, model, params, api_key):
     except Exception as e:
         return {"error": str(e)}
 
+def round_to_nearest_hour(ts_utc: dt.datetime) -> dt.datetime:
+    """Windy returns hourly steps; round ETD to nearest top-of-hour."""
+    if ts_utc.tzinfo is None:
+        ts_utc = ts_utc.replace(tzinfo=dt.timezone.utc)
+    minute = ts_utc.minute
+    if minute >= 30:
+        ts_utc = ts_utc.replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)
+    else:
+        ts_utc = ts_utc.replace(minute=0, second=0, microsecond=0)
+    return ts_utc
+
 def windy_pick_time(resp, when_utc):
     if not resp or "ts" not in resp or not resp["ts"]:
         return None, None
     times = [dt.datetime.utcfromtimestamp(t/1000.0).replace(tzinfo=dt.timezone.utc) for t in resp["ts"]]
-    target = when_utc.replace(tzinfo=dt.timezone.utc)
+    target = round_to_nearest_hour(when_utc.replace(tzinfo=dt.timezone.utc))
+    # pick exact if present, else nearest
+    if target in times:
+        idx = times.index(target)
+        return idx, target
     idx = min(range(len(times)), key=lambda i: abs(times[i] - target))
     return idx, times[idx]
 
@@ -289,7 +303,7 @@ def windy_unpack_at(resp, idx):
 # Session defaults
 # ---------------------------------
 if "fleet" not in st.session_state:
-    # Preload Sevenair Tecnam P2008 regs (editable in sidebar)
+    # Sevenair Tecnam P2008 regs (editable in sidebar)
     st.session_state.fleet = {
         "CS-DHS": {"ew": None, "ew_moment": None},
         "CS-DHU": {"ew": None, "ew_moment": None},
@@ -308,7 +322,7 @@ if "legs" not in st.session_state:
     st.session_state.legs = [dict(x) for x in DEFAULT_LEGS]
 
 # ---------------------------------
-# Sidebar
+# Sidebar (fleet hidden in expander; API key from secrets)
 # ---------------------------------
 with st.sidebar:
     st.subheader("⚙️ Settings")
@@ -422,7 +436,11 @@ with tab_aero:
             wind_kt = st.number_input("Wind speed (kt)", min_value=0.0, value=0.0, step=1.0, key=f"wspd_{i}")
 
         with c3:
-            model = st.selectbox("Windy model", options=["gfs", "iconEu", "arome"], index=0, key=f"model_{i}")
+            # Show nice labels, map to Windy codes; default = ICON-EU
+            model_labels = ["ICON-EU (default)", "GFS", "AROME"]
+            model_map = {"ICON-EU (default)": "iconEu", "GFS": "gfs", "AROME": "arome"}
+            model_label = st.selectbox("Windy model", options=model_labels, index=0, key=f"model_{i}")
+            model = model_map[model_label]
             fetch_click = st.button("Fetch MET (Windy)", key=f"fetch_{i}")
             if fetch_click:
                 if not WINDY_KEY:
@@ -432,17 +450,24 @@ with tab_aero:
                     if "error" in resp:
                         st.error(f"Windy error: {resp.get('error')} {resp.get('detail','')}")
                     else:
-                        idx, ts_pick = windy_pick_time(resp, st.session_state.get("etd_utc", dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)))
+                        etd = st.session_state.get("etd_utc", dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc))
+                        idx, ts_pick = windy_pick_time(resp, etd)
                         met = windy_unpack_at(resp, idx)
                         if met:
                             temp_c   = met["temp"] if met["temp"] is not None else temp_c
                             qnh      = met["qnh"] if met["qnh"] is not None else qnh
                             wind_dir = met["wind_dir"] if met["wind_dir"] is not None else wind_dir
                             wind_kt  = met["wind_kt"] if met["wind_kt"] is not None else wind_kt
-                            st.success(f"Windy @ {ts_pick.strftime('%Y-%m-%d %H:%MZ')}: "
-                                       f"{round(wind_kt) if wind_kt is not None else '—'} kt / "
-                                       f"{round(wind_dir) if wind_dir is not None else '—'}° | "
-                                       f"{temp_c} °C | QNH {round(qnh,1) if qnh is not None else '—'} hPa")
+                            # Inform about hourly rounding
+                            rounded_target = round_to_nearest_hour(etd)
+                            delta_min = int(abs((ts_pick - rounded_target).total_seconds())/60)
+                            st.success(
+                                f"Windy @ {ts_pick.strftime('%Y-%m-%d %H:%MZ')} "
+                                f"(rounded from ETD {rounded_target.strftime('%H:%MZ')}, Δ≈{delta_min} min): "
+                                f"{round(wind_kt) if wind_kt is not None else '—'} kt / "
+                                f"{round(wind_dir) if wind_dir is not None else '—'}° | "
+                                f"{temp_c} °C | QNH {round(qnh,1) if qnh is not None else '—'} hPa"
+                            )
                         else:
                             st.warning("No usable data at selected time.")
                     # write back to widget state immediately
@@ -454,13 +479,14 @@ with tab_aero:
         # Auto-select best runway
         best, all_rw = choose_best_runway(ad, temp_c, qnh, wind_dir, wind_kt)
         feas = "✅" if best["feasible"] else "⚠️"
-        st.info(
-            f"**Selected runway:** {best['id']} "
+        # Use markdown (not st.info) to allow HTML chips safely
+        st.markdown(
+            f"🧭 **Selected runway:** {best['id']} "
             f"<span class='chip'>QFU {best['qfu']:.0f}°</span>"
             f"<span class='chip'>TODA {best['toda_av']:.0f} m</span>"
             f"<span class='chip'>LDA {best['lda_av']:.0f} m</span>"
             f"<span class='chip'>HW {best['hw_comp']:.0f} kt</span> {feas}",
-            icon="🧭", unsafe_allow_html=True
+            unsafe_allow_html=True
         )
 
         # Persist leg choice (ICAO only; runway is automatic)
@@ -725,5 +751,6 @@ with tab_pdf:
         st.success("PDF generated!")
         with open(out_main_path, "rb") as f:
             st.download_button("Download PDF", f, file_name=out_main_path, mime="application/pdf")
+
 
 
