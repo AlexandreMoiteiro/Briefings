@@ -1,115 +1,146 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – EN + Windy
-# Reqs: streamlit, pytz, pypdf, requests
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v5.3
+# Requirements:
+#   streamlit
+#   requests
+#   pdfrw==0.4
+#   pypdf>=4.2.0
+#
+# Secrets required:
+#   WINDY_API_KEY
+#   GITHUB_GIST_TOKEN
+#   GITHUB_GIST_ID
+#
+# Notes:
+# - Sidebar starts COLLAPSED.
+# - Hourly forecast selection is independent of ETD; default model ICON-EU.
+# - Fleet EW/Moment persisted via GitHub Gist (no separate “save to session”).
+# - PDF is filled (no extra summary page). Includes % of runway used and fuel block.
 
 import streamlit as st
 import datetime as dt
-from pathlib import Path
-import pytz
-import unicodedata
-from math import cos, sin, radians, atan2, sqrt
-from typing import Dict, List, Optional, Tuple
-import io
+from math import cos, sin, radians, sqrt, atan2, degrees
+import json
 import requests
+import unicodedata
+from pathlib import Path
 
-# PDF
-try:
-    from pypdf import PdfReader, PdfWriter
-    from pypdf.generic import NameObject
-    PYPDF_OK = True
-except Exception:
-    PYPDF_OK = False
+from pdfrw import PdfReader as Rd_pdfrw, PdfWriter as Wr_pdfrw, PdfDict
+from pypdf import PdfReader as Rd_pypdf, PdfWriter as Wr_pypdf
 
-# ============ Basic setup ============
+# -----------------------------
+# App setup & styles
+# -----------------------------
+st.set_page_config(
+    page_title="Tecnam P2008 – Mass & Balance & Performance",
+    layout="wide",
+    initial_sidebar_state="collapsed",  # collapsed by default
+)
+
+st.markdown(
+    """
+    <style>
+      .block-container { max-width: 1200px !important; }
+      .mb-header{font-size:1.35rem;font-weight:800;text-transform:uppercase;border-bottom:1px solid #e5e7ec;padding-bottom:8px;margin:2px 0 14px}
+      .mb-table{border-collapse:collapse;width:100%;font-size:.95rem}
+      .mb-table th{border-bottom:2px solid #cbd0d6;text-align:left}
+      .mb-table td{padding:3px 6px;border-bottom:1px dashed #e5e7ec}
+      .ok{color:#1d8533}.warn{color:#d8aa22}.bad{color:#c21c1c}
+      .cwok{color:#1d8533}.cwwarn{color:#d8aa22}.cwbad{color:#c21c1c}
+      .mb-summary{display:flex;justify-content:space-between;margin:4px 0}
+      .chip{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef2f7;margin-left:8px;font-size:.85rem}
+      .chip-red{background:#fde8e8}.chip-yellow{background:#fff6db}.chip-green{background:#e8f7ec}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 def ascii_safe(text):
     if not isinstance(text, str):
         return str(text)
     return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
 
-def fmt_hm(total_min: int) -> str:
-    if total_min <= 0: return "0min"
-    h, m = divmod(int(round(total_min)), 60)
-    if h == 0: return f"{m}min"
-    return f"{h}h" if m == 0 else f"{h}h{m:02d}min"
+# -----------------------------
+# Constants & Data
+# -----------------------------
+PDF_TEMPLATE_PATHS = [
+    "/mnt/data/TecnamP2008MBPerformanceSheet_MissionX.pdf",  # per your upload
+    "TecnamP2008MBPerformanceSheet_MissionX.pdf",            # repo root fallback
+]
 
-st.set_page_config(
-    page_title="Tecnam P2008 – Mass & Balance & Performance (EN, Windy)",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-st.markdown("""
-<style>
-.block-container { max-width: 1120px !important; }
-.mb-header{font-size:1.3rem;font-weight:800;text-transform:uppercase;border-bottom:1px solid #e5e7ec;padding-bottom:6px;margin-bottom:8px}
-.section-title{font-weight:700;margin:14px 0 6px 0}
-.mb-summary-row{display:flex;justify-content:space-between;margin:4px 0}
-.ok{color:#1d8533}.warn{color:#d8aa22}.bad{color:#c21c1c}
-.mb-table{border-collapse:collapse;width:100%;font-size:.95rem}
-.mb-table th{border-bottom:2px solid #cbd0d6;text-align:left}
-.mb-table td{padding:4px 6px;border-bottom:1px dashed #e5e7ec;vertical-align:top}
-.hint{font-size:.85rem;color:#6b7280}
-.chip{display:inline-block;padding:0 6px;border-radius:10px;background:#f3f4f6;margin-left:6px}
-.tight{margin-top:6px;margin-bottom:6px}
-.kpi{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0}
-.kpi span{background:#f3f4f6;border-radius:10px;padding:2px 8px}
-</style>
-""", unsafe_allow_html=True)
-
-# ============ Aircraft data & limits ============
 AC = {
     "name": "Tecnam P2008 JC",
-    "fuel_arm": 2.209, "pilot_arm": 1.800, "baggage_arm": 2.417,
+    "fuel_arm": 2.209,
+    "pilot_arm": 1.800,
+    "baggage_arm": 2.417,
     "max_takeoff_weight": 650.0,
-    "max_fuel_volume": 124.0,  # L (aircraft tank max, not policy)
-    "max_passenger_weight": 230.0,  # student+instructor
+    "max_fuel_volume": 124.0,      # L
+    "max_passenger_weight": 230.0, # total students+instructor
     "max_baggage_weight": 20.0,
-    "cg_limits": (1.841, 1.978),
-    "fuel_density": 0.72,
+    "cg_limits": (1.841, 1.978),   # m
+    "fuel_density": 0.72,          # kg/L
 }
-CROSSWIND_YELLOW = 8.0
-CROSSWIND_RED = 15.0
 
-# ============ Aerodrome database (coords + per-runway data) ============
-# QFU is TRUE heading (deg) used for wind components (approx magnetic OK for components).
-# Declared distances from AIP (TODA/LDA per runway end).
-AERODROMES_DB: Dict[str, dict] = {
+# Aerodrome DB (Portugal) – each RWY direction with declared distances
+AERODROMES_DB = {
     "LPSO": {
         "name": "Ponte de Sor",
-        "lat": 39.211545, "lon": -8.057787, "elev_ft": 390.0,
-        "runways": {
-            "03": {"qfu": 26.0,  "toda": 1800.0, "lda": 1800.0, "paved": True, "slope_pc": 0.0},
-            "21": {"qfu": 206.0, "toda": 1800.0, "lda": 1800.0, "paved": True, "slope_pc": 0.0},
-        }
+        "lat": 39.211667, "lon": -8.057778, "elev_ft": 390.0,
+        "runways": [
+            {"id": "03", "qfu": 30.0,  "toda": 1800.0, "lda": 1800.0, "slope_pc": 0.0, "paved": True},
+            {"id": "21", "qfu": 210.0, "toda": 1800.0, "lda": 1800.0, "slope_pc": 0.0, "paved": True},
+        ],
     },
     "LPEV": {
         "name": "Évora",
-        "lat": 38.53048, "lon": -7.89639, "elev_ft": 807.0,
-        "runways": {
-            # AD 2.13: 01: TORA 1260 TODA 1300 LDA 1245 | 19: TORA 1245 TODA 1300 LDA 1260
-            # 07/25: 530/530
-            "01": {"qfu": 6.0,   "toda": 1300.0, "lda": 1245.0, "paved": True, "slope_pc": 0.0},
-            "19": {"qfu": 186.0, "toda": 1300.0, "lda": 1260.0, "paved": True, "slope_pc": 0.0},
-            "07": {"qfu": 74.0,  "toda": 530.0,  "lda": 530.0,  "paved": True, "slope_pc": 0.0},
-            "25": {"qfu": 254.0, "toda": 530.0,  "lda": 530.0,  "paved": True, "slope_pc": 0.0},
-        }
+        "lat": 38.529722, "lon": -7.891944, "elev_ft": 807.0,
+        "runways": [
+            {"id": "01", "qfu": 10.0,  "toda": 1300.0, "lda": 1245.0, "slope_pc": 0.0, "paved": True},
+            {"id": "19", "qfu": 190.0, "toda": 1300.0, "lda": 1245.0, "slope_pc": 0.0, "paved": True},
+        ],
     },
     "LPCB": {
         "name": "Castelo Branco",
         "lat": 39.848333, "lon": -7.441667, "elev_ft": 1251.0,
-        "runways": {
-            # AD 2.13: 16: TODA 1520 LDA 1460 | 34: TODA 1520 (starter ext) LDA 1460
-            "16": {"qfu": 158.0, "toda": 1520.0, "lda": 1460.0, "paved": True, "slope_pc": 0.0},
-            "34": {"qfu": 338.0, "toda": 1520.0, "lda": 1460.0, "paved": True, "slope_pc": 0.0},
-        }
+        "runways": [
+            {"id": "16", "qfu": 160.0, "toda": 1520.0, "lda": 1460.0, "slope_pc": 0.0, "paved": True},
+            {"id": "34", "qfu": 340.0, "toda": 1520.0, "lda": 1460.0, "slope_pc": 0.0, "paved": True},
+        ],
+    },
+    "LPCS": {
+        "name": "Cascais",
+        "lat": 38.725556, "lon": -9.355278, "elev_ft": 326.0,
+        "runways": [
+            {"id": "17", "qfu": 170.0, "toda": 1700.0, "lda": 1700.0, "slope_pc": 0.0, "paved": True},
+            {"id": "35", "qfu": 350.0, "toda": 1700.0, "lda": 1700.0, "slope_pc": 0.0, "paved": True},
+        ],
+    },
+    "LPFR": {
+        "name": "Faro",
+        "lat": 37.014444, "lon": -7.965833, "elev_ft": 24.0,
+        "runways": [
+            {"id": "10", "qfu": 100.0, "toda": 2490.0, "lda": 2490.0, "slope_pc": 0.0, "paved": True},
+            {"id": "28", "qfu": 280.0, "toda": 2490.0, "lda": 2490.0, "slope_pc": 0.0, "paved": True},
+        ],
+    },
+    "LPPT": {
+        "name": "Lisboa",
+        "lat": 38.774167, "lon": -9.134167, "elev_ft": 355.0,
+        "runways": [
+            {"id": "02", "qfu": 20.0,  "toda": 3805.0, "lda": 3715.0, "slope_pc": 0.0, "paved": True},
+            {"id": "20", "qfu": 200.0, "toda": 3805.0, "lda": 3715.0, "slope_pc": 0.0, "paved": True},
+        ],
+    },
+    "LPPR": {
+        "name": "Porto",
+        "lat": 41.248056, "lon": -8.681111, "elev_ft": 227.0,
+        "runways": [
+            {"id": "17", "qfu": 170.0, "toda": 3480.0, "lda": 3200.0, "slope_pc": 0.0, "paved": True},
+            {"id": "35", "qfu": 350.0, "toda": 3480.0, "lda": 3200.0, "slope_pc": 0.0, "paved": True},
+        ],
     },
 }
-DEFAULT_LEGS = [
-    {"role": "Departure", "icao": "LPSO"},
-    {"role": "Arrival",   "icao": "LPEV"},
-    {"role": "Alternate", "icao": "LPCB"},
-]
 
-# ============ Performance tables (AFM extracts) ============
+# Performance tables (AFM extracts)
 TAKEOFF = {
     0:     {"GR":{-25:144, 0:182, 25:224, 50:272, "ISA":207}, "50ft":{-25:304,0:379,25:463,50:557,"ISA":428}},
     1000:  {"GR":{-25:157, 0:198, 25:245, 50:297, "ISA":222}, "50ft":{-25:330,0:412,25:503,50:605,"ISA":458}},
@@ -136,16 +167,14 @@ LANDING = {
     9000:  {"GR":{-25:208,0:229,25:250,50:271,"ISA":227}, "50ft":{-25:417,0:438,25:459,50:480,"ISA":436}},
     10000: {"GR":{-25:217,0:238,25:260,50:282,"ISA":234}, "50ft":{-25:426,0:447,25:469,50:491,"ISA":443}},
 }
-ROC = {
-    650:{0:{-25:951,0:805,25:675,50:557,"ISA":725},2000:{-25:840,0:696,25:568,50:453,"ISA":638},4000:{-25:729,0:588,25:462,50:349,"ISA":551},6000:{-25:619,0:480,25:357,50:245,"ISA":464},8000:{-25:509,0:373,25:251,50:142,"ISA":377},10000:{-25:399,0:266,25:146,50:39,"ISA":290},12000:{-25:290,0:159,25:42,50:-64,"ISA":204},14000:{-25:181,0:53,25:-63,50:-166,"ISA":117}},
-    600:{0:{-25:1067,0:913,25:776,50:652,"ISA":829},2000:{-25:950,0:799,25:664,50:542,"ISA":737},4000:{-25:833,0:685,25:552,50:433,"ISA":646},6000:{-25:717,0:571,25:441,50:324,"ISA":555},8000:{-25:602,0:458,25:330,50:215,"ISA":463},10000:{-25:486,0:345,25:220,50:106,"ISA":372},12000:{-25:371,0:233,25:110,50:-2,"ISA":280},14000:{-25:257,0:121,25:0,50:-109,"ISA":189}},
-    550:{0:{-25:1201,0:1038,25:892,50:760,"ISA":948},2000:{-25:1077,0:916,25:773,50:644,"ISA":851},4000:{-25:953,0:795,25:654,50:527,"ISA":754},6000:{-25:830,0:675,25:536,50:411,"ISA":657},8000:{-25:707,0:555,25:419,50:296,"ISA":560},10000:{-25:584,0:435,25:301,50:181,"ISA":462},12000:{-25:462,0:315,25:184,50:66,"ISA":365},14000:{-25:341,0:196,25:68,50:-48,"ISA":268}},
-}
-VY = {650:{0:70,2000:69,4000:68,6000:67,8000:65,10000:64,12000:63,14000:62},
-      600:{0:70,2000:68,4000:67,6000:66,8000:65,10000:64,12000:63,14000:62},
-      550:{0:69,2000:68,4000:67,6000:66,8000:65,10000:64,12000:63,14000:61}}
 
-# ============ Math helpers ============
+# Crosswind thresholds you requested
+XW_GREEN_MAX = 8
+XW_YELLOW_MAX = 15
+
+# -----------------------------
+# Helpers
+# -----------------------------
 def clamp(v, lo, hi): return max(lo, min(hi, v))
 
 def interp1(x, x0, x1, y0, y1):
@@ -155,9 +184,9 @@ def interp1(x, x0, x1, y0, y1):
 
 def bilinear(pa, temp, table, key):
     pas = sorted(table.keys())
-    pa_c = clamp(pa, pas[0], pas[-1])
-    p0 = max([p for p in pas if p <= pa_c])
-    p1 = min([p for p in pas if p >= pa_c])
+    pa = clamp(pa, pas[0], pas[-1])
+    p0 = max([p for p in pas if p <= pa])
+    p1 = min([p for p in pas if p >= pa])
     temps = [-25, 0, 25, 50]
     t = clamp(temp, temps[0], temps[-1])
     if t <= 0: t0, t1 = -25, 0
@@ -167,680 +196,701 @@ def bilinear(pa, temp, table, key):
     v10 = table[p1][key][t0]; v11 = table[p1][key][t1]
     v0 = interp1(t, t0, t1, v00, v01)
     v1 = interp1(t, t0, t1, v10, v11)
-    return interp1(pa_c, p0, p1, v0, v1)
+    return interp1(pa, p0, p1, v0, v1)
 
-def roc_interp(pa, temp, weight):
-    w = clamp(weight, 550.0, 650.0)
-    def roc_for_w(w_):
-        tab = ROC[int(w_)]
-        pas = sorted(tab.keys())
-        pa_c = clamp(pa, pas[0], pas[-1])
-        p0 = max([p for p in pas if p <= pa_c])
-        p1 = min([p for p in pas if p >= pa_c])
-        temps = [-25, 0, 25, 50]
-        t = clamp(temp, temps[0], temps[-1])
-        if t <= 0: t0, t1 = -25, 0
-        elif t <= 25: t0, t1 = 0, 25
-        else: t0, t1 = 25, 50
-        v00 = tab[p0][t0]; v01 = tab[p0][t1]
-        v10 = tab[p1][t0]; v11 = tab[p1][t1]
-        v0 = interp1(t, t0, t1, v00, v01)
-        v1 = interp1(t, t0, t1, v10, v11)
-        return interp1(pa_c, p0, p1, v0, v1)
-    if w <= 600: return interp1(w, 550, 600, roc_for_w(550), roc_for_w(600))
-    return interp1(w, 600, 650, roc_for_w(600), roc_for_w(650))
+def wind_components(qfu_deg, wind_dir_deg, wind_speed):
+    if qfu_deg is None or wind_dir_deg is None or wind_speed is None:
+        return 0.0, 0.0, ""
+    diff = radians((wind_dir_deg - qfu_deg) % 360)
+    hw = wind_speed * cos(diff)
+    cw = wind_speed * sin(diff)
+    side = "R" if cw > 0 else ("L" if cw < 0 else "")
+    return hw, abs(cw), side
 
-def vy_interp(pa, weight):
-    w_choice = 550 if weight <= 575 else (600 if weight <= 625 else 650)
-    table = VY[w_choice]
-    pas = sorted(table.keys())
-    pa_c = clamp(pa, pas[0], pas[-1])
-    p0 = max([p for p in pas if p <= pa_c])
-    p1 = min([p for p in pas if p >= pa_c])
-    return interp1(pa_c, p0, p1, table[p0], table[p1])
+def xw_class(xw_abs):
+    if xw_abs <= XW_GREEN_MAX: return "chip chip-green", "cwok"
+    if xw_abs <= XW_YELLOW_MAX: return "chip chip-yellow", "cwwarn"
+    return "chip chip-red", "cwbad"
 
-def wind_components(runway_qfu_deg, wind_dir_deg, wind_speed):
-    if runway_qfu_deg is None or wind_dir_deg is None or wind_speed is None:
-        return 0.0, 0.0
-    diff = ((wind_dir_deg - runway_qfu_deg + 180) % 360) - 180
-    hw = wind_speed * cos(radians(diff))
-    cw = wind_speed * sin(radians(diff))
-    # clamp numerically
-    hw = max(-abs(wind_speed), min(abs(wind_speed), hw))
-    cw = max(-abs(wind_speed), min(abs(wind_speed), cw))
-    return hw, cw
-
-def to_corrections_takeoff_gr(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
+def to_corrections_takeoff(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     gr = float(ground_roll)
     if headwind_kt >= 0: gr -= 5.0 * headwind_kt
     else: gr += 15.0 * abs(headwind_kt)
-    if paved: gr *= 0.90
-    slope_pc = clamp(slope_pc, -5.0, 5.0)
-    gr *= (1.0 + 0.07 * slope_pc)
+    if paved: gr *= 0.9
+    if slope_pc: gr *= (1.0 + 0.07 * (slope_pc/1.0))
     return max(gr, 0.0)
 
-def ldg_corrections_gr(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
+def ldg_corrections(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     gr = float(ground_roll)
     if headwind_kt >= 0: gr -= 4.0 * headwind_kt
     else: gr += 13.0 * abs(headwind_kt)
-    if paved: gr *= 0.90
-    slope_pc = clamp(slope_pc, -5.0, 5.0)
-    gr *= (1.0 - 0.03 * slope_pc)
+    if paved: gr *= 0.9
+    if slope_pc: gr *= (1.0 - 0.03 * (slope_pc/1.0))
     return max(gr, 0.0)
 
-# ============ Windy integration ============
+# -----------------------------
+# Windy API (hourly)
+# -----------------------------
 WINDY_ENDPOINT = "https://api.windy.com/api/point-forecast/v2"
-DEFAULT_MODEL = "IconEU"  # per your preference
 
-def _dir_speed_from_uv(u: float, v: float) -> Tuple[float, float]:
-    # From u (m/s East) and v (m/s North) to direction-from (deg) and speed (kt)
-    spd_ms = sqrt(u*u + v*v)
-    # Direction from which the wind blows:
-    # meteorological convention (0 = from North, clockwise)
-    # Using atan2(-u, -v) yields direction-from
-    deg = (atan2(-u, -v) * 180.0 / 3.141592653589793) % 360.0
-    spd_kt = spd_ms * 1.9438444924406046
-    return deg, spd_kt
-
-def windy_point_forecast(lat: float, lon: float, dt_utc: dt.datetime, model: str = DEFAULT_MODEL):
-    api_key = st.secrets.get("WINDY_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("WINDY_API_KEY missing in Streamlit secrets")
-
-    payload = {
-        "lat": lat, "lon": lon,
-        "model": model,
-        "parameters": ["wind", "temp", "pressure"],
+@st.cache_data(ttl=900, show_spinner=False)
+def windy_point_forecast(lat, lon, model, params, api_key):
+    headers = {"Content-Type": "application/json"}
+    body = {
+        "lat": round(float(lat), 3),
+        "lon": round(float(lon), 3),
+        "model": model,                 # "iconEu" default
+        "parameters": params,           # ["wind","temp","pressure","windGust"]
         "levels": ["surface"],
         "key": api_key,
     }
-    r = requests.post(WINDY_ENDPOINT, json=payload, timeout=20)
-    r.raise_for_status()
-    data = r.json()
+    try:
+        r = requests.post(WINDY_ENDPOINT, headers=headers, data=json.dumps(body), timeout=20)
+        if r.status_code != 200:
+            return {"error": f"HTTP {r.status_code}", "detail": r.text}
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
 
-    # timestamps in milliseconds since epoch (UTC); pick nearest to selected dt_utc
-    ts = data.get("ts") or data.get("timestamp")  # "ts" expected
-    if not ts:
-        raise RuntimeError("Windy response missing 'ts' timestamps")
-    target_ms = int(dt_utc.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
-    idx = min(range(len(ts)), key=lambda i: abs(ts[i] - target_ms))
+def windy_list_hours(resp):
+    if not resp or "ts" not in resp or not resp["ts"]:
+        return []
+    out = []
+    for i, tms in enumerate(resp["ts"]):
+        dt_utc = dt.datetime.utcfromtimestamp(tms/1000.0).replace(tzinfo=dt.timezone.utc)
+        out.append((i, dt_utc.strftime("%Y-%m-%d %H:00Z")))
+    return out
 
-    u = data["wind_u-surface"][idx]
-    v = data["wind_v-surface"][idx]
-    temp_k = data["temp-surface"][idx]
-    pres_pa = data["pressure-surface"][idx]
-
-    wind_dir, wind_kt = _dir_speed_from_uv(u, v)
-    temp_c = float(temp_k) - 273.15  # K -> °C
-    qnh_hpa = float(pres_pa) / 100.0  # Pa -> hPa (QNH ~ MSL pressure)
-
+def windy_unpack_at(resp, idx):
+    if idx is None: return None
+    def getv(key):
+        arr = resp.get(key, [])
+        return arr[idx] if arr and idx < len(arr) else None
+    u = getv("wind_u-surface"); v = getv("wind_v-surface"); gust = getv("gust-surface")
+    if u is None or v is None: return None
+    speed_ms = sqrt(u*u + v*v)
+    dir_deg = (degrees(atan2(-u, -v)) + 360.0) % 360.0
+    speed_kt = speed_ms * 1.94384
+    temp_val = getv("temp-surface")
+    temp_c = None
+    if temp_val is not None:
+        temp_c = float(temp_val)
+        if temp_c > 100:  # Kelvin -> C
+            temp_c -= 273.15
+        temp_c = round(temp_c, 1)
+    pres_pa = getv("pressure-surface")
+    qnh_hpa = round(pres_pa/100.0, 1) if pres_pa is not None else None
     return {
-        "idx": idx,
-        "timestamp_ms": ts[idx],
-        "wind_dir": wind_dir,
-        "wind_kt": wind_kt,
-        "temp_c": temp_c,
-        "qnh": qnh_hpa,
-        "model": model,
+        "wind_dir": round(dir_deg),
+        "wind_kt": round(speed_kt),
+        "wind_gust_kt": round(gust * 1.94384) if gust is not None else None,
+        "temp": temp_c,
+        "qnh": qnh_hpa
     }
 
-def pick_best_runway(icao: str, wind_dir: float, wind_kt: float):
-    ad = AERODROMES_DB.get(icao.upper())
-    if not ad: return None
-    best = None
-    for rwy_id, rwy in ad["runways"].items():
-        hw, cw = wind_components(rwy["qfu"], wind_dir, wind_kt)
-        item = {
-            "id": rwy_id, "qfu": rwy["qfu"],
-            "toda": rwy["toda"], "lda": rwy["lda"],
-            "paved": rwy["paved"], "slope_pc": rwy["slope_pc"],
-            "hw": hw, "cw": cw
-        }
-        if best is None:
-            best = item
-        else:
-            # prefer max headwind; if both tailwind, prefer less tailwind magnitude; tie-breaker: less |cw|
-            if (item["hw"] >= 0 and (best["hw"] < 0 or item["hw"] > best["hw"])) \
-               or (item["hw"] < 0 and best["hw"] < 0 and item["hw"] > best["hw"]) \
-               or (abs(item["hw"] - best["hw"]) < 1e-6 and abs(item["cw"]) < abs(best["cw"])):
-                best = item
-    return best
+# -----------------------------
+# GitHub Gist persistence (fleet)
+# -----------------------------
+GIST_FILE = "fleet_p2008.json"
 
-def cw_class(cw_abs: float) -> str:
-    if cw_abs > CROSSWIND_RED: return "bad"
-    if cw_abs >= CROSSWIND_YELLOW: return "warn"
-    return "ok"
+def gist_headers(token):
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
-# ============ State bootstrapping ============
+def gist_load_fleet(token, gist_id):
+    try:
+        r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=gist_headers(token), timeout=15)
+        if r.status_code != 200:
+            return None, f"GitHub error {r.status_code}: {r.text}"
+        data = r.json()
+        files = data.get("files", {})
+        if GIST_FILE in files and files[GIST_FILE].get("content") is not None:
+            content = files[GIST_FILE]["content"]
+            return json.loads(content), None
+        return None, "Gist file not found; will create on first save."
+    except Exception as e:
+        return None, str(e)
+
+def gist_save_fleet(token, gist_id, fleet_dict):
+    try:
+        payload = {"files": {GIST_FILE: {"content": json.dumps(fleet_dict, indent=2, sort_keys=True)}}}
+        r = requests.patch(f"https://api.github.com/gists/{gist_id}", headers=gist_headers(token), data=json.dumps(payload), timeout=15)
+        if r.status_code not in (200, 201):
+            return f"GitHub error {r.status_code}: {r.text}"
+        return None
+    except Exception as e:
+        return str(e)
+
+# -----------------------------
+# Session defaults
+# -----------------------------
+if "fleet" not in st.session_state:
+    # Seed; you will persist your own set via Gist.
+    st.session_state.fleet = {
+        "CS-DHS": {"ew": None, "ew_moment": None},
+        "CS-DHU": {"ew": None, "ew_moment": None},
+        "CS-DHW": {"ew": None, "ew_moment": None},
+        "CS-DHT": {"ew": None, "ew_moment": None},
+        "CS-ECB": {"ew": None, "ew_moment": None},
+        "CS-ECC": {"ew": None, "ew_moment": None},
+        "CS-ECD": {"ew": None, "ew_moment": None},
+    }
+
+DEFAULT_LEGS = [
+    {"role": "Departure", "icao": "LPSO"},
+    {"role": "Arrival",   "icao": "LPEV"},
+    {"role": "Alternate", "icao": "LPCB"},
+]
 if "legs" not in st.session_state:
-    st.session_state.legs = []
-    for i, leg in enumerate(DEFAULT_LEGS):
-        icao = leg["icao"]
-        ad = AERODROMES_DB[icao]
-        # seed wind/met with zeros; users can fetch via Windy
-        st.session_state.legs.append({
-            "role": leg["role"],
-            "icao": icao,
-            "elev_ft": ad["elev_ft"],
-            "wind_dir": 0.0,
-            "wind_kt": 0.0,
-            "qnh": 1013.0,
-            "temp": 15.0,
-            # selected runway end (auto after fetch)
-            "rwy": None,     # "03", etc.
-            "qfu": None,
-            "toda": None,
-            "lda": None,
-            "paved": True,
-            "slope_pc": 0.0,
-        })
+    st.session_state.legs = [dict(x) for x in DEFAULT_LEGS]
 
-# ============ Header ============
+if "forecast" not in st.session_state:
+    st.session_state.forecast = [None, None, None]
+if "hours" not in st.session_state:
+    st.session_state.hours = [[], [], []]
+if "hour_idx" not in st.session_state:
+    st.session_state.hour_idx = [None, None, None]
+if "met" not in st.session_state:
+    st.session_state.met = [{"temp": 15.0, "qnh": 1013.0, "wind_dir": 0.0, "wind_kt": 0.0} for _ in range(3)]
+
+# -----------------------------
+# Sidebar – Fleet & persistence (in expander; sidebar collapsed by default)
+# -----------------------------
+with st.sidebar:
+    st.subheader("⚙️ Settings")
+    windy_models = {"ICON-EU (default)": "iconEu", "GFS": "gfs", "AROME": "arome"}
+    model_label = st.selectbox("Windy model", list(windy_models.keys()), index=0)
+    WINDY_MODEL = windy_models[model_label]
+    use_same_hour = st.checkbox("Use the same forecast hour for all aerodromes", True)
+
+    st.markdown("---")
+    st.subheader("🛩️ Fleet (EW & Moment)")
+    with st.expander("Manage fleet (GitHub Gist)", expanded=False):
+        token = st.secrets.get("GITHUB_GIST_TOKEN", "")
+        gist_id = st.secrets.get("GITHUB_GIST_ID", "")
+        if token and gist_id:
+            cols = st.columns(3)
+            with cols[0]:
+                if st.button("Load from Gist"):
+                    gdata, gerr = gist_load_fleet(token, gist_id)
+                    if gdata is not None:
+                        st.session_state.fleet = gdata
+                        st.success(f"Loaded {len(gdata)} registrations.")
+                    else:
+                        st.warning(f"Could not load: {gerr}")
+            with cols[1]:
+                if st.button("Save to Gist"):
+                    err = gist_save_fleet(token, gist_id, st.session_state.fleet)
+                    if err: st.error(err)
+                    else: st.success("Fleet saved to Gist.")
+        else:
+            st.info("Add GITHUB_GIST_TOKEN and GITHUB_GIST_ID to secrets to enable persistence.")
+
+        regs_all = list(st.session_state.fleet.keys())
+        add_reg = st.text_input("Registration", value="")
+        col_add1, col_add2 = st.columns(2)
+        with col_add1:
+            ew_new = st.number_input("Empty Weight (kg)", min_value=0.0, value=0.0, step=0.1, key="fleet_ew_new")
+        with col_add2:
+            em_new = st.number_input("EW Moment (kg·m)", min_value=0.0, value=0.0, step=0.01, key="fleet_em_new")
+        if st.button("Add/Update"):
+            if add_reg.strip():
+                st.session_state.fleet[add_reg.strip().upper()] = {"ew": ew_new, "ew_moment": em_new}
+                st.success(f"Saved {add_reg.strip().upper()} (local state). Use 'Save to Gist' to persist.")
+
+        if regs_all:
+            del_reg = st.selectbox("Remove registration", options=[""] + regs_all)
+            if st.button("Remove"):
+                if del_reg:
+                    st.session_state.fleet.pop(del_reg, None)
+                    st.success(f"Removed: {del_reg}")
+
+# -----------------------------
+# Tabs
+# -----------------------------
 st.markdown('<div class="mb-header">Tecnam P2008 – Mass & Balance & Performance</div>', unsafe_allow_html=True)
+tab_setup, tab_aero, tab_wb, tab_perf, tab_pdf = st.tabs([
+    "1) Flight & Aircraft", "2) Aerodromes & MET", "3) Weight & Balance",
+    "4) Performance & Fuel", "5) PDF"
+])
 
-# ============ Top row: Time & Weather (Windy) ============
-tcol1, tcol2, tcol3 = st.columns([0.44, 0.28, 0.28])
-with tcol1:
-    st.markdown("### Weather (Windy)")
-    # UTC date + hour (hourly only)
-    today_utc = dt.datetime.now(dt.timezone.utc).date()
-    sel_date = st.date_input("UTC date", value=today_utc)
-    sel_hour = st.selectbox("UTC hour (Windy is hourly)", options=list(range(0,24)), index=dt.datetime.now(dt.timezone.utc).hour)
-with tcol2:
-    model = st.selectbox("Model", options=["IconEU","ECMWF","GFS"], index=0)
-    st.caption("Default is ICON-EU, per your preference.")
-with tcol3:
-    if st.button("Fetch forecast from Windy for all legs", type="primary"):
-        # Update all legs and selected runway using Windy
-        when = dt.datetime(sel_date.year, sel_date.month, sel_date.day, sel_hour, 0, 0, tzinfo=dt.timezone.utc)
-        try:
-            for i, leg in enumerate(st.session_state.legs):
-                icao = leg["icao"]
-                ad = AERODROMES_DB[icao]
-                met = windy_point_forecast(ad["lat"], ad["lon"], when, model=model)
-                # round sensible values
-                wind_dir = float(round(met["wind_dir"])) % 360
-                wind_kt = float(round(met["wind_kt"]))
-                temp_c = float(round(met["temp_c"]))
-                qnh = float(round(met["qnh"], 1))
-                # pick runway
-                best = pick_best_runway(icao, wind_dir, wind_kt)
-                # write to session before widgets are created; then rerun
-                leg.update({
-                    "wind_dir": wind_dir, "wind_kt": wind_kt,
-                    "temp": temp_c, "qnh": qnh,
-                    "rwy": best["id"] if best else None,
-                    "qfu": best["qfu"] if best else None,
-                    "toda": best["toda"] if best else None,
-                    "lda": best["lda"] if best else None,
-                    "paved": True if best is None else AERODROMES_DB[icao]["runways"][best["id"]]["paved"],
-                    "slope_pc": 0.0 if best is None else AERODROMES_DB[icao]["runways"][best["id"]]["slope_pc"],
-                })
-            st.rerun()
-        except Exception as e:
-            st.error(f"Windy fetch failed: {e}")
+# ---- 1) Flight & Aircraft ----
+with tab_setup:
+    c1, c2 = st.columns([0.55, 0.45])
+    with c1:
+        st.markdown("### Flight data (UTC)")
+        today = dt.datetime.utcnow().date()
+        default_time = (dt.datetime.utcnow() + dt.timedelta(hours=1)).time().replace(second=0, microsecond=0)
+        flight_date = st.date_input("Date (UTC)", value=today)
+        flight_time = st.time_input("Planned off-block/takeoff time (UTC)", value=default_time, step=300)
+        ETD_UTC = dt.datetime.combine(flight_date, flight_time).replace(tzinfo=dt.timezone.utc)
+        st.info(f"ETD UTC: {ETD_UTC.strftime('%Y-%m-%d %H:%MZ')}")
 
-# ============ Main columns ============
-left, _, right = st.columns([0.42,0.02,0.56], gap="large")
+    with c2:
+        st.markdown("### Aircraft")
+        regs = list(st.session_state.fleet.keys()) or ["CS-XXX"]
+        selected_reg = st.selectbox("Registration", regs, key="selected_reg")
+        st.session_state["reg"] = selected_reg
+        st.session_state["etd_utc"] = ETD_UTC
 
-# ----- Left: Weight & balance -----
-with left:
-    st.markdown("### Weight & balance (inputs)")
-    ew = st.number_input("Empty weight (kg)", min_value=0.0, value=0.0, step=1.0)
-    ew_moment = st.number_input("Empty weight moment (kg·m)", min_value=0.0, value=0.0, step=0.1)
-    student = st.number_input("Student weight (kg)", min_value=0.0, value=0.0, step=1.0)
-    instructor = st.number_input("Instructor weight (kg)", min_value=0.0, value=0.0, step=1.0)
-    baggage = st.number_input("Baggage (kg)", min_value=0.0, value=0.0, step=1.0)
-    fuel_l = st.number_input("Fuel (L) for M&B", min_value=0.0, value=0.0, step=1.0)
+# ---- helper: choose best runway ----
+def choose_best_runway(ad, temp_c, qnh, wind_dir, wind_kt):
+    # PA/DA as in original logic:
+    pa_ft = ad["elev_ft"] + (1013.25 - qnh) * 27.0
+    isa_temp = 15.0 - 2.0*(pa_ft/1000.0)
+    da_ft = pa_ft + (120.0 * (temp_c - isa_temp))
 
-    # immediate exceedance warnings
-    if student + instructor > AC["max_passenger_weight"]:
-        st.warning(f"Passengers exceed limit: {student+instructor:.0f} kg > {AC['max_passenger_weight']:.0f} kg")
-    if baggage > AC["max_baggage_weight"]:
-        st.warning(f"Baggage exceeds limit: {baggage:.0f} kg > {AC['max_baggage_weight']:.0f} kg")
-    if fuel_l > AC["max_fuel_volume"]:
-        st.warning(f"Fuel volume exceeds tank capacity: {fuel_l:.0f} L > {AC['max_fuel_volume']:.0f} L")
+    candidates = []
+    for rw in ad["runways"]:
+        qfu = rw["qfu"]; paved = rw["paved"]; slope_pc = rw["slope_pc"]
+        hw, xw_abs, side = wind_components(qfu, wind_dir, wind_kt)
+        # Interpolate (no weight dependency in source tables)
+        to_gr = bilinear(pa_ft, temp_c, TAKEOFF, 'GR')
+        to_50 = bilinear(pa_ft, temp_c, TAKEOFF, '50ft')
+        ldg_gr = bilinear(pa_ft, temp_c, LANDING, 'GR')
+        ldg_50 = bilinear(pa_ft, temp_c, LANDING, '50ft')
+        to_gr_corr  = to_corrections_takeoff(to_gr,  hw, paved=paved, slope_pc=slope_pc)
+        ldg_gr_corr = ldg_corrections(ldg_gr, hw, paved=paved, slope_pc=slope_pc)
+        feasible = (to_50 <= rw["toda"]) and (ldg_50 <= rw["lda"])
+        pct_todr = (to_50 / rw["toda"] * 100) if rw["toda"] > 0 else 0.0
+        pct_ldr  = (ldg_50 / rw["lda"] * 100) if rw["lda"]  > 0 else 0.0
+        candidates.append({
+            "id": rw["id"], "qfu": qfu, "toda_av": rw["toda"], "lda_av": rw["lda"],
+            "paved": paved, "slope_pc": slope_pc,
+            "hw_comp": hw, "xw_abs": xw_abs, "xw_side": side,
+            "to_gr": to_gr_corr, "to_50": to_50, "ldg_gr": ldg_gr_corr, "ldg_50": ldg_50,
+            "feasible": feasible, "pa_ft": pa_ft, "da_ft": da_ft,
+            "pct_todr": pct_todr, "pct_ldr": pct_ldr
+        })
+    # prefer feasible, then max headwind, then min crosswind
+    feasibles = [c for c in candidates if c["feasible"]]
+    pool = feasibles if feasibles else candidates
+    best = sorted(pool, key=lambda c: (c["feasible"], c["hw_comp"], -c["xw_abs"]), reverse=True)[0]
+    return best, candidates
 
-    pilot = student + instructor
-    fuel_wt = fuel_l * AC['fuel_density']
-    m_empty = ew_moment
-    m_pilot = pilot * AC['pilot_arm']
-    m_bag = baggage * AC['baggage_arm']
-    m_fuel = fuel_wt * AC['fuel_arm']
-    total_weight = ew + pilot + baggage + fuel_wt
-    total_moment = m_empty + m_pilot + m_bag + m_fuel
-    cg = (total_moment/total_weight) if total_weight>0 else 0.0
-
-    remaining_by_mtow = max(0.0, AC['max_takeoff_weight'] - (ew + pilot + baggage + fuel_wt))
-    remaining_by_tank = max(0.0, AC['max_fuel_volume']*AC['fuel_density'] - fuel_wt)
-    remaining_fuel_weight = min(remaining_by_mtow, remaining_by_tank)
-    remaining_fuel_l = remaining_fuel_weight / AC['fuel_density']
-    limit_label = "Tank" if remaining_by_tank < remaining_by_mtow else "MTOW"
-
-    def w_color(val, limit):
-        if val > limit: return 'bad'
-        if val > 0.95*limit: return 'warn'
-        return 'ok'
-    def cg_color_val(cg_val, limits):
-        lo, hi = limits
-        margin = 0.05*(hi-lo)
-        if cg_val<lo or cg_val>hi: return 'bad'
-        if cg_val<lo+margin or cg_val>hi-margin: return 'warn'
-        return 'ok'
-
-    st.markdown("#### Summary")
-    st.markdown(f"<div class='mb-summary-row'><div>Possible extra fuel</div><div><b>{remaining_fuel_l:.1f} L</b> <span class='hint'>(limited by <i>{limit_label}</i>)</span></div></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='mb-summary-row'><div>Total weight</div><div class='{w_color(total_weight, AC['max_takeoff_weight'])}'><b>{total_weight:.1f} kg</b><span class='chip'>≤ {AC['max_takeoff_weight']:.0f}</span></div></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='mb-summary-row'><div>Total moment</div><div><b>{total_moment:.2f} kg·m</b></div></div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='mb-summary-row'><div>CG</div><div class='{cg_color_val(cg, AC['cg_limits'])}'><b>{cg:.3f} m</b><span class='chip'>{AC['cg_limits'][0]:.3f} – {AC['cg_limits'][1]:.3f} m</span></div></div>", unsafe_allow_html=True)
-
-    # M&B table
-    rows = [("Empty weight", ew, (ew_moment/ew if ew>0 else 0.0), m_empty),
-            ("Fuel", fuel_wt, AC['fuel_arm'], m_fuel),
-            ("Pilot & Passenger", pilot, AC['pilot_arm'], m_pilot),
-            ("Baggage", baggage, AC['baggage_arm'], m_bag)]
-    tbl = ("<table class='mb-table tight'><tr>"
-           "<th>Item</th><th>Weight (kg)</th><th>Arm (m)</th><th>Moment (kg·m)</th></tr>"
-           + "".join([f"<tr><td>{n}</td><td>{w:.1f}</td><td>{a:.3f}</td><td>{m:.2f}</td></tr>" for n,w,a,m in rows])
-           + f"<tr><td><b>Total</b></td><td><b>{total_weight:.1f}</b></td><td><b>{cg:.3f}</b></td><td><b>{total_moment:.2f}</b></td></tr></table>")
-    st.markdown(tbl, unsafe_allow_html=True)
-
-# ----- Right: Aerodromes & performance -----
-with right:
-    st.markdown("### Aerodromes & performance")
+# ---- 2) Aerodromes & MET ----
+with tab_aero:
+    st.markdown("### Aerodromes (fixed: Departure, Arrival, Alternate) + MET (hourly)")
+    st.caption("Choose a Windy forecast hour (UTC). Runway is auto-selected to maximize headwind while staying feasible.")
 
     perf_rows = []
-    slope_warn = False
-
     for i, leg in enumerate(st.session_state.legs):
-        icao = leg["icao"]
-        ad = AERODROMES_DB[icao]
-        with st.expander(f"{leg['role']} – {icao} ({AERODROMES_DB[icao]['name']})", expanded=(i==0)):
-            # Aerodrome selector (from DB)
-            icao_sel = st.selectbox("Aerodrome", options=list(AERODROMES_DB.keys()),
-                                    index=list(AERODROMES_DB.keys()).index(icao), key=f"icao_{i}")
-            if icao_sel != icao:
-                st.session_state.legs[i]["icao"] = icao_sel
-                st.session_state.legs[i]["elev_ft"] = AERODROMES_DB[icao_sel]["elev_ft"]
-                st.session_state.legs[i]["rwy"] = None
-                st.session_state.legs[i]["qfu"] = None
-                st.session_state.legs[i]["toda"] = None
-                st.session_state.legs[i]["lda"] = None
-                st.rerun()
-            icao = icao_sel
+        role = leg.get("role", ["Departure","Arrival","Alternate"][i])
+        c1, c2, c3 = st.columns([0.36, 0.36, 0.28])
+
+        with c1:
+            icao_options = sorted(AERODROMES_DB.keys())
+            default_icao = leg.get("icao", icao_options[0])
+            icao = st.selectbox(f"{role} – Aerodrome (ICAO)", options=icao_options,
+                                index=icao_options.index(default_icao) if default_icao in icao_options else 0,
+                                key=f"icao_{i}")
             ad = AERODROMES_DB[icao]
+            st.write(f"**{ad['name']}**  \nLat {ad['lat']:.5f}, Lon {ad['lon']:.5f}  \nElev {ad['elev_ft']:.0f} ft")
 
-            # Met (editable; Windy can prefill)
-            wind_dir = st.number_input("Wind direction (deg FROM)", 0.0, 360.0, float(leg["wind_dir"]), 1.0, key=f"wdir_{i}")
-            wind_kt  = st.number_input("Wind speed (kt)", min_value=0.0, value=float(leg["wind_kt"]), step=1.0, key=f"wspd_{i}")
-            temp     = st.number_input("Temperature (°C)", -40.0, 60.0, float(leg["temp"]), 0.1, key=f"temp_{i}")
-            qnh      = st.number_input("QNH (hPa)", 900.0, 1050.0, float(leg["qnh"]), 0.1, key=f"qnh_{i}")
+        with c2:
+            temp_c = st.number_input("OAT (°C)", value=st.session_state.met[i]["temp"], step=0.1, key=f"temp_{i}")
+            qnh    = st.number_input("QNH (hPa)", min_value=900.0, max_value=1050.0, value=st.session_state.met[i]["qnh"], step=0.1, key=f"qnh_{i}")
+            wind_dir = st.number_input("Wind FROM (°)", min_value=0.0, max_value=360.0, value=st.session_state.met[i]["wind_dir"], step=1.0, key=f"wdir_{i}")
+            wind_kt  = st.number_input("Wind speed (kt)", min_value=0.0, value=st.session_state.met[i]["wind_kt"], step=1.0, key=f"wspd_{i}")
 
-            # Auto-pick runway if not set (or if user changed wind)
-            if leg["rwy"] is None and wind_kt is not None:
-                best = pick_best_runway(icao, wind_dir, wind_kt)
-                if best:
-                    st.session_state.legs[i].update({
-                        "rwy": best["id"], "qfu": best["qfu"],
-                        "toda": best["toda"], "lda": best["lda"],
-                        "paved": best["paved"], "slope_pc": best["slope_pc"],
-                    })
-                    st.rerun()
+        with c3:
+            if st.button("Fetch forecast hours (Windy)", key=f"fetch_{i}"):
+                api_key = st.secrets.get("WINDY_API_KEY", "")
+                if not api_key:
+                    st.error("Windy API key not found in secrets (WINDY_API_KEY).")
+                else:
+                    resp = windy_point_forecast(ad["lat"], ad["lon"], windy_models[st.session_state.get('WINDY_MODEL_LABEL', 'ICON-EU (default)')] if 'WINDY_MODEL_LABEL' in st.session_state else "iconEu",
+                                                ["wind","temp","pressure","windGust"], api_key)
+                    if "error" in resp:
+                        st.error(f"Windy error: {resp.get('error')} {resp.get('detail','')}")
+                    else:
+                        st.session_state.forecast[i] = resp
+                        st.session_state.hours[i] = windy_list_hours(resp)
+                        if st.session_state.hours[i]:
+                            st.session_state.hour_idx[i] = st.session_state.hours[i][0][0]
+                        st.success(f"Loaded {len(st.session_state.hours[i])} hours from Windy.")
+                        if use_same_hour:
+                            for j in range(3):
+                                if j != i and not st.session_state.hours[j]:
+                                    st.session_state.hours[j] = list(st.session_state.hours[i])
+                                    st.session_state.forecast[j] = st.session_state.forecast[i]
+                        st.experimental_rerun()
 
-            # Show chosen runway (read-only) and derive declared distances/QFU
-            if leg["rwy"] is not None:
-                rwy = ad["runways"][leg["rwy"]]
-                qfu = rwy["qfu"]; toda_av = rwy["toda"]; lda_av = rwy["lda"]
-            else:
-                # fallback: first runway in DB
-                first_id, first = next(iter(ad["runways"].items()))
-                st.session_state.legs[i]["rwy"] = first_id
-                st.session_state.legs[i]["qfu"] = first["qfu"]
-                st.session_state.legs[i]["toda"] = first["toda"]
-                st.session_state.legs[i]["lda"] = first["lda"]
-                qfu, toda_av, lda_av = first["qfu"], first["toda"], first["lda"]
+            hours = st.session_state.hours[i]
+            if hours:
+                idxs = [h[0] for h in hours]; labels = [h[1] for h in hours]
+                current_idx = st.session_state.hour_idx[i] if st.session_state.hour_idx[i] in idxs else idxs[0]
+                sel_label = st.selectbox("Forecast hour (UTC)", options=labels, index=labels.index(hours[idxs.index(current_idx)][1]), key=f"hour_label_{i}")
+                sel_idx = hours[labels.index(sel_label)][0]
+                if use_same_hour:
+                    for j in range(3):
+                        if st.session_state.hours[j]:
+                            st.session_state.hour_idx[j] = sel_idx
+                else:
+                    st.session_state.hour_idx[i] = sel_idx
 
-            st.info(
-                f"**Selected runway:** {st.session_state.legs[i]['rwy']}  •  "
-                f"QFU **{int(round(qfu)):03d}°**  •  "
-                f"TODA **{toda_av:.0f} m**  •  LDA **{lda_av:.0f} m**",
-                icon="🧭"
-            )
+                if st.button("Apply hour to fields", key=f"apply_{i}"):
+                    resp = st.session_state.forecast[i]
+                    idx = st.session_state.hour_idx[i]
+                    met = windy_unpack_at(resp, idx)
+                    if met:
+                        st.session_state[f"temp_{i}"] = met["temp"] if met["temp"] is not None else temp_c
+                        st.session_state[f"qnh_{i}"]  = met["qnh"] if met["qnh"] is not None else qnh
+                        st.session_state[f"wdir_{i}"] = met["wind_dir"] if met["wind_dir"] is not None else wind_dir
+                        st.session_state[f"wspd_{i}"] = met["wind_kt"] if met["wind_kt"] is not None else wind_kt
+                        st.session_state.met[i].update({
+                            "temp": st.session_state[f"temp_{i}"],
+                            "qnh": st.session_state[f"qnh_{i}"],
+                            "wind_dir": st.session_state[f"wdir_{i}"],
+                            "wind_kt": st.session_state[f"wspd_{i}"],
+                        })
+                        st.success(f"Applied {sel_label}")
+                        st.experimental_rerun()
+                    else:
+                        st.warning("No usable data at selected hour.")
 
-            paved = True
-            slope_pc = 0.0
-            if abs(slope_pc) > 3.0: slope_warn = True
+        # Auto-select runway
+        best, _ = choose_best_runway(ad, float(temp_c), float(qnh), float(wind_dir), float(wind_kt))
+        feas = "✅" if best["feasible"] else "⚠️"
+        xw_chip_cls, _xw_cls = xw_class(best["xw_abs"])
+        st.markdown(
+            f"🧭 **Selected runway:** {best['id']} "
+            f"<span class='chip'>QFU {best['qfu']:.0f}°</span>"
+            f"<span class='chip'>TODA {best['toda_av']:.0f} m</span>"
+            f"<span class='chip'>LDA {best['lda_av']:.0f} m</span>"
+            f"<span class='chip'>HW {best['hw_comp']:.0f} kt</span>"
+            f"<span class='{xw_chip_cls}'>XW {best['xw_side']} {best['xw_abs']:.0f} kt</span> "
+            f"<span class='chip'>TO % {best['pct_todr']:.0f}</span>"
+            f"<span class='chip'>LD % {best['pct_ldr']:.0f}</span> {feas}",
+            unsafe_allow_html=True
+        )
 
-            # PA/DA (per your formula)
-            # PA = elev_ft + (1013 − QNH) * 30
-            elev = ad["elev_ft"]
-            pa_ft = elev + (1013.0 - qnh) * 30.0
-            isa_temp = 15 - 2*(elev/1000)  # ISA from elevation
-            da_ft = pa_ft + (120*(temp - isa_temp))
+        st.session_state.legs[i] = {"role": role, "icao": icao}
 
-            # Interpolations (tabulated by PA & OAT)
-            to_gr_tab  = bilinear(pa_ft, temp, TAKEOFF, 'GR')
-            to_50_tab  = bilinear(pa_ft, temp, TAKEOFF, '50ft')
-            ldg_gr_tab = bilinear(pa_ft, temp, LANDING, 'GR')
-            ldg_50_tab = bilinear(pa_ft, temp, LANDING, '50ft')
+        perf_rows.append({
+            "role": role, "icao": icao, "name": ad["name"],
+            "lat": ad["lat"], "lon": ad["lon"], "elev_ft": ad["elev_ft"],
+            "rwy": best["id"], "qfu": best["qfu"], "toda_av": best["toda_av"], "lda_av": best["lda_av"],
+            "slope_pc": best["slope_pc"], "paved": best["paved"],
+            "temp": float(temp_c), "qnh": float(qnh), "wind_dir": float(wind_dir), "wind_kt": float(wind_kt),
+            "pa_ft": best["pa_ft"], "da_ft": best["da_ft"],
+            "to_gr": best["to_gr"], "to_50": best["to_50"], "ldg_gr": best["ldg_gr"], "ldg_50": best["ldg_50"],
+            "hw_comp": best["hw_comp"], "xw_abs": best["xw_abs"], "xw_side": best["xw_side"], "feasible": best["feasible"],
+            "pct_todr": best["pct_todr"], "pct_ldr": best["pct_ldr"]
+        })
 
-            # Corrections in ground roll
-            hw, cw = wind_components(qfu, wind_dir, wind_kt)
-            to_gr_corr  = to_corrections_takeoff_gr(to_gr_tab, hw, paved=paved, slope_pc=slope_pc)
-            ldg_gr_corr = ldg_corrections_gr(ldg_gr_tab, hw, paved=paved, slope_pc=slope_pc)
+    # Summary table
+    st.markdown("#### Performance summary (auto-selected runways)")
+    def fmt(v): return f"{v:.0f}" if isinstance(v, (int,float)) else str(v)
+    rows_html = []
+    for r in perf_rows:
+        to_ok  = "ok" if r["to_50"]  <= r["toda_av"] else "bad"
+        ldg_ok = "ok" if r["ldg_50"] <= r["lda_av"]  else "bad"
+        _, cw_cls = xw_class(r["xw_abs"])
+        rows_html.append(
+            f"<tr>"
+            f"<td>{r['role']} {r['icao']}</td><td>{r['rwy']}</td>"
+            f"<td>{fmt(r['qfu'])}</td><td>{fmt(r['pa_ft'])}</td><td>{fmt(r['da_ft'])}</td>"
+            f"<td>{fmt(r['to_gr'])}</td>"
+            f"<td class='{to_ok}'>{fmt(r['to_50'])}</td>"
+            f"<td>{fmt(r['ldg_gr'])}</td>"
+            f"<td class='{ldg_ok}'>{fmt(r['ldg_50'])}</td>"
+            f"<td>{fmt(r['toda_av'])}</td><td>{fmt(r['lda_av'])}</td>"
+            f"<td>{fmt(r['hw_comp'])}</td>"
+            f"<td class='{cw_cls}'>{r['xw_side']} {fmt(r['xw_abs'])}</td>"
+            f"<td>{fmt(r['pct_todr'])}%</td><td>{fmt(r['pct_ldr'])}%</td>"
+            f"</tr>"
+        )
+    st.markdown(
+        "<table class='mb-table'><tr>"
+        "<th>Leg / ICAO</th><th>RWY</th><th>QFU</th><th>PA ft</th><th>DA ft</th>"
+        "<th>TO GR (m)*</th><th>TODR 50ft (m)</th><th>LND GR (m)*</th><th>LDR 50ft (m)</th>"
+        "<th>TODA</th><th>LDA</th><th>HW kt</th><th>XW</th><th>TO %</th><th>LD %</th></tr>" +
+        "".join(rows_html) + "</table>",
+        unsafe_allow_html=True
+    )
+    st.session_state["_perf_rows"] = perf_rows
 
-            # ROC & Vy
-            roc_val = roc_interp(pa_ft, temp, total_weight) if total_weight>0 else 0.0
-            vy_val  = vy_interp(pa_ft, total_weight) if total_weight>0 else 0.0
+# ---- 3) Weight & Balance ----
+with tab_wb:
+    st.markdown("### Weight & Balance")
+    reg = st.session_state.get("reg", "CS-XXX")
+    fleet = st.session_state.fleet
+    ew_default = fleet.get(reg, {}).get("ew")
+    ewm_default = fleet.get(reg, {}).get("ew_moment")
 
-            # Percentage of runway used
-            tod_pct = (to_50_tab / toda_av * 100.0) if toda_av > 0 else 0.0
-            ldg_pct = (ldg_50_tab / lda_av * 100.0) if lda_av > 0 else 0.0
+    c1, c2 = st.columns([0.55, 0.45])
+    with c1:
+        ew = st.number_input("Empty Weight (kg)", min_value=0.0, value=(ew_default or 0.0), step=0.1, disabled=True)
+        ew_moment = st.number_input("Empty Weight Moment (kg·m)", min_value=0.0, value=(ewm_default or 0.0), step=0.01, disabled=True)
+        student = st.number_input("Student weight (kg)", min_value=0.0, value=0.0, step=0.5)
+        instructor = st.number_input("Instructor weight (kg)", min_value=0.0, value=0.0, step=0.5)
+        baggage = st.number_input("Baggage (kg)", min_value=0.0, value=0.0, step=0.5)
+        fuel_l = st.number_input("Fuel (L)", min_value=0.0, value=0.0, step=0.5)
 
-            # Crosswind status chip
-            cw_abs = abs(cw)
-            cw_cls = cw_class(cw_abs)
-            cw_label = f"<span class='{cw_cls}'>XW {cw_abs:.0f} kt</span>"
-            hw_label = f"HW {max(0.0, hw):.0f} kt" if hw >= 0 else f"TW {abs(hw):.0f} kt"
+    with c2:
+        pilot = student + instructor
+        fuel_wt = fuel_l * AC["fuel_density"]
+        m_empty = ew_moment or 0.0
+        m_pilot = pilot * AC["pilot_arm"]
+        m_bag = baggage * AC["baggage_arm"]
+        m_fuel = fuel_wt * AC["fuel_arm"]
+        total_weight = (ew or 0.0) + pilot + baggage + fuel_wt
+        total_moment = m_empty + m_pilot + m_bag + m_fuel
+        cg = (total_moment/total_weight) if total_weight > 0 else 0.0
 
-            st.markdown(
-                f"<div class='kpi'><span>{hw_label}</span><span>{cw_label}</span>"
-                f"<span>PA {pa_ft:.0f} ft / DA {da_ft:.0f} ft</span>"
-                f"<span>Vy {vy_val:.0f} kt</span><span>ROC {roc_val:.0f} ft/min</span></div>",
-                unsafe_allow_html=True
-            )
+        rem_by_mtow = max(0.0, AC["max_takeoff_weight"] - ((ew or 0.0) + pilot + baggage + fuel_wt))
+        rem_by_tank = max(0.0, AC["max_fuel_volume"]*AC["fuel_density"] - fuel_wt)
+        rem_fuel_wt = min(rem_by_mtow, rem_by_tank)
+        rem_fuel_l = rem_fuel_wt / AC["fuel_density"]
+        limit_label = "Tank Capacity" if rem_by_tank < rem_by_mtow else "Maximum Weight"
 
-            # collect row
-            perf_rows.append({
-                "role": leg["role"], "icao": icao, "qfu": qfu,
-                "elev_ft": elev, "qnh": qnh, "temp": temp,
-                "pa_ft": pa_ft, "da_ft": da_ft, "isa_temp": isa_temp,
-                "to_gr": to_gr_corr, "to_50": to_50_tab,
-                "ldg_gr": ldg_gr_corr, "ldg_50": ldg_50_tab,
-                "toda_av": toda_av, "lda_av": lda_av,
-                "hw_comp": hw, "cw_comp": cw, "paved": paved, "slope_pc": slope_pc,
-                "roc": roc_val, "vy": vy_val,
-                "wind_dir": wind_dir, "wind_kt": wind_kt,
-                "tod_pct": tod_pct, "ldg_pct": ldg_pct,
-            })
+        def w_color(val, limit):
+            if val > limit: return 'bad'
+            if val > 0.95*limit: return 'warn'
+            return 'ok'
+        def cg_color_val(cg_val, limits):
+            lo, hi = limits; margin = 0.05*(hi-lo)
+            if cg_val < lo or cg_val > hi: return 'bad'
+            if cg_val < lo+margin or cg_val > hi-margin: return 'warn'
+            return 'ok'
 
-    if slope_warn:
-        st.warning("Runway slope > 3% — confirm values; corrections may be large.")
+        st.markdown("#### Summary")
+        st.markdown(f"<div class='mb-summary'><div>Remaining possible fuel</div><div><b>{rem_fuel_l:.1f} L</b> ({limit_label})</div></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='mb-summary'><div>Total Weight</div><div class='{w_color(total_weight, AC['max_takeoff_weight'])}'><b>{total_weight:.1f} kg</b></div></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='mb-summary'><div>Total Moment</div><div><b>{total_moment:.2f} kg·m</b></div></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='mb-summary'><div>CG</div><div class='{cg_color_val(cg, AC['cg_limits'])}'><b>{cg:.3f} m</b></div></div>", unsafe_allow_html=True)
 
-# ===== Performance summary =====
-st.markdown("### Performance summary")
-for r in perf_rows:
-    r['tod_ok'] = r['to_50'] <= r['toda_av']
-    r['ldg_ok'] = r['ldg_50'] <= r['lda_av']
-    r['tod_margin'] = r['toda_av'] - r['to_50']
-    r['ldg_margin'] = r['lda_av'] - r['ldg_50']
+        # Safety validations
+        if pilot > AC["max_passenger_weight"]:
+            st.error(f"Passengers over limit: {pilot:.1f} kg > {AC['max_passenger_weight']:.0f} kg")
+        if baggage > AC["max_baggage_weight"]:
+            st.error(f"Baggage over limit: {baggage:.1f} kg > {AC['max_baggage_weight']:.0f} kg")
+        if fuel_l > AC["max_fuel_volume"]:
+            st.error(f"Fuel volume over limit: {fuel_l:.1f} L > {AC['max_fuel_volume']:.0f} L")
+        if total_weight > AC["max_takeoff_weight"]:
+            st.error(f"MTOW exceeded: {total_weight:.1f} kg > {AC['max_takeoff_weight']:.0f} kg")
+        lo, hi = AC["cg_limits"]
+        if total_weight > 0 and (cg < lo or cg > hi):
+            st.error(f"CG out of limits: {cg:.3f} m not in [{lo:.3f}, {hi:.3f}] m")
 
-def fmt(v): return f"{v:.0f}" if isinstance(v, (int,float)) else str(v)
-def status_cell(ok, margin, pct=None):
-    cls = 'ok' if ok else 'bad'
-    sign = '+' if margin >= 0 else '−'
-    pct_str = f" • {pct:.0f}%" if (pct is not None and pct>0) else ""
-    return f"<span class='{cls}'>{'OK' if ok else 'NOK'} ({sign}{abs(margin):.0f} m){pct_str}</span>"
+    st.session_state["_wb"] = {"ew": ew, "ew_moment": ew_moment,
+                               "total_weight": total_weight, "total_moment": total_moment,
+                               "cg": cg, "fuel_l": fuel_l,
+                               "pilot": pilot, "baggage": baggage}
 
-st.markdown(
-    "<table class='mb-table'><tr>"
-    "<th>Leg/Aerodrome</th><th>QFU</th><th>PA/DA ft</th>"
-    "<th>TODR 50ft</th><th>TODA</th><th>Takeoff fit</th>"
-    "<th>LDR 50ft</th><th>LDA</th><th>Landing fit</th>"
-    "<th>Wind (H/C)</th><th>ROC (ft/min)</th><th>Vy (kt)</th>"
-    "</tr>" +
-    "".join([
-        f"<tr>"
-        f"<td>{r['role']} {r['icao']}</td>"
-        f"<td>{fmt(r['qfu'])}</td>"
-        f"<td>{fmt(r['pa_ft'])}/{fmt(r['da_ft'])}</td>"
-        f"<td>{fmt(r['to_50'])}</td><td>{fmt(r['toda_av'])}</td>"
-        f"<td>{status_cell(r['tod_ok'], r['tod_margin'], r['tod_pct'])}</td>"
-        f"<td>{fmt(r['ldg_50'])}</td><td>{fmt(r['lda_av'])}</td>"
-        f"<td>{status_cell(r['ldg_ok'], r['ldg_margin'], r['ldg_pct'])}</td>"
-        f"<td>{('HW' if r['hw_comp']>=0 else 'TW')} {abs(r['hw_comp']):.0f} / {abs(r.get('cw_comp',0)):.0f} kt</td>"
-        f"<td>{fmt(r.get('roc',0))}</td><td>{fmt(r.get('vy',0))}</td>"
-        f"</tr>"
-        for r in perf_rows
-    ]) + "</table>", unsafe_allow_html=True
-)
+# ---- 4) Performance & Fuel ----
+with tab_perf:
+    st.markdown("### Fuel Planning")
+    policy = st.radio("Policy", options=["Simplified (fixed 90 L ramp)", "Detailed (rate-based)"], index=0, horizontal=True)
 
-# ===== Fuel planning (same logic as your file) =====
-st.markdown("### Fuel planning")
-RATE_LPH = 20.0
-simple_policy = st.checkbox(
-    "Use simplified policy: Taxi=15min; ignore 2,3,4 & 6,7,8; 1h in (5) and 1h in (9)",
-    value=True
-)
-POLICY_TAXI_MIN = 15
-POLICY_TRIP_MIN = 60
-POLICY_BLOCK9_MIN = 60
-
-c1, c2, c3, c4 = st.columns([0.25,0.25,0.25,0.25])
-
-def time_to_liters(h=0, m=0, rate=RATE_LPH):
-    return rate * (h + m/60.0)
-
-with c1:
-    if simple_policy:
-        su_min = POLICY_TAXI_MIN
-        st.markdown(f"**Start-up & taxi (1)**: {su_min} min *(policy)*")
+    if policy.startswith("Simplified"):
+        total_ramp = 90.0
+        st.info("Using simplified policy: **Total Ramp Fuel = 90 L**")
+        trip_l = cont_l = req_ramp = extra_l = 0.0
+        # Typical breakdown (optional, used only to fill fields if present)
+        taxi_l = climb_l = enrt_l = desc_l = alt_l = reserve_l = 0.0
     else:
-        su_min = st.number_input("Start-up & taxi (min) (1)", min_value=0, value=POLICY_TAXI_MIN, step=1)
-    climb_min = st.number_input("Climb (min) (2)", min_value=0, value=15, step=1, disabled=simple_policy)
-with c2:
-    enrt_h = st.number_input("Enroute (h) (3)", min_value=0, value=2, step=1, disabled=simple_policy)
-    enrt_min = st.number_input("Enroute (min) (3)", min_value=0, value=15, step=1, disabled=simple_policy)
-with c3:
-    desc_min = st.number_input("Descent (min) (4)", min_value=0, value=15, step=1, disabled=simple_policy)
-    alt_min = st.number_input("Alternate (min) (7)", min_value=0, value=60, step=5, disabled=simple_policy)
-with c4:
-    reserve_min = st.number_input("Reserve (min) (8)", min_value=0, value=45, step=5, disabled=simple_policy)
-    extra_min_user = st.number_input("Extra (min) (10) (manual if normal mode)", min_value=0, value=0, step=5, disabled=simple_policy)
+        RATE_LPH = st.number_input("Planned consumption (L/h)", min_value=10.0, max_value=40.0, value=20.0, step=0.5)
+        c1, c2, c3, c4 = st.columns(4)
+        def time_to_liters(h=0, m=0, rate=RATE_LPH): return rate * (h + m/60.0)
+        with c1:
+            su_min = st.number_input("Start-up & Taxi (min)", min_value=0, value=15, step=1)
+            climb_min = st.number_input("Climb (min)", min_value=0, value=15, step=1)
+        with c2:
+            enrt_h = st.number_input("Enroute (h)", min_value=0, value=2, step=1)
+            enrt_min = st.number_input("Enroute (min)", min_value=0, value=15, step=1)
+        with c3:
+            desc_min = st.number_input("Descent (min)", min_value=0, value=15, step=1)
+            alt_min = st.number_input("Alternate (min)", min_value=0, value=60, step=5)
+        with c4:
+            reserve_min = st.number_input("Reserve (min)", min_value=0, value=45, step=5)
+            extra_min = st.number_input("Extra (min)", min_value=0, value=0, step=5)
+        taxi_l   = time_to_liters(0, su_min)
+        climb_l  = time_to_liters(0, climb_min)
+        enrt_l   = time_to_liters(enrt_h, enrt_min)
+        desc_l   = time_to_liters(0, desc_min)
+        alt_l    = time_to_liters(0, alt_min)
+        reserve_l= time_to_liters(0, reserve_min)
+        trip_l   = climb_l + enrt_l + desc_l
+        cont_l   = 0.05 * trip_l
+        req_ramp = taxi_l + trip_l + cont_l + alt_l + reserve_l
+        extra_l  = time_to_liters(0, extra_min)
+        total_ramp = req_ramp + extra_l
 
-if simple_policy:
-    trip_min = POLICY_TRIP_MIN
-    block9_min = POLICY_BLOCK9_MIN
-    trip_l   = time_to_liters(0, trip_min)
-    block9_l = time_to_liters(0, block9_min)
-    req_ramp = time_to_liters(0, su_min) + trip_l + block9_l
-    diff_l = fuel_l - req_ramp
-    extra_l = max(0.0, diff_l)
-    extra_min = int(round((extra_l / RATE_LPH) * 60))
-    missing_l = max(0.0, -diff_l)
-    total_ramp = req_ramp + extra_l
-    req_ramp_min = su_min + trip_min + block9_min
-    total_ramp_min = req_ramp_min + extra_min
+        st.markdown(f"- **Trip Fuel**: {trip_l:.1f} L")
+        st.markdown(f"- **Contingency 5%**: {cont_l:.1f} L")
+        st.markdown(f"- **Required Ramp Fuel**: **{req_ramp:.1f} L**")
+        st.markdown(f"- **Extra**: {extra_l:.1f} L")
 
-    climb_min_eff = 0
-    enrt_min_eff = 0
-    desc_min_eff = 0
-    cont_min = 0
-    cont_l = 0.0
-else:
-    climb_min_eff   = climb_min
-    enrt_min_eff    = enrt_h*60 + enrt_min
-    desc_min_eff    = desc_min
-    alt_min_eff     = alt_min
-    reserve_min_eff = reserve_min
-    trip_min = climb_min_eff + enrt_min_eff + desc_min_eff
-    trip_l   = time_to_liters(0, trip_min)
-    cont_l   = 0.05 * trip_l
-    cont_min = int(round(0.05 * trip_min))
-    extra_min = extra_min_user
-    extra_l   = time_to_liters(0, extra_min)
-    req_ramp = time_to_liters(0, su_min) + trip_l + cont_l + time_to_liters(0, alt_min_eff) + time_to_liters(0, reserve_min_eff)
-    total_ramp = req_ramp + extra_l
-    req_ramp_min = su_min + climb_min_eff + enrt_min_eff + desc_min_eff + alt_min_eff + reserve_min_eff
-    total_ramp_min = req_ramp_min + extra_min
-    block9_min = 0
-    missing_l  = 0.0
+    st.markdown(f"- **Total Ramp Fuel**: **{total_ramp:.1f} L**")
+    st.session_state["_fuel"] = {
+        "policy": policy, "trip_l": trip_l, "cont_l": cont_l, "req_ramp": req_ramp,
+        "extra_l": extra_l, "total_ramp": total_ramp,
+        "taxi_l": locals().get("taxi_l", 0.0),
+        "climb_l": locals().get("climb_l", 0.0),
+        "enrt_l": locals().get("enrt_l", 0.0),
+        "desc_l": locals().get("desc_l", 0.0),
+        "alt_l": locals().get("alt_l", 0.0),
+        "reserve_l": locals().get("reserve_l", 0.0),
+    }
 
-st.markdown(f"- **(1) Start-up & taxi**: {su_min} min → {time_to_liters(0, su_min):.1f} L")
-st.markdown(f"- **(5) Trip**: {trip_min} min → {trip_l:.1f} L" + ("  *(policy)*" if simple_policy else ""))
-if simple_policy:
-    st.markdown(f"- **(9)**: {block9_min} min → {time_to_liters(0, block9_min):.1f} L  *(policy)*")
-else:
-    st.markdown(f"- **(6) Contingency 5%**: {cont_l:.1f} L")
-    st.markdown(f"- **(7) Alternate**: {alt_min} min → {time_to_liters(0, alt_min):.1f} L")
-    st.markdown(f"- **(8) Reserve**: {reserve_min} min → {time_to_liters(0, reserve_min):.1f} L")
+# ---- 5) PDF ----
+with tab_pdf:
+    st.markdown("### PDF – M&B and Performance Data Sheet (filled)")
+    reg = st.session_state.get("reg", "CS-XXX")
+    utc_today = dt.datetime.utcnow()
+    date_str = st.text_input("Date (DD/MM/YYYY)", value=utc_today.strftime("%d/%m/%Y"))
 
-st.markdown(f"- **Required ramp fuel**: **{req_ramp:.1f} L**  *(time: {fmt_hm(req_ramp_min)})*")
-st.markdown(f"- **Extra**: {extra_l:.1f} L" + ("  *(auto to match M&B)*" if simple_policy else ""))
-st.markdown(f"- **Total ramp (planned)**: **{total_ramp:.1f} L**  *(time: {fmt_hm(total_ramp_min)})*")
-st.markdown(f"- **Fuel loaded (M&B)**: **{fuel_l:.1f} L**")
-if simple_policy and missing_l > 0.1:
-    st.error(f"Short of policy by {missing_l:.1f} L (Taxi 15min + 1h in (5) + 1h in (9)).")
-st.markdown(f"- **Could still carry**: **{remaining_fuel_l:.1f} L** (limited by **{'Tank' if remaining_by_tank < remaining_by_mtow else 'MTOW'}**).")
+    # Locate template
+    PDF_TEMPLATE = None
+    for p in PDF_TEMPLATE_PATHS:
+        if Path(p).exists():
+            PDF_TEMPLATE = p
+            break
+    if not PDF_TEMPLATE:
+        st.error("PDF template not found. Expected at /mnt/data/... or repo root.")
+        st.stop()
 
-# ===== PDF export (same as your file; field autodiscovery) =====
-st.markdown("### PDF export (Tecnam P2008 – M&B and Performance Data Sheet)")
-PDF_TEMPLATE_PATHS = [
-    "TecnamP2008MBPerformanceSheet_MissionX.pdf",           # repo root
-    "/mnt/data/TecnamP2008MBPerformanceSheet_MissionX.pdf", # uploaded
-]
+    # Field mapping with multiple candidates (we'll fill whichever exist)
+    FIELD_BASE = {
+        "Registration": ["Textbox19", "Reg", "Registration"],
+        "Date": ["Textbox18", "Date"],
+        "TotalWeight": ["Textbox14", "TOTAL_W"],
+        "CG": ["Textbox16", "CG"],
+        "MTOW": ["Textbox17", "MTOW"],
+    }
+    # Per-leg
+    FIELD_LEG = {
+        "ICAO":   ["Airfield_{leg}", "ICAO_{leg}", "Textbox22"],  # generic + example
+        "QFU":    ["QFU_{leg}"],
+        "ELEV":   ["Elev_{leg}", "Elevation_{leg}"],
+        "TEMP":   ["Temp_{leg}"],
+        "QNH":    ["QNH_{leg}"],
+        "PA":     ["PA_{leg}", "Textbox50"],
+        "DA":     ["DA_{leg}", "Textbox49"],
+        "TODA":   ["TODA_{leg}"],
+        "LDA":    ["LDA_{leg}"],
+        "TODR":   ["TODR_{leg}", "Textbox45"],
+        "LDR":    ["LDR_{leg}", "Textbox41"],
+        "TO_PCT": ["TO_Percent_{leg}", "RWY_TO_PCT_{leg}"],   # percentage of TODA used
+        "LD_PCT": ["LD_Percent_{leg}", "RWY_LD_PCT_{leg}"],   # percentage of LDA used
+    }
+    # Fuel (try common names)
+    FIELD_FUEL = {
+        "POLICY": ["Fuel_Policy", "Policy_Fuel"],
+        "TAXI":   ["Taxi_F", "TaxiFuel", "Fuel_Taxi"],
+        "CLIMB":  ["Climb_F", "ClimbFuel", "Fuel_Climb"],
+        "ENR":    ["Enroute_F", "Cruise_F", "Fuel_Enroute"],
+        "DESC":   ["Descent_F", "Fuel_Descent"],
+        "TRIP":   ["Trip_F", "Fuel_Trip"],
+        "CONT":   ["Contingency_F", "Fuel_Contingency"],
+        "ALT":    ["Alternate_F", "Fuel_Alternate"],
+        "RES":    ["Reserve_F", "Fuel_Reserve"],
+        "RAMP":   ["Required_Ramp_F", "Fuel_Ramp", "RequiredRamp_Fuel"],
+        "EXTRA":  ["Extra_F", "Fuel_Extra"],
+        "TOTAL":  ["Total_F", "Total_Fuel", "Fuel_Total"],
+    }
 
-reg_input = st.text_input("Aircraft registration", value="")
-date_str = st.text_input("Date (dd/mm/yyyy)",
-                         dt.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%d/%m/%Y"))
+    def pdfrw_set_field(fields, names, value):
+        if isinstance(names, str): names = [names]
+        for name in names:
+            if not name: continue
+            for f in fields:
+                if f.get('/T') and f['/T'][1:-1] == name:
+                    f.update(PdfDict(V=str(value)))
+                    f.update(PdfDict(AP=None))
+                    return True
+        return False
 
-def read_pdf_bytes(paths) -> bytes:
-    for path_str in paths:
-        p = Path(path_str)
-        if p.exists():
-            return p.read_bytes()
-    raise FileNotFoundError(f"Template not found in any known path: {paths}")
+    perf_rows_local = st.session_state.get("_perf_rows", [])
+    wb  = st.session_state.get("_wb", {})
+    fuel= st.session_state.get("_fuel", {})
 
-def get_field_names(template_bytes: bytes) -> set:
-    names = set()
-    reader = PdfReader(io.BytesIO(template_bytes))
-    try:
-        fd = reader.get_fields()
-        if fd: names.update(fd.keys())
-    except Exception:
-        pass
-    try:
-        for page in reader.pages:
-            if "/Annots" in page:
-                for a in page["/Annots"]:
-                    obj = a.get_object()
-                    if obj.get("/T"): names.add(str(obj["/T"]))
-    except Exception:
-        pass
-    return names
-
-def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
-    if not PYPDF_OK: raise RuntimeError("pypdf not available. Add 'pypdf' to requirements.txt")
-    reader = PdfReader(io.BytesIO(template_bytes))
-    writer = PdfWriter()
-    for page in reader.pages: writer.add_page(page)
-    root = reader.trailer["/Root"]
-    if "/AcroForm" not in root: raise RuntimeError("Template PDF has no AcroForm/fields.")
-    writer._root_object.update({NameObject("/AcroForm"): root["/AcroForm"]})
-    try: writer._root_object["/AcroForm"].update({NameObject("/NeedAppearances"): True})
-    except Exception: pass
-    for page in writer.pages: writer.update_page_form_field_values(page, fields)
-    bio = io.BytesIO(); writer.write(bio); return bio.getvalue()
-
-def put_any(out: dict, fieldset: set, keys, value: str):
-    if isinstance(keys, str): keys = [keys]
-    for k in keys:
-        if k in fieldset: out[k] = value
-
-named_map: Dict[str,str] = {}
-try:
-    template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
-    fieldset = get_field_names(template_bytes)
-
-    # M&B
-    put_any(named_map, fieldset, "EmptyWeight_W", f"{ew:.1f}")
-    put_any(named_map, fieldset, "EmptyWeight_A", f"{(ew_moment/ew if ew>0 else 0.0):.3f}")
-    put_any(named_map, fieldset, "EmptyWeight_M", f"{(ew_moment):.2f}")
-    put_any(named_map, fieldset, "Fuel_W", f"{fuel_wt:.1f}")
-    put_any(named_map, fieldset, "Fuel_M", f"{m_fuel:.2f}")
-    put_any(named_map, fieldset, "Pilot&Passenger_W", f"{pilot:.1f}")
-    put_any(named_map, fieldset, "Pilot&Passenger_M", f"{m_pilot:.2f}")
-    put_any(named_map, fieldset, "Baggage_W", f"{baggage:.1f}")
-    put_any(named_map, fieldset, "Baggage_M", f"{m_bag:.2f}")
-    put_any(named_map, fieldset, "TOTAL_W", f"{total_weight:.2f}")
-    put_any(named_map, fieldset, "TOTAL_M", f"{total_moment:.2f}")
-    put_any(named_map, fieldset, "CG", f"{cg:.3f}")
-    put_any(named_map, fieldset, "Aircraf_Reg", reg_input or "")
-    put_any(named_map, fieldset, "Date", date_str)
-
-    # Performance per leg (Dep/Arr/Alt)
-    roles = {"Departure": "Dep", "Arrival": "Arr", "Alternate": "Alt"}
-    by_role = {r["role"]: r for r in perf_rows} if perf_rows else {}
-    for role, suf in roles.items():
-        r = by_role.get(role)
-        if not r: continue
-        put_any(named_map, fieldset, f"Airfield_{suf}", r["icao"])
-        put_any(named_map, fieldset, f"QFU_{suf}", f"{int(round(r['qfu'])):03d}")
-        if suf == "Dep": put_any(named_map, fieldset, "Elev_Dep", f"{r['elev_ft']:.0f}")
-        elif suf == "Arr": put_any(named_map, fieldset, "Elev_Arr", f"{r['elev_ft']:.0f}")
-        else: put_any(named_map, fieldset, "Elev_Alt", f"{r['elev_ft']:.0f}")
-
-        put_any(named_map, fieldset, f"QNH_{suf}", f"{r['qnh']:.0f}")
-        put_any(named_map, fieldset, f"Temp_{suf}", f"{r['temp']:.0f}")
-        put_any(named_map, fieldset, f"Wind_{suf}", f"{int(r['wind_dir']):03d}/{int(round(r['wind_kt'])):02d}")
-        put_any(named_map, fieldset, f"PA_{suf}", f"{r['pa_ft']:.0f}")
-        put_any(named_map, fieldset, f"DA_{suf}", f"{r['da_ft']:.0f}")
-        put_any(named_map, fieldset, f"TODA_{suf}", f"{r['toda_av']:.0f}")
-
-        # Percentage inside TODR/LDR strings (as in your file)
-        tod_str = f"{r['to_50']:.0f} ({r['tod_pct']:.0f}%)" if r.get('tod_pct') is not None else f"{r['to_50']:.0f}"
-        ldr_str = f"{r['ldg_50']:.0f} ({r['ldg_pct']:.0f}%)" if r.get('ldg_pct') is not None else f"{r['ldg_50']:.0f}"
-
-        put_any(named_map, fieldset, f"TODR_{suf}", tod_str)
-        put_any(named_map, fieldset, f"LDA_{suf}", f"{r['lda_av']:.0f}")
-        put_any(named_map, fieldset, f"LDR_{suf}", ldr_str)
-        put_any(named_map, fieldset, f"ROC_{suf}", f"{r.get('roc', 0):.0f}")
-
-    # Fuel (same mapping & logic as your file)
-    def dash_if(cond, val):
-        return val if not cond else "-"
-
-    put_any(named_map, fieldset, "Taxi_T", fmt_hm(su_min))
-    put_any(named_map, fieldset, "Taxi_F", f"{int(round(RATE_LPH * su_min/60))}")
-    put_any(named_map, fieldset, "Trip_T", fmt_hm(trip_min))
-    put_any(named_map, fieldset, "Trip_F", f"{int(round(RATE_LPH * (trip_min/60)))}")
-
-    put_any(named_map, fieldset, "Climb_T", dash_if(simple_policy, fmt_hm(0)))
-    put_any(named_map, fieldset, "Climb_F", dash_if(simple_policy, "0"))
-    put_any(named_map, fieldset, "Enroute_T", dash_if(simple_policy, fmt_hm(0)))
-    put_any(named_map, fieldset, "Enroute_F", dash_if(simple_policy, "0"))
-    put_any(named_map, fieldset, "Descent_T", dash_if(simple_policy, fmt_hm(0)))
-    put_any(named_map, fieldset, "Descent_F", dash_if(simple_policy, "0"))
-
-    if simple_policy:
-        put_any(named_map, fieldset, "Contingency_T", "-")
-        put_any(named_map, fieldset, "Contingency_F", "-")
-        put_any(named_map, fieldset, "Alternate_T", "-")
-        put_any(named_map, fieldset, "Alternate_F", "-")
-        put_any(named_map, fieldset, "Reserve_T", fmt_hm(60))
-        put_any(named_map, fieldset, "Reserve_F", f"{int(round(time_to_liters(0,60)))}")
-    else:
-        put_any(named_map, fieldset, "Contingency_T", fmt_hm(cont_min))
-        put_any(named_map, fieldset, "Contingency_F", f"{int(round(cont_l))}")
-        put_any(named_map, fieldset, "Alternate_T", fmt_hm(alt_min))
-        put_any(named_map, fieldset, "Alternate_F", f"{int(round(time_to_liters(0, alt_min)))}")
-        put_any(named_map, fieldset, "Reserve_T", fmt_hm(reserve_min))
-        put_any(named_map, fieldset, "Reserve_F", f"{int(round(time_to_liters(0, reserve_min)))}")
-
-    put_any(named_map, fieldset, "Ramp_T", fmt_hm(req_ramp_min))
-    put_any(named_map, fieldset, "Ramp_F", f"{int(round(req_ramp))}")
-    put_any(named_map, fieldset, "Extra_T", fmt_hm(extra_min))
-    put_any(named_map, fieldset, "Extra_F", f"{int(round(extra_l))}")
-    put_any(named_map, fieldset, "Total_T", fmt_hm(total_ramp_min))
-    put_any(named_map, fieldset, "Total_F", f"{int(round(total_ramp))}")
-
-    if st.button("Generate filled PDF", type="primary"):
+    if st.button("Generate filled PDF"):
         try:
-            out_bytes = fill_pdf(template_bytes, named_map)
-            st.download_button("Download PDF", data=out_bytes, file_name="P2008_MB_Perf_AllLegs.pdf", mime="application/pdf")
-            st.success("PDF generated. Review before flight.")
+            reader = Rd_pdfrw(PDF_TEMPLATE)
+            if not (hasattr(reader, 'Root') and '/AcroForm' in reader.Root):
+                raise RuntimeError("PDF has no AcroForm fields for pdfrw.")
+            fields = reader.Root.AcroForm.Fields
+
+            # Base
+            for k, names in FIELD_BASE.items():
+                if k == "Registration": pdfrw_set_field(fields, names, reg)
+                elif k == "Date":       pdfrw_set_field(fields, names, date_str)
+                elif k == "TotalWeight":pdfrw_set_field(fields, names, f"{wb.get('total_weight',0):.1f}")
+                elif k == "CG":         pdfrw_set_field(fields, names, f"{wb.get('cg',0):.3f}")
+                elif k == "MTOW":       pdfrw_set_field(fields, names, f"{AC['max_takeoff_weight']:.0f}")
+
+            # Per-leg: Dep (0), Arr (1), Alt (2)
+            def fill_leg(idx, leg_tag):
+                if idx >= len(perf_rows_local): return
+                r = perf_rows_local[idx]
+                for key, candidates in FIELD_LEG.items():
+                    names = [c.format(leg=leg_tag) if "{leg}" in c else c for c in candidates]
+                    if key == "ICAO":   pdfrw_set_field(fields, names, r['icao'])
+                    elif key == "QFU":  pdfrw_set_field(fields, names, f"{r['qfu']:.0f}")
+                    elif key == "ELEV": pdfrw_set_field(fields, names, f"{r['elev_ft']:.0f}")
+                    elif key == "TEMP": pdfrw_set_field(fields, names, f"{r['temp']:.1f}")
+                    elif key == "QNH":  pdfrw_set_field(fields, names, f"{r['qnh']:.1f}")
+                    elif key == "PA":   pdfrw_set_field(fields, names, f"{r['pa_ft']:.0f}")
+                    elif key == "DA":   pdfrw_set_field(fields, names, f"{r['da_ft']:.0f}")
+                    elif key == "TODA": pdfrw_set_field(fields, names, f"{r['toda_av']:.0f}")
+                    elif key == "LDA":  pdfrw_set_field(fields, names, f"{r['lda_av']:.0f}")
+                    elif key == "TODR": pdfrw_set_field(fields, names, f"{r['to_50']:.0f}")
+                    elif key == "LDR":  pdfrw_set_field(fields, names, f"{r['ldg_50']:.0f}")
+                    elif key == "TO_PCT": pdfrw_set_field(fields, names, f"{r['pct_todr']:.0f}%")
+                    elif key == "LD_PCT": pdfrw_set_field(fields, names, f"{r['pct_ldr']:.0f}%")
+
+            if perf_rows_local:
+                fill_leg(0, "Dep")
+            if len(perf_rows_local) > 1:
+                fill_leg(1, "Arr")
+            if len(perf_rows_local) > 2:
+                fill_leg(2, "Alt")
+
+            # Fuel block
+            if fuel.get("policy","").startswith("Simplified"):
+                pdfrw_set_field(fields, FIELD_FUEL["POLICY"], "Simplified 90 L")
+                pdfrw_set_field(fields, FIELD_FUEL["TOTAL"], f"{fuel.get('total_ramp',0):.1f}")
+                # optional: also set Ramp equal to Total
+                pdfrw_set_field(fields, FIELD_FUEL["RAMP"], f"{fuel.get('total_ramp',0):.1f}")
+            else:
+                pdfrw_set_field(fields, FIELD_FUEL["POLICY"], "Detailed")
+                pdfrw_set_field(fields, FIELD_FUEL["TAXI"],  f"{fuel.get('taxi_l',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["CLIMB"], f"{fuel.get('climb_l',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["ENR"],   f"{fuel.get('enrt_l',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["DESC"],  f"{fuel.get('desc_l',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["TRIP"],  f"{fuel.get('trip_l',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["CONT"],  f"{fuel.get('cont_l',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["ALT"],   f"{fuel.get('alt_l',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["RES"],   f"{fuel.get('reserve_l',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["RAMP"],  f"{fuel.get('req_ramp',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["EXTRA"], f"{fuel.get('extra_l',0):.1f}")
+                pdfrw_set_field(fields, FIELD_FUEL["TOTAL"], f"{fuel.get('total_ramp',0):.1f}")
+
+            # Write output (no extra pages)
+            out_main_path = f"MB_Performance_{reg}.pdf"
+            writer = Wr_pdfrw()
+            writer.write(out_main_path, reader)
+
+            # Quick “NeedAppearances” pass to make sure fields render
+            base_r = Rd_pypdf(out_main_path)
+            merger = Wr_pypdf()
+            for p in base_r.pages: merger.add_page(p)
+            if "/AcroForm" in base_r.trailer["/Root"]:
+                merger._root_object.update({"/AcroForm": base_r.trailer["/Root"]["/AcroForm"]})
+                merger._root_object["/AcroForm"].update({"/NeedAppearances": True})
+            with open(out_main_path, "wb") as f: merger.write(f)
+
+            st.success("PDF generated & filled!")
+            with open(out_main_path, "rb") as f:
+                st.download_button("Download PDF", f, file_name=out_main_path, mime="application/pdf")
+
         except Exception as e:
-            st.error(f"Could not generate PDF: {e}")
-except Exception as e:
-    st.error(f"Cannot prepare PDF mapping: {e}")
+            st.error(f"PDF fill error: {e}")
 
