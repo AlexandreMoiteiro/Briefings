@@ -1,5 +1,5 @@
 
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v7.0
+        # Streamlit app – Tecnam P2008 (M&B + Performance) – v7.1 (Windy fetch fix)
 # Requisitos:
 #   streamlit
 #   requests
@@ -11,16 +11,15 @@
 #   GITHUB_GIST_TOKEN
 #   GITHUB_GIST_ID
 #
-# Notas:
-# - Sidebar começa COLLAPSED.
-# - Um único seletor de hora (UTC) para o Windy, comum a todos os aeródromos; o fetch preenche os campos MET automaticamente.
-# - Persistência da fleet via GitHub Gist (auto-load no arranque se secrets presentes).
-# - PDF: usa o TEMPLATE NOVO e nomes de campos exatos; TODR/LDR incluem percentagem; vento ddd/ff; QFU 3 dígitos.
-# - QNH arredondado às unidades em UI e PDF. Litros no PDF com sufixo " L".
+# Notas chave:
+# - Um único seletor de hora (UTC) para o Windy na 1ª aba; o fetch aplica a TODOS os aeródromos.
+# - QNH arredondado às unidades (UI e PDF). Campos de combustível no PDF levam sufixo " L".
 # - Headwind chip: <20 verde, 20–29 amarelo, ≥30 vermelho.
 # - Peso do aluno default 50 kg.
 # - Número da missão pedido na 1ª aba e usado no nome do PDF.
-# - Removido "CS-ECB" do seed.
+# - Persistência de EW/Moment via Gist (auto-load se secrets presentes).
+# - Removido CS-ECB do seed.
+# - PDF: pypdf apenas (sem pdfrw); usa o template NOVO e nomes exatos; TODR/LDR mostram percentagem.
 
 import streamlit as st
 import datetime as dt
@@ -303,8 +302,8 @@ def windy_point_forecast(lat, lon, model, params, api_key):
     body = {
         "lat": round(float(lat), 3),
         "lon": round(float(lon), 3),
-        "model": model,
-        "parameters": params,
+        "model": model,                   # e.g., "iconEu", "gfs", "arome"
+        "parameters": params,             # ["wind","temp","pressure","windGust"]
         "levels": ["surface"],
         "key": api_key,
     }
@@ -431,6 +430,8 @@ if "windy_target_utc" not in st.session_state:
     st.session_state.windy_target_utc = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)
 if "mission_no" not in st.session_state:
     st.session_state.mission_no = ""
+if "WINDY_MODEL" not in st.session_state:
+    st.session_state.WINDY_MODEL = "iconEu"
 
 # -----------------------------
 # Sidebar – Settings & Fleet
@@ -439,7 +440,7 @@ with st.sidebar:
     st.subheader("⚙️ Settings")
     windy_models = {"ICON-EU (default)": "iconEu", "GFS": "gfs", "AROME": "arome"}
     model_label = st.selectbox("Windy model", list(windy_models.keys()), index=0)
-    WINDY_MODEL = windy_models[model_label]
+    st.session_state.WINDY_MODEL = windy_models[model_label]  # <- guardar no estado para o fetch
 
     st.markdown("---")
     st.subheader("🛩️ Fleet (EW & Moment)")
@@ -504,7 +505,7 @@ with tab_setup:
         selected_reg = st.selectbox("Registration", regs, key="selected_reg")
         st.session_state["reg"] = selected_reg
 
-        # Mission number and Date here (as pedido)
+        # Mission number and Date here (pedido)
         st.session_state.mission_no = st.text_input("Mission number", value=st.session_state.mission_no)
         lisbon_now = dt.datetime.now(pytz.timezone("Europe/Lisbon"))
         date_str_first = st.date_input("Flight date (Europe/Lisbon)", value=lisbon_now.date())
@@ -569,10 +570,12 @@ with tab_aero:
                 for idx, leg in enumerate(st.session_state.legs):
                     icao = leg["icao"]
                     ad = AERODROMES_DB[icao]
-                    resp = windy_point_forecast(ad["lat"], ad["lon"], windy_models := {"ICON-EU (default)":"iconEu","GFS":"gfs","AROME":"arome"}, params := ["wind","temp","pressure","windGust"], api_key=api_key)
-                    # acima not used; use selected model
-                    resp = windy_point_forecast(ad["lat"], ad["lon"], st.session_state.get("WINDY_MODEL", "iconEu") if "WINDY_MODEL" in st.session_state else "iconEu",
-                                                ["wind","temp","pressure","windGust"], api_key)
+                    resp = windy_point_forecast(
+                        ad["lat"], ad["lon"],
+                        st.session_state.WINDY_MODEL,
+                        ["wind","temp","pressure","windGust"],
+                        api_key
+                    )
                     if "error" in resp:
                         st.error(f"{icao}: Windy error: {resp.get('error')} {resp.get('detail','')}")
                         continue
@@ -581,21 +584,28 @@ with tab_aero:
                     st.session_state.hours[idx] = hours
                     if hours:
                         target = st.session_state.windy_target_utc
-                        nearest = min(hours, key=lambda h: abs(h[1]-target))
-                        st.session_state.hour_idx[idx] = nearest[0]
-                        met = windy_unpack_at(resp, nearest[0])
+                        # escolher hora mais próxima do alvo
+                        nearest_idx, nearest_dt = min(hours, key=lambda h: abs(h[1]-target))
+                        st.session_state.hour_idx[idx] = nearest_idx
+                        met = windy_unpack_at(resp, nearest_idx)
                         if met:
-                            # aplicar diretamente nos estados
+                            # atualizar também os KEYS dos widgets, não apenas o dicionário MET
                             st.session_state.met[idx].update({
                                 "temp": met["temp"] if met["temp"] is not None else st.session_state.met[idx]["temp"],
                                 "qnh": met["qnh"] if met["qnh"] is not None else st.session_state.met[idx]["qnh"],
                                 "wind_dir": met["wind_dir"] if met["wind_dir"] is not None else st.session_state.met[idx]["wind_dir"],
                                 "wind_kt": met["wind_kt"] if met["wind_kt"] is not None else st.session_state.met[idx]["wind_kt"],
                             })
+                            st.session_state[f"temp_{idx}"] = float(st.session_state.met[idx]["temp"])
+                            st.session_state[f"qnh_{idx}"]  = float(round(st.session_state.met[idx]["qnh"]))
+                            st.session_state[f"wdir_{idx}"] = float(st.session_state.met[idx]["wind_dir"])
+                            st.session_state[f"wspd_{idx}"] = float(st.session_state.met[idx]["wind_kt"])
                         else:
                             st.warning(f"{icao}: No usable data at selected hour.")
+                    else:
+                        st.warning(f"{icao}: No hours returned by Windy.")
                 st.success("Windy data applied to all legs.")
-                st.rerun()
+                st.rerun()  # <- necessário para os widgets refletirem os novos valores
 
     perf_rows = []
     for i, leg in enumerate(st.session_state.legs):
@@ -611,17 +621,16 @@ with tab_aero:
             ad = AERODROMES_DB[icao]
             st.write(f"**{ad['name']}**  \nLat {ad['lat']:.5f}, Lon {ad['lon']:.5f}  \nElev {ad['elev_ft']:.0f} ft")
 
-            # MET preenchidos via fetch
+            # MET (preenchidos pelo fetch; agora os number_inputs usam as keys sincronizadas)
             temp_c = st.number_input("OAT (°C)", value=float(st.session_state.met[i]["temp"]), step=0.1, key=f"temp_{i}")
-            qnh_val = round(float(st.session_state.met[i]["qnh"]))
-            qnh = st.number_input("QNH (hPa)", min_value=900.0, max_value=1050.0, value=float(qnh_val), step=1.0, key=f"qnh_{i}")
+            qnh = st.number_input("QNH (hPa)", min_value=900.0, max_value=1050.0, value=float(round(st.session_state.met[i]["qnh"])), step=1.0, key=f"qnh_{i}")
             wind_dir = st.number_input("Wind FROM (°)", min_value=0.0, max_value=360.0, value=float(st.session_state.met[i]["wind_dir"]), step=1.0, key=f"wdir_{i}")
             wind_kt  = st.number_input("Wind speed (kt)", min_value=0.0, value=float(st.session_state.met[i]["wind_kt"]), step=1.0, key=f"wspd_{i}")
 
             paved = st.checkbox("Paved runway", value=True, key=f"paved_{i}")
             slope_pc = st.number_input("Runway slope (%) (uphill positive)", value=0.0, step=0.1, key=f"slope_{i}")
 
-            # TODA/LDA por defeito do DB (editáveis)
+            # TODA/LDA por defeito (editáveis)
             toda_av = st.number_input("TODA available (m)", min_value=0.0, value=float(ad['runways'][0]['toda']), step=1.0, key=f"toda_{i}")
             lda_av = st.number_input("LDA available (m)", min_value=0.0, value=float(ad['runways'][0]['lda']), step=1.0, key=f"lda_{i}")
 
@@ -634,8 +643,6 @@ with tab_aero:
                     st.caption(f"Windy hour applied: **{label}**")
 
         total_weight_for_perf = st.session_state.get("_wb", {}).get("total_weight", 0.0) or 0.0
-        # escolher RWY com mais headwind (dentro das do aeródromo)
-        # (usar QFU da 1ª runway como seed para TODA/LDA, mas mostramos valores do best)
         best, _ = choose_best_runway(ad, float(temp_c), float(qnh), float(wind_dir), float(wind_kt), total_weight_for_perf)
         feas = "✅" if best["feasible"] else "⚠️"
         xw_chip_cls, _xw_cls = xw_class(best["xw_abs"])
@@ -872,7 +879,6 @@ with tab_pdf:
     date_str = st.session_state.get("date_str", dt.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%d/%m/%Y"))
     st.caption(f"Date: **{date_str}** (definido na 1ª aba)")
 
-    # Nomes EXATOS do novo PDF
     roles = {"Departure": "Dep", "Arrival": "Arr", "Alternate": "Alt"}
 
     def read_pdf_bytes(paths) -> bytes:
@@ -934,7 +940,7 @@ with tab_pdf:
         fuel= st.session_state.get("_fuel", {})
         perf_rows = st.session_state.get("_perf_rows", [])
 
-        # Base / M&B fields (names per new sheet)
+        # Base / M&B
         put_any(named_map, fieldset, "Aircraf_Reg", reg or "")
         put_any(named_map, fieldset, "Date", date_str)
 
@@ -946,7 +952,8 @@ with tab_pdf:
         put_any(named_map, fieldset, "EmptyWeight_W", f"{ew:.1f}")
         put_any(named_map, fieldset, "EmptyWeight_A", f"{(ewm/ew if ew>0 else 0.0):.3f}")
         put_any(named_map, fieldset, "EmptyWeight_M", f"{ewm:.2f}")
-        put_any(named_map, fieldset, "Fuel_W", f"{fuel_w:.1f}")
+        put_any(named_map, fieldset, "Fuel_W", f"{f
+uel_w:.1f}")
         put_any(named_map, fieldset, "Fuel_M", f"{(fuel_w*AC['fuel_arm']):.2f}")
         put_any(named_map, fieldset, "Pilot&Passenger_W", f"{wb.get('pilot',0.0):.1f}")
         put_any(named_map, fieldset, "Pilot&Passenger_M", f"{(wb.get('pilot',0.0)*AC['pilot_arm']):.2f}")
@@ -956,7 +963,7 @@ with tab_pdf:
         put_any(named_map, fieldset, "TOTAL_M", f"{wb.get('total_moment',0.0):.2f}")
         put_any(named_map, fieldset, "CG", f"{wb.get('cg',0.0):.3f}")
 
-        # Per-leg (Dep/Arr/Alt)
+        # Per-leg
         by_role = {r["role"]: r for r in perf_rows} if perf_rows else {}
         for role, suf in roles.items():
             r = by_role.get(role)
@@ -1040,7 +1047,3 @@ with tab_pdf:
     except Exception as e:
         st.error(f"Cannot prepare PDF mapping: {e}")
 
-# store selected Windy model in session for fetch
-st.session_state["WINDY_MODEL"] = windy_models.get(model_label, "iconEu")
-
-        
