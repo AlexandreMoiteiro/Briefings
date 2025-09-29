@@ -34,8 +34,8 @@ def render_page(page: fitz.Page, dpi: int, bg=(255, 255, 255)) -> Image.Image:
     # 72 dpi -> zoom 1.0
     zoom = dpi / 72.0
     mat = fitz.Matrix(zoom, zoom)
-    # forçar cores RGB e anotações/form fields
-    pix = page.get_pixmap(matrix=mat, alpha=True)
+    # renderizando com aparências de formulários / anotações ativadas
+    pix = page.get_pixmap(matrix=mat, alpha=False, annots=True, colorspace=fitz.csRGB)
     return _pixmap_to_pil(pix, bg=bg)
 
 
@@ -72,7 +72,47 @@ def merge_h(img_left: Image.Image, img_right: Image.Image, match="height", gap_p
     return canvas
 
 
+def preprocess_pdf(bytes_in: bytes) -> bytes:
+    """Garante que campos de formulário tenham 'appearance streams' antes de rasterizar.
+    Atualiza widgets e flattens, devolvendo bytes do PDF já preparado."""
+    with fitz.open(stream=bytes_in, filetype="pdf") as d:
+        changed = False
+        for page in d:
+            # Atualiza aparências de widgets/form fields (AcroForm)
+            try:
+                ws = page.widgets()
+                if ws:
+                    for w in ws:
+                        w.update()
+                        changed = True
+            except Exception:
+                pass
+        if changed:
+            out = d.tobytes(deflate=True, garbage=3)
+            return out
+        return bytes_in
+
+
 def convert_pdf(file_bytes: bytes, dpi: int, fmt: str, gap_px: int, match: str, bg=(255,255,255), sharpen: bool=False):
+    file_bytes = preprocess_pdf(file_bytes)
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+        if doc.page_count < 2:
+            raise ValueError("Este PDF tem menos de 2 páginas.")
+        p1, p2 = doc.load_page(0), doc.load_page(1)
+        img1 = render_page(p1, dpi, bg)
+        img2 = render_page(p2, dpi, bg)
+        merged = merge_h(img1, img2, match=match, gap_px=gap_px, bg=bg)
+        if sharpen:
+            merged = merged.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=3))
+        bio = io.BytesIO()
+        if fmt == "PNG":
+            merged.save(bio, format="PNG", optimize=True)
+            mime, ext = "image/png", "png"
+        else:
+            merged.save(bio, format="JPEG", quality=97, subsampling=0, optimize=True)
+            mime, ext = "image/jpeg", "jpg"
+        bio.seek(0)
+        return bio.read(), mime, ext, merged.size
     with fitz.open(stream=file_bytes, filetype="pdf") as doc:
         if doc.page_count < 2:
             raise ValueError("Este PDF tem menos de 2 páginas.")
@@ -123,4 +163,5 @@ else:
     st.info("Escolha um ou mais PDFs acima.")
 
 st.caption("Dica: para texto perfeito escolha PNG e DPI 450–600. Se as páginas tiverem tamanhos diferentes, experimente mudar o alinhamento para 'width'.")
+
 
