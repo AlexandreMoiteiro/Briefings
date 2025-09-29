@@ -14,8 +14,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.markdown("# PDF de 2 páginas → imagem lado a lado")
-st.caption("Carregue PDFs de 2 páginas e obtenha uma imagem com as páginas lado a lado. Sem ZIP, downloads individuais.")
+st.markdown("""
+<div style='display:flex;align-items:center;gap:.6rem'>
+  <span style='font-size:1.3rem;font-weight:800'>PDF 2 páginas → imagem lado a lado</span>
+  <span style='padding:.15rem .6rem;border-radius:999px;background:#eef2f7;font-size:.85rem'>v1.5</span>
+</div>
+""", unsafe_allow_html=True)
+
+st.caption("Converta PDFs de 2 páginas. Pré‑visualização compacta; download mantém resolução total.")
 
 # -----------------------------
 # Core helpers (foco em nitidez)
@@ -136,6 +142,22 @@ def convert_pdf(file_bytes: bytes, dpi: int, fmt: str, gap_px: int, match: str, 
 # Sidebar – poucas opções
 # -----------------------------
 with st.sidebar:
+    st.subheader("Opções")
+    dpi = st.slider("DPI (resolução do ficheiro)", 150, 900, 450, 50)
+    fmt = st.radio("Formato do ficheiro", ["PNG", "JPG"], index=0)
+    gap_px = st.number_input("Espaço entre páginas (px)", 0, 100, 0, 1)
+    match = st.radio("Alinhar por", ["height", "width"], index=0)
+    bg_choice = st.selectbox("Fundo", ["Branco", "Cinza claro", "Preto"], index=0)
+    BG = {"Branco": (255,255,255), "Cinza claro": (246,248,251), "Preto": (0,0,0)}[bg_choice]
+    sharpen = st.checkbox("Aumentar nitidez (Unsharp Mask)", True)
+
+    st.markdown("---")
+    st.subheader("Pré‑visualização")
+    preview_max_px = st.slider("Largura máxima da preview (px)", 600, 2200, 1100, 100,
+                               help="Não afeta o ficheiro gerado; só a imagem mostrada no site.")
+    show_1to1 = st.toggle("Mostrar 1:1 (sem redimensionar)", value=False)  # ignora preview_max_px quando ligado
+# -----------------------------
+with st.sidebar:
     dpi = st.slider("DPI", 150, 900, 450, 50)
     fmt = st.radio("Formato", ["PNG", "JPG"], index=0, help="PNG mantém texto mais nítido (sem perdas)")
     gap_px = st.number_input("Espaço entre páginas (px)", 0, 100, 0, 1)
@@ -149,19 +171,39 @@ with st.sidebar:
 # -----------------------------
 files = st.file_uploader("PDFs (2 páginas)", type=["pdf"], accept_multiple_files=True)
 
+CARD_CSS = """
+<style>
+.card{border:1px solid #e5e7eb;border-radius:16px;padding:14px;margin:14px auto;max-width:1200px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.title{display:flex;justify-content:space-between;gap:.6rem;align-items:center}
+.meta{font-size:.9rem;color:#6b7280}
+.preview img{border-radius:12px;border:1px solid #eef2f7}
+</style>
+"""
+st.markdown(CARD_CSS, unsafe_allow_html=True)
+
 if files:
     for f in files:
         try:
             out_bytes, mime, ext, size = convert_pdf(f.read(), dpi=dpi, fmt=fmt, gap_px=gap_px, match=match, bg=BG, sharpen=sharpen)
             name = f.name.rsplit(".", 1)[0] + f"_merged.{ext}"
-            st.image(out_bytes, caption=f"{name} — {size[0]}×{size[1]} px", use_container_width=True)
-            st.download_button("Download", data=out_bytes, file_name=name, mime=mime)
-            st.divider()
+            w, h = size
+            st.markdown(f"<div class='card'><div class='title'><b>{name}</b><span class='meta'>{w}×{h}px • {dpi} dpi • {fmt}</span></div>", unsafe_allow_html=True)
+            # preview reduzida (sem perder qualidade no download)
+            if show_1to1:
+                st.image(out_bytes, use_container_width=True)
+            else:
+                from PIL import Image
+                bio = io.BytesIO(out_bytes)
+                im = Image.open(bio)
+                im = im.copy()
+                im.thumbnail((preview_max_px, int(preview_max_px*1e6)), Image.LANCZOS)
+                prev_io = io.BytesIO(); im.save(prev_io, format="PNG")
+                st.image(prev_io.getvalue(), use_container_width=False)
+            st.download_button("⬇️ Download", data=out_bytes, file_name=name, mime=mime)
+            st.markdown("</div>", unsafe_allow_html=True)
         except Exception as e:
             st.error(f"{f.name}: {e}")
 else:
     st.info("Escolha um ou mais PDFs acima.")
 
-st.caption("Dica: para texto perfeito escolha PNG e DPI 450–600. Se as páginas tiverem tamanhos diferentes, experimente mudar o alinhamento para 'width'.")
-
-
+st.caption("Dica: a preview é compacta; para máxima definição use PNG + DPI 600. ")"Dica: para texto perfeito escolha PNG e DPI 450–600. Se as páginas tiverem tamanhos diferentes, experimente mudar o alinhamento para 'width'.")
