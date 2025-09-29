@@ -18,7 +18,7 @@ APP_NOTAMS_URL  = "https://briefings.streamlit.app/NOTAMs"
 APP_VFRMAP_URL  = "https://briefings.streamlit.app/VFRMap"
 APP_MNB_URL     = "https://briefings.streamlit.app/MassBalance"
 APP_NAV_LOG     = "https://briefings.streamlit.app/NavLog"
-
+APP_JPG         = "https://briefings.streamlit.app/JPG"
 # ---------- Página & estilos ----------
 st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown("""
@@ -330,6 +330,7 @@ st.markdown(
       <a href="{APP_VFRMAP_URL}" target="_blank">VFR Map</a>
       <a href="{APP_MNB_URL}" target="_blank">Mass & Balance</a>
       <a href="{APP_NAV_LOG}" target="_blank">NavLog </a>
+      <a href="{APP_JPG}" target="_blank">JPG </a>
     </span></div>''', unsafe_allow_html=True
 )
 
