@@ -1,9 +1,6 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v7.2
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v7.3
 # Requisitos:
-#   streamlit
-#   requests
-#   pypdf>=4.2.0
-#   pytz
+#   streamlit, requests, pypdf>=4.2.0, pytz
 #
 # Segredos:
 #   WINDY_API_KEY
@@ -145,7 +142,7 @@ AERODROMES_DB = {
     },
 }
 
-# Performance tables (AFM)
+# AFM tables
 TAKEOFF = {
     0:     {"GR":{-25:144, 0:182, 25:224, 50:272, "ISA":207}, "50ft":{-25:304,0:379,25:463,50:557,"ISA":428}},
     1000:  {"GR":{-25:157, 0:198, 25:245, 50:297, "ISA":222}, "50ft":{-25:330,0:412,25:503,50:605,"ISA":458}},
@@ -291,7 +288,7 @@ def windy_point_forecast(lat, lon, model, params, api_key):
     body = {
         "lat": round(float(lat), 3),
         "lon": round(float(lon), 3),
-        "model": model,                   # e.g., "iconEu", "gfs", "arome"
+        "model": model,                   # "iconEu", "gfs", "arome"
         "parameters": params,             # ["wind","temp","pressure","windGust"]
         "levels": ["surface"],
         "key": api_key,
@@ -320,8 +317,9 @@ def windy_unpack_at(resp, idx):
         return arr[idx] if arr and idx < len(arr) else None
     u = getv("wind_u-surface"); v = getv("wind_v-surface"); gust = getv("gust-surface")
     if u is None or v is None: return None
+    # >>> CORREÇÃO: direção "FROM" (meteorológica)
     speed_ms = sqrt(u*u + v*v)
-    dir_deg = (degrees(atan2(-u, -v)) + 360.0) % 360.0
+    dir_deg = (degrees(atan2(u, v)) + 180.0) % 360.0
     speed_kt = speed_ms * 1.94384
     temp_val = getv("temp-surface")
     temp_c = None
@@ -388,8 +386,6 @@ if "fleet" not in st.session_state:
     }
 if "fleet_loaded" not in st.session_state:
     st.session_state.fleet_loaded = False
-
-# auto-load gist on first run if secrets present
 if not st.session_state.fleet_loaded:
     token = st.secrets.get("GITHUB_GIST_TOKEN", "")
     gist_id = st.secrets.get("GITHUB_GIST_ID", "")
@@ -421,6 +417,11 @@ if "mission_no" not in st.session_state:
     st.session_state.mission_no = ""
 if "WINDY_MODEL" not in st.session_state:
     st.session_state.WINDY_MODEL = "iconEu"
+# >>> manter a data de voo em sessão (usada para o Windy)
+if "flight_date" not in st.session_state:
+    st.session_state.flight_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).date()
+if "date_str" not in st.session_state:
+    st.session_state.date_str = st.session_state.flight_date.strftime("%d/%m/%Y")
 
 # -----------------------------
 # Sidebar – Settings & Fleet
@@ -494,11 +495,12 @@ with tab_setup:
         selected_reg = st.selectbox("Registration", regs, key="selected_reg")
         st.session_state["reg"] = selected_reg
 
-        # Mission number and Date aqui
         st.session_state.mission_no = st.text_input("Mission number", value=st.session_state.mission_no)
+
         lisbon_now = dt.datetime.now(pytz.timezone("Europe/Lisbon"))
-        date_str_first = st.date_input("Flight date (Europe/Lisbon)", value=lisbon_now.date())
-        st.session_state["date_str"] = date_str_first.strftime("%d/%m/%Y")
+        flight_date = st.date_input("Flight date (Europe/Lisbon)", value=st.session_state.flight_date)
+        st.session_state.flight_date = flight_date
+        st.session_state["date_str"] = flight_date.strftime("%d/%m/%Y")
 
     with c2:
         st.markdown("### Info")
@@ -541,7 +543,7 @@ def choose_best_runway(ad, temp_c, qnh, wind_dir, wind_kt, total_weight):
 with tab_aero:
     st.markdown("### Aerodromes (Departure, Arrival, Alternate) + MET (hourly)")
 
-    # Seletor da hora do Windy aqui (aplica a todos)
+    # Seletor da hora do Windy aqui (aplica a todos) — COM DATA da 1ª aba
     col_h1, col_h2 = st.columns([0.55, 0.45])
     with col_h1:
         st.caption("A hora selecionada (UTC) aplica-se aos 3 aeródromos.")
@@ -551,8 +553,9 @@ with tab_aero:
             value=st.session_state.windy_target_utc.time().replace(second=0, microsecond=0),
             step=3600
         )
+        # >>> CORREÇÃO: usar a data escolhida na 1ª aba
         st.session_state.windy_target_utc = dt.datetime.combine(
-            dt.datetime.utcnow().date(), windy_target
+            st.session_state.flight_date, windy_target
         ).replace(tzinfo=dt.timezone.utc)
 
     c_fetch1, c_fetch2 = st.columns([0.6, 0.4])
@@ -1037,3 +1040,4 @@ with tab_pdf:
 
     except Exception as e:
         st.error(f"Cannot prepare PDF mapping: {e}")
+
