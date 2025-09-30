@@ -309,18 +309,25 @@ def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,fl
             if target is not None:
                 page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
 
-def add_back_to_index_hotspots(doc: fitz.Document):
-    """Invisible top-right hotspot to jump back to the cover."""
+def add_back_to_index_badge(doc: fitz.Document):
+    """Light gray tiny arrow chip in the top-right corner of every page (except the cover)."""
     for pno in range(1, doc.page_count):
         page = doc.load_page(pno)
         pw, ph = page.rect.width, page.rect.height
-        margin_mm = 8.0
-        w_mm, h_mm = 24.0, 10.0
+        margin_mm = 7.0
+        w_mm, h_mm = 12.0, 10.0  # small chip
         left = pw - mm_to_pt(margin_mm + w_mm)
         top  = mm_to_pt(margin_mm)
         rect = fitz.Rect(left, top, left + mm_to_pt(w_mm), top + mm_to_pt(h_mm))
+        # draw light gray chip
+        try:
+            page.draw_rect(rect, fill=(0.95,0.96,0.98), color=(0.88,0.9,0.93), width=0.5)
+        except Exception:
+            pass  # older PyMuPDF – skip decoration, keep link & glyph
+        # arrow glyph (light gray)
+        page.insert_textbox(rect, "↩", fontsize=10, fontname="helv", align=1, color=(0.40,0.44,0.50))
+        # clickable link back to cover
         page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
-        # No visible text/shape — purely a hotspot.
 
 # ---------- PDF generation ----------
 if gen_pdf:
@@ -408,8 +415,8 @@ if gen_pdf:
     }
     add_cover_links(main_doc, cover_rects_mm, targets, IPMA_URL)
 
-    # Add invisible “back to index” hotspot to every page except cover
-    add_back_to_index_hotspots(main_doc)
+    # Add tiny arrow chip to every page except cover
+    add_back_to_index_badge(main_doc)
 
     # Export
     final_bytes = main_doc.tobytes()
