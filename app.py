@@ -1,7 +1,8 @@
+
 # app.py — Briefings (no AI) — A4 Landscape
 # Order: Cover → Charts → Flight Plan → Routes → NOTAMs → Mass & Balance
 from typing import Dict, Any, List, Tuple, Optional
-import io, os, tempfile, math
+import io, os, tempfile
 import streamlit as st
 from PIL import Image
 from fpdf import FPDF
@@ -117,6 +118,7 @@ class BriefPDF(FPDF):
     def draw_header_band(self, text: str):
         self.set_draw_color(229,231,235)
         self.set_line_width(0.3)
+               # Title band
         self.set_font("Helvetica", "B", 18)
         self.cell(0, 12, text, ln=True, align="C", border="B")
 
@@ -141,7 +143,6 @@ class BriefPDF(FPDF):
 
         # Title / info
         self.set_xy(0, 20)
-               # Title / info
         self.set_font("Helvetica","B",32)
         self.cell(0, 16, "Briefing", ln=True, align="C")
 
@@ -240,7 +241,7 @@ with tab_charts:
                 except Exception: st.write(name)
             with col_meta:
                 kind = st.selectbox(f"Chart type #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"], key=f"kind_{idx}")
-                title = default_title_for_kind(kind)  # auto-title from type
+                title = default_title_for_kind(kind)  # auto from type
                 st.text(f"Title: {title}")
                 subtitle = st.text_input("Subtitle (optional)", value="", key=f"subtitle_{idx}")
                 order_val = st.number_input("Order", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
@@ -309,66 +310,44 @@ def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,fl
             if target is not None:
                 page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
 
-def draw_turnback_arrow_chip(page: fitz.Page):
-    """Draw a tiny light-gray chip with a vector U-turn arrow (⮌ style), top-right, linking to cover."""
-    pw, ph = page.rect.width, page.rect.height
-    margin_mm = 7.0
-    w_mm, h_mm = 12.0, 10.0
-    left = pw - mm_to_pt(margin_mm + w_mm)
-    top  = mm_to_pt(margin_mm)
-    rect = fitz.Rect(left, top, left + mm_to_pt(w_mm), top + mm_to_pt(h_mm))
-
-    # chip background + border (soft)
-    try:
-        page.draw_rect(rect, fill=(0.95,0.96,0.98), color=(0.88,0.90,0.93), width=0.5)
-    except Exception:
-        pass
-
-    # Draw an arc-ish polyline plus arrow head (no Shape API for max compatibility)
-    cx = rect.x0 + rect.width * 0.55
-    cy = rect.y0 + rect.height * 0.55
-    r  = min(rect.width, rect.height) * 0.38
-    start, end = 0.0, 3.0*math.pi/4.0  # 0 to 135 degrees
-
-    pts: List[Tuple[float,float]] = []
-    steps = 10
-    for i in range(steps+1):
-        t = start + (end - start) * (i / steps)
-        x = cx + r * math.cos(t)
-        y = cy - r * math.sin(t)  # PDF Y grows downwards
-        pts.append((x, y))
-
-    # arc stroke
-    page.draw_polyline(pts, color=(0.40,0.44,0.50), width=1.2)
-
-    # arrow head
-    x2, y2 = pts[-1]
-    x1, y1 = pts[-2]
-    vx, vy = (x2 - x1), (y2 - y1)
-    vlen = math.hypot(vx, vy) or 1.0
-    ux, uy = vx / vlen, vy / vlen
-    head_len = r * 0.9
-    ang = math.radians(145)
-    def rot(u_x, u_y, a):
-        return (u_x*math.cos(a) - u_y*math.sin(a), u_x*math.sin(a) + u_y*math.cos(a))
-    rx1, ry1 = rot(ux, uy, +ang)
-    rx2, ry2 = rot(ux, uy, -ang)
-
-    tip = (x2, y2)
-    wing1 = (x2 - head_len*rx1, y2 - head_len*ry1)
-    wing2 = (x2 - head_len*rx2, y2 - head_len*ry2)
-
-    page.draw_line(tip, wing1, color=(0.40,0.44,0.50), width=1.2)
-    page.draw_line(tip, wing2, color=(0.40,0.44,0.50), width=1.2)
-
-    # clickable link back to cover
-    page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
-
-def add_back_to_index_badges(doc: fitz.Document):
-    """Add the chip to every page except the cover."""
+def add_back_to_index_badge(doc: fitz.Document):
+    """Tiny light-gray '⮌-style' back arrow chip on every page (except the cover)."""
     for pno in range(1, doc.page_count):
         page = doc.load_page(pno)
-        draw_turnback_arrow_chip(page)
+        pw, ph = page.rect.width, page.rect.height
+        margin_mm = 7.0
+        w_mm, h_mm = 12.0, 10.0  # small chip
+        left = pw - mm_to_pt(margin_mm + w_mm)
+        top  = mm_to_pt(margin_mm)
+        rect = fitz.Rect(left, top, left + mm_to_pt(w_mm), top + mm_to_pt(h_mm))
+        # chip
+        try:
+            page.draw_rect(rect, fill=(0.96,0.97,0.99), color=(0.86,0.89,0.93), width=0.6)
+        except Exception:
+            pass  # older PyMuPDF – decoration optional
+
+        # draw a vector back arrow with a small upward hook (⮌-like), no glyphs
+        pad = mm_to_pt(2.0)
+        col = (0.40, 0.44, 0.50)
+        width = 1.2
+
+        # shaft (right → left)
+        y_mid = rect.y0 + rect.height * 0.55
+        x_right = rect.x1 - pad
+        x_head  = rect.x0 + pad + mm_to_pt(4.0)
+        page.draw_line(fitz.Point(x_right, y_mid), fitz.Point(x_head, y_mid), color=col, width=width)
+
+        # arrowhead
+        head = mm_to_pt(3.0)
+        page.draw_line(fitz.Point(x_head, y_mid), fitz.Point(x_head + head, y_mid - head), color=col, width=width)
+        page.draw_line(fitz.Point(x_head, y_mid), fitz.Point(x_head + head, y_mid + head), color=col, width=width)
+
+        # small upward hook at the right end
+        hook_h = mm_to_pt(3.0)
+        page.draw_line(fitz.Point(x_right, y_mid), fitz.Point(x_right, y_mid - hook_h), color=col, width=width*0.9)
+
+        # clickable link back to cover
+        page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
 
 # ---------- PDF generation ----------
 if gen_pdf:
@@ -456,8 +435,8 @@ if gen_pdf:
     }
     add_cover_links(main_doc, cover_rects_mm, targets, IPMA_URL)
 
-    # Add tiny ⮌-style vector chip to every page except cover
-    add_back_to_index_badges(main_doc)
+    # Add tiny ⮌-style back chip to every page except cover
+    add_back_to_index_badge(main_doc)
 
     # Export
     final_bytes = main_doc.tobytes()
@@ -466,4 +445,3 @@ if gen_pdf:
     final_name = f"Briefing - Mission {safe_str(locals().get('mission_no') or 'X')}.pdf"
     st.download_button("Download PDF", data=final_bytes, file_name=final_name,
                        mime="application/pdf", use_container_width=True)
-
