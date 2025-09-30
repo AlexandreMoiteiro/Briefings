@@ -94,21 +94,13 @@ def mm_to_pt(mm: float) -> float:
 # ---------- Charts helpers ----------
 _KIND_RANK = {"SIGWX": 1, "SPC": 2, "Wind & Temp": 3, "Other": 9}
 
-def guess_chart_kind_from_name(name: str) -> str:
-    n = (name or "").upper()
-    if "SIGWX" in n or "SIG WEATHER" in n: return "SIGWX"
-    if "SPC" in n or "SURFACE" in n or "PRESSURE" in n: return "SPC"
-    if "WIND" in n or "TEMP" in n or "ALOFT" in n or "FD" in n: return "Wind & Temp"
-    return "Other"
-
 def default_title_for_kind(kind: str) -> str:
-    # Exactly match the selected type
     return {
-        "SIGWX": "SIGWX",
-        "SPC": "SPC",
-        "Wind & Temp": "Wind & Temp",
-        "Other": "Chart",
-    }.get(kind, "Chart")
+        "SIGWX": "Significant Weather (SIGWX)",
+        "SPC": "Surface Pressure Chart",
+        "Wind & Temp": "Winds & Temperatures Aloft",
+        "Other": "Weather Chart",
+    }.get(kind, "Weather Chart")
 
 def chart_sort_key(c: Dict[str, Any]) -> Tuple[int, int]:
     rank = _KIND_RANK.get(c.get("kind","Other"), 9)
@@ -246,15 +238,13 @@ with tab_charts:
                 try: st.image(img_png.getvalue(), caption=name, width=preview_w)
                 except Exception: st.write(name)
             with col_meta:
-                kind_guess = guess_chart_kind_from_name(name)
-                kind = st.selectbox(f"Chart type #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"],
-                                    index=["SIGWX","SPC","Wind & Temp","Other"].index(kind_guess),
-                                    key=f"kind_{idx}")
-                # Title is automatic by type
-                st.caption(f"Title will be: **{default_title_for_kind(kind)}**")
+                kind = st.selectbox(f"Chart type #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"], key=f"kind_{idx}")
+                # Auto-title strictly from selected type
+                title = default_title_for_kind(kind)
+                st.text(f"Title: {title}")
                 subtitle = st.text_input("Subtitle (optional)", value="", key=f"subtitle_{idx}")
                 order_val = st.number_input("Order", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
-            charts.append({"kind": kind, "subtitle": subtitle, "img_png": img_png, "order": order_val, "filename": name})
+            charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png, "order": order_val, "filename": name})
 
 # Flight Plan & M&B
 with tab_fpmb:
@@ -319,26 +309,18 @@ def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,fl
             if target is not None:
                 page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
 
-def add_back_to_index_buttons(doc: fitz.Document, label: str = "Index"):
-    """Adds a subtle rounded chip at bottom-left of every page (except the cover) linking back to page 0."""
+def add_back_to_index_hotspots(doc: fitz.Document):
+    """Invisible top-right hotspot to jump back to the cover."""
     for pno in range(1, doc.page_count):
         page = doc.load_page(pno)
         pw, ph = page.rect.width, page.rect.height
         margin_mm = 8.0
-        btn_w_mm, btn_h_mm = 22.0, 8.0
-        left = mm_to_pt(margin_mm)
-        bottom = ph - mm_to_pt(margin_mm)
-        rect = fitz.Rect(left, bottom - mm_to_pt(btn_h_mm), left + mm_to_pt(btn_w_mm), bottom)
-
-        # rounded chip (light background + subtle border)
-        try:
-            page.draw_rect(rect, fill=(0.96,0.97,0.98), color=(0.70,0.72,0.75), width=0.8, round=mm_to_pt(2.5))
-        except TypeError:
-            # older PyMuPDF without 'round' support
-            page.draw_rect(rect, fill=(0.96,0.97,0.98), color=(0.70,0.72,0.75), width=0.8)
-
-        page.insert_textbox(rect, label, fontsize=9, fontname="helv", align=1, color=(0,0,0))
+        w_mm, h_mm = 24.0, 10.0
+        left = pw - mm_to_pt(margin_mm + w_mm)
+        top  = mm_to_pt(margin_mm)
+        rect = fitz.Rect(left, top, left + mm_to_pt(w_mm), top + mm_to_pt(h_mm))
         page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
+        # No visible text/shape — purely a hotspot.
 
 # ---------- PDF generation ----------
 if gen_pdf:
@@ -363,8 +345,7 @@ if gen_pdf:
             pdf.add_page(orientation="L")
             if charts_first_page0 is None:
                 charts_first_page0 = pdf.page_no() - 1  # 0-based
-            header_title = default_title_for_kind(c["kind"])
-            pdf.draw_header_band(header_title)
+            pdf.draw_header_band(c["title"] or "Chart")
             if c.get("subtitle"):
                 pdf.set_font("Helvetica","I",12); pdf.cell(0,9,c["subtitle"], ln=True, align="C")
             pdf.add_fullbleed_image(c["img_png"])
@@ -385,7 +366,7 @@ if gen_pdf:
         current_page_count += fp_doc.page_count
         fp_doc.close()
 
-    # Routes (append each Navlog and VFR in given order)
+    # Routes (append each Navlog and VFR)
     routes_start_page = None
     pairs_local: List[Dict[str, Any]] = locals().get("pairs", [])
     for p in (pairs_local or []):
@@ -427,8 +408,8 @@ if gen_pdf:
     }
     add_cover_links(main_doc, cover_rects_mm, targets, IPMA_URL)
 
-    # Add a clean "Index" chip on every page (except the cover)
-    add_back_to_index_buttons(main_doc, label="Index")
+    # Add invisible “back to index” hotspot to every page except cover
+    add_back_to_index_hotspots(main_doc)
 
     # Export
     final_bytes = main_doc.tobytes()
