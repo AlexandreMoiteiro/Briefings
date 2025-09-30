@@ -1,6 +1,7 @@
-# app.py — Briefings (sem IA) — PDF Landscape com capa + Charts + Flight Plan + Rotas + NOTAMs + M&B
+# app.py — Briefings (sem IA) — A4 Landscape
+# Ordem: Capa → Charts → Flight Plan → Rotas → NOTAMs → Mass & Balance
 from typing import Dict, Any, List, Tuple
-import io, os, re, tempfile
+import io, os, tempfile
 import streamlit as st
 from PIL import Image
 from fpdf import FPDF
@@ -11,7 +12,7 @@ st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown("""
 <style>
 :root { --muted:#6b7280; --line:#e5e7eb; --ink:#0f172a; --bg:#ffffff; }
-.app-top { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; margin: .25rem 0 .5rem }
+.app-top { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; margin:.25rem 0 .5rem }
 .app-title { font-size: 2.2rem; font-weight: 800; margin: 0 }
 .btnbar a{display:inline-block;padding:6px 10px;border:1px solid var(--line);
   border-radius:8px;text-decoration:none;font-weight:600;color:#111827;background:#f8fafc}
@@ -125,13 +126,8 @@ class BriefPDF(FPDF):
         self.set_font("Helvetica", "B", 18)
         self.cell(0, 12, text, ln=True, align="C", border="B")
 
-    def page_landscape(self):
-        if self.cur_orientation != "L":
-            self.add_page(orientation="L")
-        else:
-            self.add_page()
-
     def add_fullbleed_image(self, img_png: io.BytesIO):
+        # adiciona a imagem na página atual (já em landscape) com margens superiores p/ cabeçalho
         max_w = self.w - 22; max_h = self.h - 58
         img = Image.open(img_png); iw, ih = img.size
         r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
@@ -143,11 +139,11 @@ class BriefPDF(FPDF):
 
     def section_cover(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc,
                       links: Dict[str, int], ext_ipma_url: str):
-        self.page_landscape()
-        # Pré-atribuir temporariamente destinos aos links internos (evita erro do FPDF)
+        self.add_page(orientation="L")
+        # Pré-atribuir temporariamente destinos aos links (atualizados nas secções)
         for k, lid in (links or {}).items():
             try:
-                self.set_link(lid, y=0, page=self.page_no())  # temporário, será atualizado nas secções
+                self.set_link(lid, y=0, page=self.page_no())
             except Exception:
                 pass
 
@@ -163,13 +159,13 @@ class BriefPDF(FPDF):
             self.cell(0, 9, f"Date: {date_str}    UTC: {time_utc}", ln=True, align="C")
         self.ln(6)
 
-        # Índice simples
+        # Índice
         left = 30
         lh = 9
         self.set_font("Helvetica","B",14); self.cell(0,10,"Índice", ln=True, align="C")
         self.set_font("Helvetica","",12)
 
-        # 1. Externo (IPMA)
+        # 1. IPMA (externo)
         self.set_text_color(20,40,120)
         self.set_xy(left, self.get_y()); self.cell(0, lh, "METARs, TAFs, SIGMET & GAMET (IPMA)", link=ext_ipma_url, ln=True)
         self.set_text_color(0,0,0)
@@ -188,15 +184,21 @@ class BriefPDF(FPDF):
         item("NOTAMs", "notams")
         item("Mass & Balance", "mass_balance")
 
-    def section_anchor(self, title: str, link_id: int):
-        self.page_landscape()
+    def section_anchor(self, title: str, link_id: int) -> int:
+        self.add_page(orientation="L")
         self.draw_header_band(title)
         # Atualiza destino real do link interno para esta página
         self.set_link(link_id, y=self.get_y(), page=self.page_no())
+        return self.page_no()
+
+    def route_header(self, route_label: str) -> int:
+        self.add_page(orientation="L")
+        self.draw_header_band(f"Rota — {route_label}")
+        return self.page_no()
 
 # ---------- UI: Abas ----------
-tab_mission, tab_charts, tab_pairs, tab_notams, tab_fpmb, tab_generate = st.tabs(
-    ["Missão", "Charts", "Rotas", "NOTAMs", "Flight Plan & M&B", "Gerar PDF"]
+tab_mission, tab_charts, tab_fpmb, tab_pairs, tab_notams, tab_generate = st.tabs(
+    ["Missão", "Charts", "Flight Plan & M&B", "Rotas", "NOTAMs", "Gerar PDF"]
 )
 
 # Missão
@@ -242,6 +244,17 @@ with tab_charts:
                 order_val = st.number_input("Ordem", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
             charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png, "order": order_val, "filename": name})
 
+# Flight Plan & M&B
+with tab_fpmb:
+    st.markdown("### Flight Plan & M&B")
+    c1, c2 = st.columns(2)
+    with c1:
+        fp_upload = st.file_uploader("Flight Plan (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
+        if fp_upload: st.success(f"Flight Plan carregado: {safe_str(fp_upload.name)}")
+    with c2:
+        mb_upload = st.file_uploader("Mass & Balance (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
+        if mb_upload: st.success(f"M&B carregado: {safe_str(mb_upload.name)}")
+
 # Rotas
 with tab_pairs:
     st.markdown("### Rotas")
@@ -264,42 +277,36 @@ with tab_notams:
     st.caption("Carrega o PDF oficial de NOTAMs (ou imagem). Será inserido no PDF final na secção NOTAMs.")
     notams_upload = st.file_uploader("NOTAMs (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
 
-# Flight Plan & M&B
-with tab_fpmb:
-    st.markdown("### Flight Plan & M&B")
-    c1, c2 = st.columns(2)
-    with c1:
-        fp_upload = st.file_uploader("Flight Plan (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
-        if fp_upload: st.success(f"Flight Plan carregado: {safe_str(fp_upload.name)}")
-    with c2:
-        mb_upload = st.file_uploader("Mass & Balance (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
-        if mb_upload: st.success(f"M&B carregado: {safe_str(mb_upload.name)}")
-
 # Gerar
 with tab_generate:
     gen_pdf = st.button("Generate PDF")
 
-# ---------- Inserir externos no PDF (com PyMuPDF) ----------
-def merge_external_after(main: fitz.Document, insert_pos: int, upload, orientation_for_images="L") -> int:
-    if upload is None:
-        return insert_pos
+# ---------- Inserções com PyMuPDF ----------
+def open_upload_as_pdf(upload, orientation_for_images="L") -> fitz.Document:
     raw = read_upload_bytes(upload)
     mime = (getattr(upload, "type", "") or "").lower()
     if mime == "application/pdf":
-        ext = fitz.open(stream=raw, filetype="pdf")
-    else:
-        ext_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation=orientation_for_images)
-        ext = fitz.open(stream=ext_bytes, filetype="pdf")
-    main.insert_pdf(ext, start_at=insert_pos)
-    insert_pos += ext.page_count
-    ext.close()
-    return insert_pos
+        return fitz.open(stream=raw, filetype="pdf")
+    # imagem -> pdf
+    ext_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation=orientation_for_images)
+    return fitz.open(stream=ext_bytes, filetype="pdf")
 
-# ---------- Geração do PDF na ordem pedida ----------
+def insert_uploads_after_page(doc: fitz.Document, page_no_1based: int, uploads: List):
+    """Insere cada upload APÓS a página page_no_1based, preservando a ordem fornecida."""
+    if not uploads: return
+    start_at = page_no_1based  # PyMuPDF é 0-based; after page P (1-based) => start_at = P
+    for up in uploads:
+        if up is None: continue
+        ext = open_upload_as_pdf(up, orientation_for_images="L")
+        doc.insert_pdf(ext, start_at=start_at)
+        start_at += ext.page_count
+        ext.close()
+
+# ---------- Geração do PDF (ordem pedida) ----------
 if gen_pdf:
     pdf = BriefPDF(orientation="L", unit="mm", format="A4")
 
-    # Links internos
+    # Links internos (um único FPDF para tudo!)
     links = {
         "charts": pdf.add_link(),
         "flight_plan": pdf.add_link(),
@@ -308,7 +315,7 @@ if gen_pdf:
         "mass_balance": pdf.add_link(),
     }
 
-    # CAPA
+    # CAPA (com índice e link IPMA)
     pdf.section_cover(
         mission_no=safe_str(locals().get("mission_no","")),
         pilot=safe_str(locals().get("pilot","")),
@@ -321,68 +328,52 @@ if gen_pdf:
         ext_ipma_url=IPMA_URL
     )
 
-    # CHARTS
-    pdf.section_anchor("Charts", links["charts"])
+    # CHARTS (âncora + páginas dos charts)
+    charts_anchor_page = pdf.section_anchor("Charts", links["charts"])
     charts_local: List[Dict[str,Any]] = locals().get("charts", [])
     if charts_local:
         for c in sorted(charts_local, key=chart_sort_key):
-            title, subtitle, img_png = c["title"], c["subtitle"], c["img_png"]
-            pdf.page_landscape()
-            pdf.draw_header_band(title or "Chart")
-            if subtitle:
-                pdf.set_font("Helvetica","I",12); pdf.cell(0,9,subtitle, ln=True, align="C")
-            pdf.add_fullbleed_image(img_png)
+            pdf.add_page(orientation="L")
+            pdf.draw_header_band(c["title"] or "Chart")
+            if c.get("subtitle"):
+                pdf.set_font("Helvetica","I",12); pdf.cell(0,9,c["subtitle"], ln=True, align="C")
+            pdf.add_fullbleed_image(c["img_png"])
     else:
         pdf.set_font("Helvetica","I",12); pdf.ln(6); pdf.cell(0,8,"(Sem charts carregados)", ln=True, align="C")
 
-    # Exportar parte FPDF para começarmos a mesclar anexos
-    base_bytes = fpdf_to_bytes(pdf)
-    main_doc = fitz.open(stream=base_bytes, filetype="pdf")
-    insert_pos = main_doc.page_count
+    # FLIGHT PLAN (âncora; ficheiro será inserido depois)
+    fp_anchor_page = pdf.section_anchor("Flight Plan", links["flight_plan"])
 
-    # FLIGHT PLAN (secção + ficheiro)
-    sec_fp = BriefPDF(orientation="L", unit="mm", format="A4")
-    sec_fp.section_anchor("Flight Plan", links["flight_plan"])
-    sec_fp_bytes = fpdf_to_bytes(sec_fp)
-    sec_fp_doc = fitz.open(stream=sec_fp_bytes, filetype="pdf")
-    main_doc.insert_pdf(sec_fp_doc, start_at=insert_pos); insert_pos += sec_fp_doc.page_count; sec_fp_doc.close()
-    insert_pos = merge_external_after(main_doc, insert_pos, locals().get("fp_upload"))
-
-    # ROTAS (secção + pares)
-    sec_routes = BriefPDF(orientation="L", unit="mm", format="A4")
-    sec_routes.section_anchor("Rotas", links["routes"])
-    sec_routes_bytes = fpdf_to_bytes(sec_routes)
-    sec_routes_doc = fitz.open(stream=sec_routes_bytes, filetype="pdf")
-    main_doc.insert_pdf(sec_routes_doc, start_at=insert_pos); insert_pos += sec_routes_doc.page_count; sec_routes_doc.close()
-
+    # ROTAS (âncora + cabeçalhos por rota; ficheiros inseridos depois)
+    routes_anchor_page = pdf.section_anchor("Rotas", links["routes"])
+    routes_pages: List[Tuple[int, Any, Any]] = []  # [(page_no, nav_upload, vfr_upload)]
     nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
     for p in (nav_pairs or []):
-        route = p.get("route") or "ROTA"
-        # mini separador por rota
-        sr = BriefPDF(orientation="L", unit="mm", format="A4")
-        sr.page_landscape(); sr.draw_header_band(f"Rota — {route}")
-        sr.set_font("Helvetica","",12); sr.ln(4); sr.cell(0,8,"Navlog e Mapa VFR nas páginas seguintes.", ln=True, align="C")
-        sr_bytes = fpdf_to_bytes(sr)
-        sr_doc = fitz.open(stream=sr_bytes, filetype="pdf")
-        main_doc.insert_pdf(sr_doc, start_at=insert_pos); insert_pos += sr_doc.page_count; sr_doc.close()
-        insert_pos = merge_external_after(main_doc, insert_pos, p.get("nav"))
-        insert_pos = merge_external_after(main_doc, insert_pos, p.get("vfr"), orientation_for_images="L")
+        route_label = (p.get("route") or "ROTA").strip().upper() or "ROTA"
+        page_no = pdf.route_header(route_label)
+        routes_pages.append((page_no, p.get("nav"), p.get("vfr")))
 
-    # NOTAMs (secção + ficheiro)
-    sec_notams = BriefPDF(orientation="L", unit="mm", format="A4")
-    sec_notams.section_anchor("NOTAMs", links["notams"])
-    sec_notams_bytes = fpdf_to_bytes(sec_notams)
-    sec_notams_doc = fitz.open(stream=sec_notams_bytes, filetype="pdf")
-    main_doc.insert_pdf(sec_notams_doc, start_at=insert_pos); insert_pos += sec_notams_doc.page_count; sec_notams_doc.close()
-    insert_pos = merge_external_after(main_doc, insert_pos, locals().get("notams_upload"))
+    # NOTAMs (âncora)
+    notams_anchor_page = pdf.section_anchor("NOTAMs", links["notams"])
 
-    # M&B (secção + ficheiro)
-    sec_mb = BriefPDF(orientation="L", unit="mm", format="A4")
-    sec_mb.section_anchor("Mass & Balance", links["mass_balance"])
-    sec_mb_bytes = fpdf_to_bytes(sec_mb)
-    sec_mb_doc = fitz.open(stream=sec_mb_bytes, filetype="pdf")
-    main_doc.insert_pdf(sec_mb_doc, start_at=insert_pos); insert_pos += sec_mb_doc.page_count; sec_mb_doc.close()
-    insert_pos = merge_external_after(main_doc, insert_pos, locals().get("mb_upload"))
+    # M&B (âncora)
+    mb_anchor_page = pdf.section_anchor("Mass & Balance", links["mass_balance"])
+
+    # Exportar esqueleto (com links corretos) e inserir anexos após as páginas-âncora
+    skeleton_bytes = fpdf_to_bytes(pdf)
+    main_doc = fitz.open(stream=skeleton_bytes, filetype="pdf")
+
+    # Inserir em ordem inversa de secções (para não deslocar índices anteriores)
+    # 1) M&B
+    insert_uploads_after_page(main_doc, mb_anchor_page, [locals().get("mb_upload")])
+    # 2) NOTAMs
+    insert_uploads_after_page(main_doc, notams_anchor_page, [locals().get("notams_upload")])
+    # 3) Rotas (da última para a primeira)
+    for page_no, nav_up, vfr_up in reversed(routes_pages):
+        insert_uploads_after_page(main_doc, page_no, [nav_up, vfr_up])
+    # 4) Flight Plan
+    insert_uploads_after_page(main_doc, fp_anchor_page, [locals().get("fp_upload")])
+    # (Charts já estão no FPDF)
 
     # Exportar
     final_bytes = main_doc.tobytes()
@@ -391,4 +382,5 @@ if gen_pdf:
     final_name = f"Briefing - Missao {safe_str(locals().get('mission_no') or 'X')}.pdf"
     st.download_button("Download PDF", data=final_bytes, file_name=final_name,
                        mime="application/pdf", use_container_width=True)
+
 
