@@ -11,26 +11,26 @@ import fitz  # PyMuPDF
 st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown("""
 <style>
-:root { --muted:#6b7280; --line:#e5e7eb; --ink:#0f172a; --bg:#ffffff; --chip:#f8fafc; --accent:#5a7fb3; }
-.app-top { display:flex; align-items:center; justify-content:space-between; gap:.75rem; flex-wrap:wrap; margin:.25rem 0 .75rem }
+:root { --muted:#6b7280; --line:#e5e7eb; --ink:#0f172a; --bg:#ffffff; --tile:#f3f4f6; --accent:#5a7fb3; }
+.app-top { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; margin:.25rem 0 .6rem }
 .app-title { font-size: 2.2rem; font-weight: 800; margin: 0 }
-.btnbar a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:8px;text-decoration:none;
-  font-weight:600;color:#111827;background:var(--chip)}
+.btnbar a{display:inline-block;padding:6px 10px;border:1px solid var(--line);
+  border-radius:8px;text-decoration:none;font-weight:600;color:#111827;background:#f8fafc}
 .btnbar a:hover{background:#f1f5f9}
+.section-card{ border:1px solid var(--line); border-radius:14px; padding:14px 16px; background:var(--bg); }
 hr{border:none;border-top:1px solid var(--line); margin:12px 0}
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
 [data-testid="stSidebarCollapseButton"] { display:none !important; }
 header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
-.cardhint{color:var(--muted);font-size:.92rem;margin-top:.2rem}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Links topo (apps externas) ----------
-IPMA_URL       = "https://brief-ng.ipma.pt/#showLogin"
-APP_VFRMAP_URL = "https://briefings.streamlit.app/VFRMap"
-APP_MNB_URL    = "https://briefings.streamlit.app/MassBalance"
-APP_NAV_LOG    = "https://briefings.streamlit.app/NavLog"
-APP_JPG        = "https://briefings.streamlit.app/JPG"
+# ---------- Links topo ----------
+IPMA_URL = "https://brief-ng.ipma.pt/#showLogin"
+APP_VFRMAP_URL  = "https://briefings.streamlit.app/VFRMap"
+APP_MNB_URL     = "https://briefings.streamlit.app/MassBalance"
+APP_NAV_LOG     = "https://briefings.streamlit.app/NavLog"
+APP_JPG         = "https://briefings.streamlit.app/JPG"
 
 st.markdown(
     f'''<div class="app-top">
@@ -57,7 +57,7 @@ def read_upload_bytes(upload) -> bytes:
     except Exception: return b""
 
 def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
-    """Aceita PDF/PNG/JPG/JPEG/GIF e devolve PNG (para PDF usa 1.ª pág.)."""
+    """Aceita PDF/PNG/JPG/JPEG/GIF e devolve bytes PNG (primeira página no caso de PDF)."""
     try:
         m = (mime or "").lower()
         if m == "application/pdf":
@@ -130,7 +130,7 @@ class BriefPDF(FPDF):
         self.cell(0, 12, text, ln=True, align="C", border="B")
 
     def add_fullbleed_image(self, img_png: io.BytesIO):
-        # imagem na página atual com margens p/ cabeçalho
+        # adiciona a imagem na página atual (já em landscape) com margens superiores p/ cabeçalho
         max_w = self.w - 22; max_h = self.h - 58
         img = Image.open(img_png); iw, ih = img.size
         r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
@@ -140,13 +140,16 @@ class BriefPDF(FPDF):
         self.image(path, x=x, y=y, w=w, h=h); os.remove(path)
         self.ln(h + 10)
 
-    def cover_with_cards(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc) -> List[Dict[str, Any]]:
+    def cover_with_tiles(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc,
+                         ipma_url: str) -> Dict[str, Tuple[float,float,float,float]]:
         """
-        Devolve lista de cartões: [{"key":..., "rect_mm":(x,y,w,h)}] para linkar depois com PyMuPDF.
-        Layout: 2 col x 3 linhas, cartões com fundo suave.
+        Desenha a CAPA com tiles clicáveis visualmente (clicáveis serão adicionados depois via PyMuPDF).
+        Devolve um dict com rectângulos (em mm) dos tiles: keys = ipma, charts, flight_plan, routes, notams, mass_balance
         """
         self.add_page(orientation="L")
-        self.set_xy(0, 20)
+
+        # Título / info
+        self.set_xy(0, 22)
         self.set_font("Helvetica","B",30)
         self.cell(0, 16, "Briefing", ln=True, align="C")
 
@@ -158,55 +161,57 @@ class BriefPDF(FPDF):
             self.cell(0, 9, f"Date: {date_str}    UTC: {time_utc}", ln=True, align="C")
         self.ln(8)
 
-        # Cartões do índice (mais sugestivos)
-        margin_x, margin_y = 18, 65   # posição de topo aproximada
-        col_gap, row_gap = 8, 8
-        cols = 2
-        usable_w = self.w - 2*margin_x
-        box_w = (usable_w - col_gap*(cols-1)) / cols
-        box_h = 24
+        # Título "Índice"
+        self.set_font("Helvetica","B",16)
+        self.cell(0, 10, "Índice", ln=True, align="C")
+        self.ln(2)
+
+        # Grid 3x2 de tiles
+        x0, y0 = 20.0, 88.0
+        tile_w, tile_h = 84.0, 32.0
+        gap_x, gap_y = 12.0, 12.0
+
+        # Colunas
+        xs = [x0, x0 + tile_w + gap_x, x0 + 2*(tile_w + gap_x)]
+        ys = [y0, y0 + tile_h + gap_y]
 
         labels = [
-            ("ipma",         "METARs, TAFs, SIGMET & GAMET (IPMA)"),
-            ("charts",       "Charts"),
-            ("flight_plan",  "Flight Plan"),
-            ("routes",       "Rotas"),
-            ("notams",       "NOTAMs"),
+            ("ipma", "METARs, TAFs, SIGMET & GAMET"),
+            ("charts", "Charts"),
+            ("flight_plan", "Flight Plan"),
+            ("routes", "Rotas"),
+            ("notams", "NOTAMs"),
             ("mass_balance", "Mass & Balance"),
         ]
 
-        boxes = []
-        self.set_font("Helvetica","B",13)
-        for i, (key, label) in enumerate(labels):
-            r, c = divmod(i, cols)
-            x = margin_x + c*(box_w + col_gap)
-            y = margin_y + r*(box_h + row_gap)
+        rects_mm: Dict[str, Tuple[float,float,float,float]] = {}
+        self.set_draw_color(200,205,210)
+        self.set_fill_color(243,244,246)
+        self.set_text_color(15, 23, 42)
 
-            # cartão
-            self.set_draw_color(210, 214, 219)
-            self.set_fill_color(241, 245, 249)  # cinza-claro
-            self.rect(x, y, box_w, box_h, style="DF")
-
+        for idx, (key, label) in enumerate(labels):
+            col = idx % 3
+            row = idx // 3
+            x, y = xs[col], ys[row]
+            # tile base
+            self.rect(x, y, tile_w, tile_h, style="DF")
+            # faixa colorida à esquerda
+            self.set_fill_color(*PASTEL); self.rect(x, y, 3.5, tile_h, style="F")
+            self.set_fill_color(243,244,246)
             # texto
-            self.set_text_color(15, 23, 42)
-            self.set_xy(x+6, y+7)  # padding
-            self.cell(box_w-12, 8, label, ln=False, align="L")
+            self.set_xy(x, y+ (tile_h/2 - 5))
+            self.set_font("Helvetica","B",14)
+            self.cell(tile_w, 10, label, ln=False, align="C")
+            rects_mm[key] = (x, y, tile_w, tile_h)
 
-            # setinha decorativa (→)
-            self.set_text_color(PASTEL[0], PASTEL[1], PASTEL[2])
-            self.set_xy(x+box_w-12, y+7)
-            self.cell(8, 8, "→", ln=False, align="R")
-            self.set_text_color(0,0,0)
-
-            boxes.append({"key": key, "rect_mm": (x, y, box_w, box_h)})
-
-        self.ln(6)
+        # nota pequena
+        self.set_text_color(90,90,90)
         self.set_font("Helvetica","I",10)
-        self.set_text_color(100,100,100)
-        self.cell(0,6,"Toque / clique num cartão para abrir a secção.", ln=True, align="C")
+        self.set_xy(20, ys[1] + tile_h + 6)
+        self.cell(0, 6, "Clique num tile para ir diretamente à secção. O primeiro abre o IPMA.", ln=True)
         self.set_text_color(0,0,0)
 
-        return boxes
+        return rects_mm
 
 # ---------- UI: Abas ----------
 tab_mission, tab_charts, tab_fpmb, tab_pairs, tab_notams, tab_generate = st.tabs(
@@ -214,17 +219,16 @@ tab_mission, tab_charts, tab_fpmb, tab_pairs, tab_notams, tab_generate = st.tabs
 )
 
 # Missão
-REG_LIST = ["CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW","CS-ECC","CS-ECD"]
-
 with tab_mission:
     st.markdown("### Dados da Missão")
     colA, colB, colC = st.columns(3)
     with colA:
         pilot = st.text_input("Pilot name", "Alexandre Moiteiro")
-        callsign = st.text_input("Mission callsign", "RVP")  # padrão = RVP
+        callsign = st.text_input("Mission callsign", "RVP")
     with colB:
         aircraft_type = st.text_input("Aircraft type", "Tecnam P2008")
-        registration = st.selectbox("Registration", REG_LIST, index=0)
+        regs = ["CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW","CS-ECC","CS-ECD"]
+        registration = st.selectbox("Registration", regs, index=0)
     with colC:
         mission_no = st.text_input("Mission number", "")
         flight_date = st.date_input("Flight date")
@@ -292,10 +296,10 @@ with tab_notams:
     notams_upload = st.file_uploader("NOTAMs (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
 
 # Gerar
-with st.tabs(["Gerar"])[0]:
+with tab_generate:
     gen_pdf = st.button("Generate PDF")
 
-# ---------- Helpers PyMuPDF ----------
+# ---------- Inserções com PyMuPDF ----------
 def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Document]:
     if upload is None: return None
     raw = read_upload_bytes(upload)
@@ -307,12 +311,27 @@ def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Docu
     ext_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation=orientation_for_images)
     return fitz.open(stream=ext_bytes, filetype="pdf")
 
-# ---------- Geração do PDF (ordem pedida, sem páginas vazias) ----------
+def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,float,float]], targets: Dict[str, Optional[int]], ipma_url: str):
+    """Adiciona anotações de link na capa (página 0) com base nos rectângulos em mm e páginas alvo (0-based)."""
+    if doc.page_count == 0: return
+    page0 = doc.load_page(0)
+    # criar links
+    for key, rect_mm in rects_mm.items():
+        x, y, w, h = rect_mm
+        rect = fitz.Rect(mm_to_pt(x), mm_to_pt(y), mm_to_pt(x+w), mm_to_pt(y+h))
+        if key == "ipma":
+            page0.insert_link({"kind": fitz.LINK_URI, "from": rect, "uri": ipma_url})
+        else:
+            target = targets.get(key)
+            if target is not None:
+                page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
+
+# ---------- Geração do PDF (ordem pedida) ----------
 if gen_pdf:
     pdf = BriefPDF(orientation="L", unit="mm", format="A4")
 
-    # 1) CAPA com cartões (sem links ainda — serão adicionados via PyMuPDF)
-    index_cards = pdf.cover_with_cards(
+    # CAPA (tiles bonitos) — guardamos rectângulos dos tiles
+    cover_rects_mm = pdf.cover_with_tiles(
         mission_no=safe_str(locals().get("mission_no","")),
         pilot=safe_str(locals().get("pilot","")),
         aircraft=safe_str(locals().get("aircraft_type","")),
@@ -320,16 +339,20 @@ if gen_pdf:
         reg=safe_str(locals().get("registration","")),
         date_str=safe_str(locals().get("flight_date","")),
         time_utc=safe_str(locals().get("time_utc","")),
+        ipma_url=IPMA_URL
     )
 
-    # 2) CHARTS (páginas renderizadas aqui no FPDF)
+    # CHARTS
     charts_local: List[Dict[str,Any]] = locals().get("charts", [])
-    charts_start_page = None
+    charts_first_page0: Optional[int] = None
     if charts_local:
         for i, c in enumerate(sorted(charts_local, key=chart_sort_key)):
             pdf.add_page(orientation="L")
-            if charts_start_page is None:
-                charts_start_page = pdf.page_no()-1  # 0-based para PyMuPDF
+            # regista página do 1.º chart (0-based só depois de exportar)
+            if charts_first_page0 is None:
+                # em FPDF é 1-based; guardamos 1-based por agora
+                charts_first_page1 = pdf.page_no()
+                charts_first_page0 = charts_first_page1 - 1
             pdf.draw_header_band(c["title"] or "Chart")
             if c.get("subtitle"):
                 pdf.set_font("Helvetica","I",12); pdf.cell(0,9,c["subtitle"], ln=True, align="C")
@@ -337,106 +360,74 @@ if gen_pdf:
 
     # Exportar esqueleto (capa + charts)
     skeleton_bytes = fpdf_to_bytes(pdf)
-    doc = fitz.open(stream=skeleton_bytes, filetype="pdf")
+    main_doc = fitz.open(stream=skeleton_bytes, filetype="pdf")
 
-    # Página de referência (capa) em PyMuPDF é 0
-    cover_page = doc[0]
+    # Ajuste mais robusto do índice do 1.º chart (caso não existam charts)
+    if charts_local and charts_first_page0 is None:
+        charts_first_page0 = 1  # capa é 0, portanto 1 seria o primeiro chart
+    # Se não há charts, mantemos None (tile ficará sem link)
 
-    # 3) Inserir embebidos — Flight Plan → Rotas → NOTAMs → M&B
-    insert_pos = doc.page_count  # vamos inserindo no fim (depois dos charts)
+    # Guardar posições de início antes de inserir
+    current_page_count = main_doc.page_count
 
-    # Flight Plan
+    # FLIGHT PLAN
     fp_start_page = None
-    _fp_doc = open_upload_as_pdf(locals().get("fp_upload"))
-    if _fp_doc:
-        fp_start_page = insert_pos
-        doc.insert_pdf(_fp_doc, start_at=insert_pos); insert_pos += _fp_doc.page_count; _fp_doc.close()
+    fp_doc = open_upload_as_pdf(locals().get("fp_upload"))
+    if fp_doc:
+        fp_start_page = current_page_count
+        main_doc.insert_pdf(fp_doc, start_at=current_page_count)  # append
+        current_page_count += fp_doc.page_count
+        fp_doc.close()
 
-    # Rotas (para cada par, inserir nav e vfr; sem páginas em branco)
+    # ROTAS (concatenamos na ordem dada; link aponta ao 1.º ficheiro presente)
     routes_start_page = None
-    nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
-    for idx, p in enumerate(nav_pairs or []):
-        nav_up, vfr_up = p.get("nav"), p.get("vfr")
-        # se nenhum dos dois, salta
-        if not nav_up and not vfr_up:
-            continue
-        if routes_start_page is None:
-            routes_start_page = insert_pos
-        for up in [nav_up, vfr_up]:
-            ext = open_upload_as_pdf(up)
-            if ext:
-                doc.insert_pdf(ext, start_at=insert_pos)
-                insert_pos += ext.page_count
-                ext.close()
+    pairs_local: List[Dict[str, Any]] = locals().get("pairs", [])
+    for i, p in enumerate(pairs_local or []):
+        for up in [p.get("nav"), p.get("vfr")]:
+            ext_doc = open_upload_as_pdf(up, orientation_for_images="L")
+            if ext_doc:
+                if routes_start_page is None:
+                    routes_start_page = current_page_count
+                main_doc.insert_pdf(ext_doc, start_at=current_page_count)
+                current_page_count += ext_doc.page_count
+                ext_doc.close()
 
     # NOTAMs
     notams_start_page = None
-    _nt_doc = open_upload_as_pdf(locals().get("notams_upload"))
-    if _nt_doc:
-        notams_start_page = insert_pos
-        doc.insert_pdf(_nt_doc, start_at=insert_pos); insert_pos += _nt_doc.page_count; _nt_doc.close()
+    notams_doc = open_upload_as_pdf(locals().get("notams_upload"))
+    if notams_doc:
+        notams_start_page = current_page_count
+        main_doc.insert_pdf(notams_doc, start_at=current_page_count)
+        current_page_count += notams_doc.page_count
+        notams_doc.close()
 
     # M&B
     mb_start_page = None
-    _mb_doc = open_upload_as_pdf(locals().get("mb_upload"))
-    if _mb_doc:
-        mb_start_page = insert_pos
-        doc.insert_pdf(_mb_doc, start_at=insert_pos); insert_pos += _mb_doc.page_count; _mb_doc.close()
+    mb_doc = open_upload_as_pdf(locals().get("mb_upload"))
+    if mb_doc:
+        mb_start_page = current_page_count
+        main_doc.insert_pdf(mb_doc, start_at=current_page_count)
+        current_page_count += mb_doc.page_count
+        mb_doc.close()
 
-    # 4) Links clicáveis nos cartões do índice (PyMuPDF)
-    #    Reconstituímos as caixas (mm -> pt) no cover e apontamos para a 1.ª página real de cada secção.
-    targets: Dict[str, Optional[int]] = {
-        "ipma": None,  # externo (URI)
-        "charts": charts_start_page if charts_start_page is not None else (1 if doc.page_count > 1 else None),
+    # Adicionar links clicáveis nos tiles da CAPA (página 0) — internos e externo (IPMA)
+    targets = {
+        "ipma": None,  # tratado como URI
+        "charts": charts_first_page0,
         "flight_plan": fp_start_page,
         "routes": routes_start_page,
         "notams": notams_start_page,
         "mass_balance": mb_start_page,
     }
-
-    for card in index_cards:
-        key = card["key"]
-        x_mm, y_mm, w_mm, h_mm = card["rect_mm"]
-        # converter para pontos (fitz usa pt; origem topo-esquerda)
-        rect = fitz.Rect(
-            mm_to_pt(x_mm), mm_to_pt(y_mm),
-            mm_to_pt(x_mm + w_mm), mm_to_pt(y_mm + h_mm)
-        )
-        if key == "ipma":
-            cover_page.insert_link({
-                "kind": fitz.LINK_URI,
-                "from": rect,
-                "uri": IPMA_URL
-            })
-        else:
-            dest_page = targets.get(key)
-            if dest_page is not None and 0 <= dest_page < doc.page_count:
-                cover_page.insert_link({
-                    "kind": fitz.LINK_GOTO,
-                    "from": rect,
-                    "page": int(dest_page),
-                    "to": fitz.Point(0,0),
-                    "zoom": 0
-                })
-            # caso não haja conteúdo, deixamos o cartão sem link
-
-    # (Opcional) Marcadores/TOC
-    toc = []
-    toc.append([1, "Charts", (charts_start_page or 1)+1 if doc.page_count>1 else 1])
-    if fp_start_page is not None:     toc.append([1, "Flight Plan",  fp_start_page+1])
-    if routes_start_page is not None: toc.append([1, "Rotas",        routes_start_page+1])
-    if notams_start_page is not None: toc.append([1, "NOTAMs",       notams_start_page+1])
-    if mb_start_page is not None:     toc.append([1, "Mass & Balance", mb_start_page+1])
-    if toc:
-        try: doc.set_toc(toc)
-        except Exception: pass
+    add_cover_links(main_doc, cover_rects_mm, targets, IPMA_URL)
 
     # Exportar
-    final_bytes = doc.tobytes()
-    doc.close()
+    final_bytes = main_doc.tobytes()
+    main_doc.close()
 
     final_name = f"Briefing - Missao {safe_str(locals().get('mission_no') or 'X')}.pdf"
     st.download_button("Download PDF", data=final_bytes, file_name=final_name,
                        mime="application/pdf", use_container_width=True)
+
 
 
