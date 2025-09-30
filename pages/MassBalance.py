@@ -65,7 +65,7 @@ def fmt_hm(total_min: int) -> str:
 # -----------------------------
 PDF_TEMPLATE_PATHS = [
     "pages/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf",
-    "/mnt/data/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf",
+    "RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf",
 ]
 
 AC = {
