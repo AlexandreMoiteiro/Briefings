@@ -1,4 +1,3 @@
-
 # app.py — Briefings (sem IA) — A4 Landscape
 # Ordem: Capa → Charts → Flight Plan → Rotas → NOTAMs → Mass & Balance
 from typing import Dict, Any, List, Tuple, Optional
@@ -18,8 +17,6 @@ st.markdown("""
 .btnbar a{display:inline-block;padding:6px 10px;border:1px solid var(--line);
   border-radius:8px;text-decoration:none;font-weight:600;color:#111827;background:#f8fafc}
 .btnbar a:hover{background:#f1f5f9}
-.section-card{ border:1px solid var(--line); border-radius:14px; padding:14px 16px; background:var(--bg); }
-hr{border:none;border-top:1px solid var(--line); margin:12px 0}
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
 [data-testid="stSidebarCollapseButton"] { display:none !important; }
 header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
@@ -142,9 +139,10 @@ class BriefPDF(FPDF):
         self.image(path, x=x, y=y, w=w, h=h); os.remove(path)
         self.ln(h + 10)
 
-    def cover_with_simple_index(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc) -> Dict[str, Tuple[float,float,float,float]]:
+    def cover_with_numbered_index(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc
+                                  ) -> Dict[str, Tuple[float,float,float,float]]:
         """
-        Capa minimal com lista grande e marcadores.
+        Capa com índice minimal mas chamativo: números grandes 01–06 + rótulos.
         Devolve rectângulos (mm) clicáveis para: ipma, charts, flight_plan, routes, notams, mass_balance
         """
         self.add_page(orientation="L")
@@ -166,14 +164,13 @@ class BriefPDF(FPDF):
         if date_str or time_utc:
             self.cell(0, 9, f"Date: {date_str}   UTC: {time_utc}", ln=True, align="C")
 
-        # Índice simples
         self.ln(8)
         self.set_font("Helvetica","B",16)
         self.cell(0, 10, "Índice", ln=True, align="C")
         self.ln(2)
 
-        labels = [
-            ("ipma", "METARs, TAFs, SIGMET & GAMET"),
+        items = [
+            ("ipma", "METARs, TAFs, SIGMET & GAMET (IPMA)"),
             ("charts", "Charts"),
             ("flight_plan", "Flight Plan"),
             ("routes", "Rotas"),
@@ -183,31 +180,30 @@ class BriefPDF(FPDF):
 
         rects_mm: Dict[str, Tuple[float,float,float,float]] = {}
 
-        x_bullet = 40.0
-        x_label  = 50.0
-        y        = 80.0
-        step     = 14.0
-        bullet_s = 5.0
+        x_num = 35.0
+        x_lbl = 60.0
+        y     = 80.0
+        step  = 16.5
 
-        for key, label in labels:
-            # marcador
-            self.set_fill_color(*PASTEL)
-            self.rect(x_bullet, y - bullet_s, bullet_s, bullet_s, style="F")
-            # texto
-            self.set_xy(x_label, y - 6.5)
-            self.set_font("Helvetica","B",18)
+        for i, (key, label) in enumerate(items, start=1):
+            num = f"{i:02d}"
+            # número grande à esquerda
+            self.set_text_color(*PASTEL)
+            self.set_xy(x_num, y-8)
+            self.set_font("Helvetica","B",28)
+            self.cell(0, 16, num, ln=0)
+            # label
             self.set_text_color(15, 23, 42)
-            self.cell(0, 13, label, ln=True, align="L")
-            # sub-linha discreta
-            self.set_draw_color(220,224,228)
-            self.set_line_width(0.3)
-            self.line(x_label, y + 6.0, x_label + 200.0, y + 6.0)
-            # rect clicável (largura fixa para não falhar o clique)
-            rects_mm[key] = (x_label - 2.0, y - 7.0, 205.0, 14.0)
-            # próximo
+            self.set_xy(x_lbl, y-6)
+            self.set_font("Helvetica","B",18)
+            self.cell(0, 13, label, ln=1)
+            # sub-linha
+            self.set_draw_color(220,224,228); self.set_line_width(0.3)
+            self.line(x_lbl, y + 6.5, x_lbl + 210.0, y + 6.5)
+            # rect clicável
+            rects_mm[key] = (x_lbl - 2.0, y - 7.0, 215.0, 14.0)
             y += step
 
-        # reset cor
         self.set_text_color(0,0,0)
         return rects_mm
 
@@ -309,8 +305,9 @@ def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Docu
     ext_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation=orientation_for_images)
     return fitz.open(stream=ext_bytes, filetype="pdf")
 
-def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,float,float]], targets: Dict[str, Optional[int]], ipma_url: str):
-    """Links clicáveis na capa (página 0), usando rectângulos em mm e páginas alvo (0-based)."""
+def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,float,float]],
+                    targets: Dict[str, Optional[int]], ipma_url: str):
+    """Links clicáveis na capa (página 0)."""
     if doc.page_count == 0: return
     page0 = doc.load_page(0)
     for key, (x, y, w, h) in rects_mm.items():
@@ -322,19 +319,35 @@ def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,fl
             if target is not None:
                 page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
 
+def add_back_to_index_buttons(doc: fitz.Document, label: str = "← Índice"):
+    """Escreve um pequeno 'botão' de voltar ao índice (pág. 1) em TODAS as páginas excepto a capa."""
+    for pno in range(1, doc.page_count):
+        page = doc.load_page(pno)
+        pw, ph = page.rect.width, page.rect.height
+        # botão no canto superior direito
+        margin_mm = 8.0
+        btn_w_mm, btn_h_mm = 28.0, 10.0
+        left = pw - mm_to_pt(margin_mm + btn_w_mm)
+        top  = mm_to_pt(margin_mm)
+        rect = fitz.Rect(left, top, left + mm_to_pt(btn_w_mm), top + mm_to_pt(btn_h_mm))
+        # texto centrado
+        page.insert_textbox(rect, label, fontsize=10, fontname="helv", align=1, color=(0,0,0))
+        # link
+        page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
+
 # ---------- Geração do PDF ----------
 if gen_pdf:
     pdf = BriefPDF(orientation="L", unit="mm", format="A4")
 
-    # CAPA (índice simples e chamativo)
-    cover_rects_mm = pdf.cover_with_simple_index(
+    # CAPA com índice numerado (simples e visível)
+    cover_rects_mm = pdf.cover_with_numbered_index(
         mission_no=safe_str(locals().get("mission_no","")),
         pilot=safe_str(locals().get("pilot","")),
         aircraft=safe_str(locals().get("aircraft_type","")),
         callsign=safe_str(locals().get("callsign","")),
         reg=safe_str(locals().get("registration","")),
         date_str=safe_str(locals().get("flight_date","")),
-        time_utc=safe_str(locals().get("time_utc",""))
+        time_utc=safe_str(locals().get("time_utc","")),
     )
 
     # CHARTS (logo após a capa)
@@ -344,7 +357,7 @@ if gen_pdf:
         for idx, c in enumerate(sorted(charts_local, key=chart_sort_key)):
             pdf.add_page(orientation="L")
             if charts_first_page0 is None:
-                charts_first_page0 = pdf.page_no() - 1  # 0-based na exportação
+                charts_first_page0 = pdf.page_no() - 1  # 0-based
             pdf.draw_header_band(c["title"] or "Chart")
             if c.get("subtitle"):
                 pdf.set_font("Helvetica","I",12); pdf.cell(0,9,c["subtitle"], ln=True, align="C")
@@ -366,7 +379,7 @@ if gen_pdf:
         current_page_count += fp_doc.page_count
         fp_doc.close()
 
-    # ROTAS (concatenar nav+vfr de cada rota)
+    # ROTAS
     routes_start_page = None
     pairs_local: List[Dict[str, Any]] = locals().get("pairs", [])
     for p in (pairs_local or []):
@@ -397,7 +410,7 @@ if gen_pdf:
         current_page_count += mb_doc.page_count
         mb_doc.close()
 
-    # Links clicáveis na capa (página 0)
+    # Links na capa
     targets = {
         "ipma": None,  # externo
         "charts": charts_first_page0,
@@ -407,6 +420,9 @@ if gen_pdf:
         "mass_balance": mb_start_page,
     }
     add_cover_links(main_doc, cover_rects_mm, targets, IPMA_URL)
+
+    # Botão “← Índice” em todas as páginas (excepto a capa)
+    add_back_to_index_buttons(main_doc, label="← Índice")
 
     # Exportar
     final_bytes = main_doc.tobytes()
