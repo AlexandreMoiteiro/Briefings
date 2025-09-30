@@ -1,10 +1,9 @@
-# app.py — Briefings (no AI) — A4 Landscape
+# app.py — Briefings (no AI) — A4 Landscape, fast & lean
 # Order: Cover → Charts → Flight Plan → Routes → NOTAMs → Mass & Balance
 from typing import Dict, Any, List, Tuple, Optional
 import io, os, tempfile
 import streamlit as st
 from PIL import Image
-from fpdf import FPDF
 import fitz  # PyMuPDF
 
 # ---------- Page config & styles ----------
@@ -45,6 +44,9 @@ st.markdown(
 )
 
 # ---------- Utils ----------
+A4_PORTRAIT = fitz.paper_size("a4")          # (width=595, height=842) pt
+A4_LANDSCAPE = (A4_PORTRAIT[1], A4_PORTRAIT[0])  # (842, 595) pt
+
 def safe_str(x) -> str:
     try: return "" if x is None else str(x)
     except Exception: return ""
@@ -54,47 +56,24 @@ def read_upload_bytes(upload) -> bytes:
     try: return upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
     except Exception: return b""
 
-def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
-    """Accept PDF/PNG/JPG/JPEG/GIF and return PNG bytes (first page if PDF)."""
-    try:
-        m = (mime or "").lower()
-        if m == "application/pdf":
-            doc = fitz.open(stream=file_bytes, filetype="pdf")
-            page = doc.load_page(0)
-            png = page.get_pixmap(dpi=300).tobytes("png")
-            return io.BytesIO(png)
-        else:
-            img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-            out = io.BytesIO(); img.save(out, "PNG"); out.seek(0); return out
-    except Exception:
-        ph = Image.new("RGB", (1200, 800), (245, 246, 248))
-        out = io.BytesIO(); ph.save(out, "PNG"); out.seek(0); return out
-
-def image_bytes_to_pdf_bytes_fullbleed(img_bytes: bytes, orientation: str = "L") -> bytes:
-    """Image -> single-page full-bleed A4 PDF (landscape)."""
-    doc = FPDF(orientation=orientation, unit="mm", format="A4")
-    doc.add_page(orientation=orientation)
-    max_w, max_h = doc.w, doc.h
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    iw, ih = img.size; r = min(max_w/iw, max_h/ih); w, h = int(iw*r), int(ih*r)
-    x, y = (doc.w - w) / 2, (doc.h - h) / 2
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        img.save(tmp, "PNG"); path = tmp.name
-    doc.image(path, x=x, y=y, w=w, h=h); os.remove(path)
-    data = doc.output(dest="S")
-    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
-
-def fpdf_to_bytes(doc: FPDF) -> bytes:
-    data = doc.output(dest="S")
-    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
-
 def mm_to_pt(mm: float) -> float:
     return mm * 72.0 / 25.4
 
-# ---------- Charts helpers ----------
-_KIND_RANK = {"SIGWX": 1, "SPC": 2, "Wind & Temp": 3, "Other": 9}
+def compress_image_to_jpeg(img_bytes: bytes, max_px: int = 2200, quality: int = 82) -> bytes:
+    """Resize (keeping aspect) so max side <= max_px and save as JPEG to cut size."""
+    try:
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        w, h = img.size
+        scale = min(1.0, float(max_px) / max(w, h)) if max(w, h) > max_px else 1.0
+        if scale < 1.0:
+            img = img.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=quality, optimize=True, progressive=True)
+        return out.getvalue()
+    except Exception:
+        return img_bytes  # fallback
 
-def guess_chart_kind_from_name(name: str) -> str:
+def detect_chart_kind(name: str) -> str:
     n = (name or "").upper()
     if "SIGWX" in n or "SIG WEATHER" in n: return "SIGWX"
     if "SPC" in n or "SURFACE" in n or "PRESSURE" in n: return "SPC"
@@ -109,102 +88,119 @@ def default_title_for_kind(kind: str) -> str:
         "Other": "Weather Chart",
     }.get(kind, "Weather Chart")
 
-def chart_sort_key(c: Dict[str, Any]) -> Tuple[int, int]:
-    rank = _KIND_RANK.get(c.get("kind","Other"), 9)
-    order = int(c.get("order", 9999) or 9999)
-    return (rank, order)
+# ---------- Preview helper (lightweight) ----------
+def preview_first_page_as_png(file_bytes: bytes, mime: str, dpi: int = 150) -> bytes:
+    """For UI preview only (fast). If PDF, render first page at low DPI; else just JPEG-compress."""
+    try:
+        if (mime or "").lower() == "application/pdf":
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            pix = doc.load_page(0).get_pixmap(dpi=dpi)
+            return pix.tobytes("png")
+        # image
+        return compress_image_to_jpeg(file_bytes, max_px=1600, quality=75)
+    except Exception:
+        return b""
 
-# ---------- PDF ----------
-PASTEL = (90, 127, 179)
+# ---------- Overlay decorations (PyMuPDF) ----------
+def add_header_text(page: fitz.Page, title: str, add_index_link: bool = True):
+    """Draw a small header text (centered) and optional '← Index' link top-right. Subtle and unobtrusive."""
+    pw, ph = page.rect.width, page.rect.height
+    top_pad = mm_to_pt(8)
+    # centered title
+    page.insert_textbox(
+        fitz.Rect(mm_to_pt(10), top_pad, pw - mm_to_pt(10), top_pad + mm_to_pt(8)),
+        title, fontsize=11, fontname="helv", align=1, color=(0,0,0)
+    )
+    if add_index_link:
+        label = "← Index"
+        w = page.get_text_length(label, fontsize=10, fontname="helv")
+        x2 = pw - mm_to_pt(8)
+        x1 = x2 - w - mm_to_pt(3)
+        y1 = mm_to_pt(6.5); y2 = y1 + mm_to_pt(6)
+        rect = fitz.Rect(x1, y1, x2, y2)
+        page.insert_textbox(rect, label, fontsize=10, fontname="helv", align=2, color=(0,0,0))
+        page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
 
-class BriefPDF(FPDF):
-    def header(self): pass
-    def footer(self): pass
+def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,float,float]],
+                    targets: Dict[str, Optional[int]], ipma_url: str):
+    """Clickable cover links (page 0)."""
+    if doc.page_count == 0: return
+    page0 = doc.load_page(0)
+    for key, (x, y, w, h) in rects_mm.items():
+        rect = fitz.Rect(mm_to_pt(x), mm_to_pt(y), mm_to_pt(x+w), mm_to_pt(y+h))
+        if key == "ipma":
+            page0.insert_link({"kind": fitz.LINK_URI, "from": rect, "uri": ipma_url})
+        else:
+            p = targets.get(key)
+            if p is not None:
+                page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(p)})
 
-    def draw_header_band(self, text: str):
-        self.set_draw_color(229,231,235)
-        self.set_line_width(0.3)
-        self.set_font("Helvetica", "B", 18)
-        self.cell(0, 12, text, ln=True, align="C", border="B")
+def set_bookmarks(doc: fitz.Document, marks: List[Tuple[int, str]]):
+    """Add PDF outline (bookmarks). marks: list of (page0, title)."""
+    toc = []
+    for p0, title in marks:
+        if p0 is not None:
+            toc.append([1, title, p0 + 1])  # PyMuPDF expects 1-based pages here
+    if toc:
+        doc.set_toc(toc)
 
-    def add_fullbleed_image(self, img_png: io.BytesIO):
-        # place image on current (landscape) page with top margin for header
-        max_w = self.w - 22; max_h = self.h - 58
-        img = Image.open(img_png); iw, ih = img.size
-        r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
-        x = (self.w - w) // 2; y = self.get_y() + 6
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            img.save(tmp, format="PNG"); path = tmp.name
-        self.image(path, x=x, y=y, w=w, h=h); os.remove(path)
-        self.ln(h + 10)
+# ---------- Cover builder (clean numbered index) ----------
+def build_cover(doc: fitz.Document, info: Dict[str, str]) -> Dict[str, Tuple[float,float,float,float]]:
+    page = doc.new_page(width=A4_LANDSCAPE[0], height=A4_LANDSCAPE[1])
+    pw, ph = page.rect.width, page.rect.height
 
-    def cover_with_numbered_index(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc
-                                  ) -> Dict[str, Tuple[float,float,float,float]]:
-        """
-        Cover with a clean numbered index (01–06).
-        Returns clickable rectangles (mm) for: ipma, charts, flight_plan, routes, notams, mass_balance
-        """
-        self.add_page(orientation="L")
+    # Title
+    page.insert_textbox(
+        fitz.Rect(0, mm_to_pt(18), pw, mm_to_pt(18) + mm_to_pt(12)),
+        "Briefing", fontsize=32, fontname="helv", align=1, color=(0,0,0)
+    )
+    # Info line
+    info_parts = []
+    if info.get("mission"): info_parts.append(f"Mission: {info['mission']}")
+    if info.get("pilot"): info_parts.append(f"Pilot: {info['pilot']}")
+    if info.get("aircraft"): info_parts.append(f"Aircraft: {info['aircraft']}")
+    if info.get("callsign"): info_parts.append(f"Callsign: {info['callsign']}")
+    if info.get("reg"): info_parts.append(f"Reg: {info['reg']}")
+    if info_parts:
+        page.insert_textbox(
+            fitz.Rect(0, mm_to_pt(32), pw, mm_to_pt(32) + mm_to_pt(8)),
+            "   ".join(info_parts), fontsize=14, fontname="helv", align=1, color=(0,0,0)
+        )
+    # Date/UTC
+    date_line = "   ".join([s for s in [f"Date: {info.get('date','')}" if info.get("date") else "",
+                                        f"UTC: {info.get('utc','')}" if info.get("utc") else ""] if s])
+    if date_line:
+        page.insert_textbox(
+            fitz.Rect(0, mm_to_pt(40), pw, mm_to_pt(40) + mm_to_pt(8)),
+            date_line, fontsize=14, fontname="helv", align=1, color=(0,0,0)
+        )
 
-        # Title / info
-        self.set_xy(0, 20)
-        self.set_font("Helvetica","B",32)
-        self.cell(0, 16, "Briefing", ln=True, align="C")
+    # Numbered index (simple & visible)
+    items = [
+        ("ipma", "METARs, TAFs, SIGMET & GAMET (IPMA)"),
+        ("charts", "Charts"),
+        ("flight_plan", "Flight Plan"),
+        ("routes", "Routes"),
+        ("notams", "NOTAMs"),
+        ("mass_balance", "Mass & Balance"),
+    ]
+    rects_mm: Dict[str, Tuple[float,float,float,float]] = {}
+    x_num = mm_to_pt(35); x_lbl = mm_to_pt(60); y = mm_to_pt(80); step = mm_to_pt(16.5)
 
-        self.set_font("Helvetica","",14)
-        info = []
-        if mission_no: info.append(f"Mission: {mission_no}")
-        if pilot: info.append(f"Pilot: {pilot}")
-        if aircraft: info.append(f"Aircraft: {aircraft}")
-        if callsign: info.append(f"Callsign: {callsign}")
-        if reg: info.append(f"Reg: {reg}")
-        if info:
-            self.cell(0, 9, "   ".join(info), ln=True, align="C")
-        if date_str or time_utc:
-            self.cell(0, 9, f"Date: {date_str}   UTC: {time_utc}", ln=True, align="C")
+    for i, (key, label) in enumerate(items, start=1):
+        num = f"{i:02d}"
+        # number
+        page.insert_text(fitz.Point(x_num, y), num, fontsize=28, fontname="helv", color=(0.35,0.5,0.7))
+        # label
+        page.insert_text(fitz.Point(x_lbl, y), label, fontsize=18, fontname="helv", color=(0,0,0))
+        # divider
+        page.draw_line(fitz.Point(x_lbl, y + mm_to_pt(6.5)), fitz.Point(x_lbl + mm_to_pt(210), y + mm_to_pt(6.5)),
+                       color=(0.86,0.88,0.9), width=0.7)
+        # clickable rect area (mm values to return)
+        rects_mm[key] = ( (x_lbl/72*25.4) - 2.0, (y/72*25.4) - 7.0, 215.0, 14.0 )
+        y += step
 
-        self.ln(8)
-        self.set_font("Helvetica","B",16)
-        self.cell(0, 10, "Index", ln=True, align="C")
-        self.ln(2)
-
-        items = [
-            ("ipma", "METARs, TAFs, SIGMET & GAMET (IPMA)"),
-            ("charts", "Charts"),
-            ("flight_plan", "Flight Plan"),
-            ("routes", "Routes"),
-            ("notams", "NOTAMs"),
-            ("mass_balance", "Mass & Balance"),
-        ]
-
-        rects_mm: Dict[str, Tuple[float,float,float,float]] = {}
-
-        x_num = 35.0
-        x_lbl = 60.0
-        y     = 80.0
-        step  = 16.5
-
-        for i, (key, label) in enumerate(items, start=1):
-            num = f"{i:02d}"
-            # big number
-            self.set_text_color(*PASTEL)
-            self.set_xy(x_num, y-8)
-            self.set_font("Helvetica","B",28)
-            self.cell(0, 16, num, ln=0)
-            # label
-            self.set_text_color(15, 23, 42)
-            self.set_xy(x_lbl, y-6)
-            self.set_font("Helvetica","B",18)
-            self.cell(0, 13, label, ln=1)
-            # divider
-            self.set_draw_color(220,224,228); self.set_line_width(0.3)
-            self.line(x_lbl, y + 6.5, x_lbl + 210.0, y + 6.5)
-            # clickable rect
-            rects_mm[key] = (x_lbl - 2.0, y - 7.0, 215.0, 14.0)
-            y += step
-
-        self.set_text_color(0,0,0)
-        return rects_mm
+    return rects_mm
 
 # ---------- UI: Tabs ----------
 tab_mission, tab_charts, tab_fpmb, tab_pairs, tab_notams, tab_generate = st.tabs(
@@ -227,10 +223,10 @@ with tab_mission:
         flight_date = st.date_input("Flight date")
         time_utc = st.text_input("UTC time", "")
 
-# Charts
+# Charts (auto-detect kind; title auto-filled — you can override)
 with tab_charts:
     st.markdown("### Charts")
-    st.caption("Upload SIGWX / Surface Pressure (SPC) / Winds & Temps / Other. Accepts PDF/PNG/JPG/JPEG/GIF (PDF uses first page).")
+    st.caption("Upload SIGWX / Surface Pressure (SPC) / Winds & Temps / Other. Accepts PDF/PNG/JPG/JPEG/GIF.")
     preview_w = st.slider("Preview width (px)", min_value=240, max_value=640, value=460, step=10)
     uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=True)
 
@@ -238,22 +234,19 @@ with tab_charts:
     if uploads:
         for idx, f in enumerate(uploads):
             raw = read_upload_bytes(f); mime = f.type or ""
-            img_png = ensure_png_from_bytes(raw, mime)
+            prev = preview_first_page_as_png(raw, mime, dpi=130)
             name = safe_str(getattr(f, "name", "")) or "(untitled)"
-            col_img, col_meta = st.columns([0.5, 0.5])
+            kind = detect_chart_kind(name)
+            auto_title = default_title_for_kind(kind)
+            col_img, col_meta = st.columns([0.55, 0.45])
             with col_img:
-                try: st.image(img_png.getvalue(), caption=name, width=preview_w)
-                except Exception: st.write(name)
+                if prev: st.image(prev, caption=name, width=preview_w)
+                else: st.write(name)
             with col_meta:
-                kind_guess = guess_chart_kind_from_name(name)
-                kind = st.selectbox(f"Chart type #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"],
-                                    index=["SIGWX","SPC","Wind & Temp","Other"].index(kind_guess),
-                                    key=f"kind_{idx}")
-                title_default = default_title_for_kind(kind)
-                title = st.text_input("Title", value=title_default, key=f"title_{idx}")
-                subtitle = st.text_input("Subtitle (optional)", value="", key=f"subtitle_{idx}")
+                st.markdown(f"**Detected:** {kind}")
+                title = st.text_input("Title (optional)", value=auto_title, key=f"title_{idx}")
                 order_val = st.number_input("Order", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
-            charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png, "order": order_val, "filename": name})
+            charts.append({"order": order_val, "title": title.strip(), "upload": f, "mime": mime, "kind": kind, "name": name})
 
 # Flight Plan & M&B
 with tab_fpmb:
@@ -264,7 +257,7 @@ with tab_fpmb:
         if fp_upload: st.success(f"Flight Plan loaded: {safe_str(fp_upload.name)}")
     with c2:
         mb_upload = st.file_uploader("Mass & Balance (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
-        if mb_upload: st.success(f"M&B loaded: {safe_str(mb_upload.name)}")
+        if mb_upload: st.success(f"M & B loaded: {safe_str(mb_upload.name)}")
 
 # Routes
 with tab_pairs:
@@ -285,149 +278,147 @@ with tab_pairs:
 # NOTAMs
 with tab_notams:
     st.markdown("### NOTAMs")
-    st.caption("Upload the official NOTAMs PDF (or image). It will be appended into the NOTAMs section of the final PDF.")
+    st.caption("Upload the official NOTAMs PDF (or image). It will be appended to the NOTAMs section.")
     notams_upload = st.file_uploader("NOTAMs (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
 
 # Generate
 with tab_generate:
     gen_pdf = st.button("Generate PDF")
 
-# ---------- PyMuPDF helpers ----------
-def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Document]:
+# ---------- Building with PyMuPDF only (fast & small) ----------
+def open_upload_as_doc(upload) -> Optional[fitz.Document]:
+    """Open upload as a PyMuPDF Document. Images are converted to a single-page JPEG-based PDF."""
     if upload is None: return None
     raw = read_upload_bytes(upload)
     if not raw: return None
-    mime = (getattr(upload, "type", "") or "").lower()
-    if mime == "application/pdf":
+    m = (getattr(upload, "type", "") or "").lower()
+    if m == "application/pdf":
         return fitz.open(stream=raw, filetype="pdf")
-    # image -> pdf
-    ext_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation=orientation_for_images)
-    return fitz.open(stream=ext_bytes, filetype="pdf")
+    # image -> compress & embed into a new PDF page
+    jpeg = compress_image_to_jpeg(raw, max_px=2200, quality=82)
+    doc = fitz.open()
+    page = doc.new_page(width=A4_LANDSCAPE[0], height=A4_LANDSCAPE[1])
+    # fit image within margins under a small header band
+    margin = mm_to_pt(10)
+    header_h = mm_to_pt(12)
+    rect = fitz.Rect(margin, margin + header_h, A4_LANDSCAPE[0]-margin, A4_LANDSCAPE[1]-margin)
+    page.insert_image(rect, stream=jpeg, keep_proportion=True)
+    add_header_text(page, "")  # just the Index link
+    return doc
 
-def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,float,float]],
-                    targets: Dict[str, Optional[int]], ipma_url: str):
-    """Clickable links on the cover (page 0)."""
-    if doc.page_count == 0: return
-    page0 = doc.load_page(0)
-    for key, (x, y, w, h) in rects_mm.items():
-        rect = fitz.Rect(mm_to_pt(x), mm_to_pt(y), mm_to_pt(x+w), mm_to_pt(y+h))
-        if key == "ipma":
-            page0.insert_link({"kind": fitz.LINK_URI, "from": rect, "uri": ipma_url})
+def append_section_docs(main_doc: fitz.Document, docs: List[fitz.Document], section_title_first: Optional[str] = None,
+                        add_titles: bool = True) -> Optional[int]:
+    """Append docs; return the 0-based page of the first appended page. Overlay header / index link."""
+    start = None
+    for i, d in enumerate(docs):
+        if d is None: continue
+        p0 = main_doc.page_count
+        main_doc.insert_pdf(d, start_at=p0)
+        if start is None: start = p0
+        # overlay header text (subtle) on appended pages
+        if add_titles:
+            title = section_title_first if (i == 0 and section_title_first) else None
+            for p in range(p0, p0 + d.page_count):
+                page = main_doc.load_page(p)
+                add_header_text(page, title or "", add_index_link=True)
+        d.close()
+    return start
+
+def add_charts(main_doc: fitz.Document, chart_items: List[Dict[str, Any]]) -> Optional[int]:
+    """Append charts; PDFs inserted as-is; Images compressed and placed on new pages. Adds header with title."""
+    if not chart_items: return None
+    start = None
+    for item in chart_items:
+        up = item["upload"]; mime = item["mime"]; title = item["title"] or default_title_for_kind(item["kind"])
+        raw = read_upload_bytes(up)
+        if not raw: continue
+        if mime.lower() == "application/pdf":
+            d = fitz.open(stream=raw, filetype="pdf")
+            p0 = main_doc.page_count
+            main_doc.insert_pdf(d, start_at=p0)
+            if start is None: start = p0
+            # overlay header title on each inserted page
+            for p in range(p0, p0 + d.page_count):
+                page = main_doc.load_page(p)
+                add_header_text(page, title, add_index_link=True)
+            d.close()
         else:
-            target = targets.get(key)
-            if target is not None:
-                page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
+            # image => compress and put on a new page
+            jpeg = compress_image_to_jpeg(raw, max_px=2200, quality=82)
+            page = main_doc.new_page(width=A4_LANDSCAPE[0], height=A4_LANDSCAPE[1])
+            # header
+            add_header_text(page, title, add_index_link=True)
+            # image area below header
+            margin = mm_to_pt(10); header_h = mm_to_pt(12)
+            rect = fitz.Rect(margin, margin + header_h, A4_LANDSCAPE[0]-margin, A4_LANDSCAPE[1]-margin)
+            page.insert_image(rect, stream=jpeg, keep_proportion=True)
+            if start is None: start = page.number
+    return start
 
-def add_back_to_index_buttons(doc: fitz.Document, label: str = "← Index"):
-    """Adds a small 'back to index' button to every page except the cover."""
-    for pno in range(1, doc.page_count):
-        page = doc.load_page(pno)
-        pw, ph = page.rect.width, page.rect.height
-        # top-right button
-        margin_mm = 8.0
-        btn_w_mm, btn_h_mm = 28.0, 10.0
-        left = pw - mm_to_pt(margin_mm + btn_w_mm)
-        top  = mm_to_pt(margin_mm)
-        rect = fitz.Rect(left, top, left + mm_to_pt(btn_w_mm), top + mm_to_pt(btn_h_mm))
-        # text
-        page.insert_textbox(rect, label, fontsize=10, fontname="helv", align=1, color=(0,0,0))
-        # link to cover
-        page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
-
-# ---------- PDF generation ----------
+# ---------- Generate PDF ----------
 if gen_pdf:
-    pdf = BriefPDF(orientation="L", unit="mm", format="A4")
+    # Build document
+    main = fitz.open()
 
-    # COVER with simple numbered index
-    cover_rects_mm = pdf.cover_with_numbered_index(
-        mission_no=safe_str(locals().get("mission_no","")),
-        pilot=safe_str(locals().get("pilot","")),
-        aircraft=safe_str(locals().get("aircraft_type","")),
-        callsign=safe_str(locals().get("callsign","")),
-        reg=safe_str(locals().get("registration","")),
-        date_str=safe_str(locals().get("flight_date","")),
-        time_utc=safe_str(locals().get("time_utc","")),
-    )
+    # Cover
+    cover_rects = build_cover(main, {
+        "mission": safe_str(mission_no),
+        "pilot": safe_str(pilot),
+        "aircraft": safe_str(aircraft_type),
+        "callsign": safe_str(callsign or "RVP"),
+        "reg": safe_str(registration),
+        "date": safe_str(flight_date),
+        "utc": safe_str(time_utc),
+    })
 
-    # CHARTS (immediately after cover)
-    charts_local: List[Dict[str,Any]] = locals().get("charts", [])
-    charts_first_page0: Optional[int] = None
-    if charts_local:
-        for idx, c in enumerate(sorted(charts_local, key=chart_sort_key)):
-            pdf.add_page(orientation="L")
-            if charts_first_page0 is None:
-                charts_first_page0 = pdf.page_no() - 1  # 0-based
-            pdf.draw_header_band(c["title"] or "Chart")
-            if c.get("subtitle"):
-                pdf.set_font("Helvetica","I",12); pdf.cell(0,9,c["subtitle"], ln=True, align="C")
-            pdf.add_fullbleed_image(c["img_png"])
-
-    # Export skeleton (cover + charts)
-    skeleton_bytes = fpdf_to_bytes(pdf)
-    main_doc = fitz.open(stream=skeleton_bytes, filetype="pdf")
-
-    # Append in order and record first pages
-    current_page_count = main_doc.page_count
+    # Charts (sorted by 'order')
+    charts_sorted = sorted(locals().get("charts", []), key=lambda x: int(x.get("order", 9999)))
+    charts_start = add_charts(main, charts_sorted)
 
     # Flight Plan
-    fp_start_page = None
-    fp_doc = open_upload_as_pdf(locals().get("fp_upload"))
-    if fp_doc:
-        fp_start_page = current_page_count
-        main_doc.insert_pdf(fp_doc, start_at=current_page_count)
-        current_page_count += fp_doc.page_count
-        fp_doc.close()
+    fp_doc = open_upload_as_doc(locals().get("fp_upload"))
+    fp_start = append_section_docs(main, [fp_doc], section_title_first="Flight Plan")
 
-    # Routes (append each Navlog and VFR in given order)
-    routes_start_page = None
-    pairs_local: List[Dict[str, Any]] = locals().get("pairs", [])
-    for p in (pairs_local or []):
+    # Routes  (append each nav & vfr in order provided)
+    route_docs: List[fitz.Document] = []
+    for p in (locals().get("pairs") or []):
         for up in [p.get("nav"), p.get("vfr")]:
-            ext = open_upload_as_pdf(up, orientation_for_images="L")
-            if ext:
-                if routes_start_page is None:
-                    routes_start_page = current_page_count
-                main_doc.insert_pdf(ext, start_at=current_page_count)
-                current_page_count += ext.page_count
-                ext.close()
+            d = open_upload_as_doc(up)
+            if d: route_docs.append(d)
+    routes_start = append_section_docs(main, route_docs, section_title_first="Routes")
 
     # NOTAMs
-    notams_start_page = None
-    notams_doc = open_upload_as_pdf(locals().get("notams_upload"))
-    if notams_doc:
-        notams_start_page = current_page_count
-        main_doc.insert_pdf(notams_doc, start_at=current_page_count)
-        current_page_count += notams_doc.page_count
-        notams_doc.close()
+    notams_doc = open_upload_as_doc(locals().get("notams_upload"))
+    notams_start = append_section_docs(main, [notams_doc], section_title_first="NOTAMs")
 
-    # Mass & Balance
-    mb_start_page = None
-    mb_doc = open_upload_as_pdf(locals().get("mb_upload"))
-    if mb_doc:
-        mb_start_page = current_page_count
-        main_doc.insert_pdf(mb_doc, start_at=current_page_count)
-        current_page_count += mb_doc.page_count
-        mb_doc.close()
+    # M & B
+    mb_doc = open_upload_as_doc(locals().get("mb_upload"))
+    mb_start = append_section_docs(main, [mb_doc], section_title_first="Mass & Balance")
 
-    # Add cover links
-    targets = {
-        "ipma": None,  # external
-        "charts": charts_first_page0,
-        "flight_plan": fp_start_page,
-        "routes": routes_start_page,
-        "notams": notams_start_page,
-        "mass_balance": mb_start_page,
-    }
-    add_cover_links(main_doc, cover_rects_mm, targets, IPMA_URL)
+    # Cover links + bookmarks
+    add_cover_links(main, cover_rects, {
+        "ipma": None,
+        "charts": charts_start,
+        "flight_plan": fp_start,
+        "routes": routes_start,
+        "notams": notams_start,
+        "mass_balance": mb_start,
+    }, IPMA_URL)
 
-    # Add "← Index" button to every page except cover
-    add_back_to_index_buttons(main_doc, label="← Index")
+    set_bookmarks(main, [
+        (0, "Cover"),
+        (charts_start, "Charts"),
+        (fp_start, "Flight Plan"),
+        (routes_start, "Routes"),
+        (notams_start, "NOTAMs"),
+        (mb_start, "Mass & Balance"),
+    ])
 
     # Export
-    final_bytes = main_doc.tobytes()
-    main_doc.close()
+    final_bytes = main.tobytes()
+    main.close()
 
-    final_name = f"Briefing - Mission {safe_str(locals().get('mission_no') or 'X')}.pdf"
+    final_name = f"Briefing - Mission {safe_str(mission_no or 'X')}.pdf"
     st.download_button("Download PDF", data=final_bytes, file_name=final_name,
                        mime="application/pdf", use_container_width=True)
 
