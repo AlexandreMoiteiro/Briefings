@@ -1,7 +1,7 @@
 # app.py — Briefings (no AI) — A4 Landscape
 # Order: Cover → Charts → Flight Plan → Routes → NOTAMs → Mass & Balance
 from typing import Dict, Any, List, Tuple, Optional
-import io, os, tempfile
+import io, os, tempfile, math
 import streamlit as st
 from PIL import Image
 from fpdf import FPDF
@@ -239,8 +239,7 @@ with tab_charts:
                 except Exception: st.write(name)
             with col_meta:
                 kind = st.selectbox(f"Chart type #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"], key=f"kind_{idx}")
-                # Auto-title strictly from selected type
-                title = default_title_for_kind(kind)
+                title = default_title_for_kind(kind)  # auto-title from type
                 st.text(f"Title: {title}")
                 subtitle = st.text_input("Subtitle (optional)", value="", key=f"subtitle_{idx}")
                 order_val = st.number_input("Order", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
@@ -309,25 +308,66 @@ def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,fl
             if target is not None:
                 page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
 
-def add_back_to_index_badge(doc: fitz.Document):
-    """Light gray tiny arrow chip in the top-right corner of every page (except the cover)."""
+def draw_turnback_arrow_chip(page: fitz.Page):
+    """Draws a tiny light-gray chip with a vector ⮌-style U-turn arrow, top-right, linking to cover."""
+    pw, ph = page.rect.width, page.rect.height
+    margin_mm = 7.0
+    w_mm, h_mm = 12.0, 10.0
+    left = pw - mm_to_pt(margin_mm + w_mm)
+    top  = mm_to_pt(margin_mm)
+    rect = fitz.Rect(left, top, left + mm_to_pt(w_mm), top + mm_to_pt(h_mm))
+
+    # chip background + border (very soft)
+    try:
+        page.draw_rect(rect, fill=(0.95,0.96,0.98), color=(0.88,0.90,0.93), width=0.5)
+    except Exception:
+        pass
+
+    # arrow path approximating ⮌ (quarter-circle with arrow head)
+    cx = rect.x0 + rect.width * 0.55
+    cy = rect.y0 + rect.height * 0.55
+    r  = min(rect.width, rect.height) * 0.38
+    start, end = 0.0, 3.0*math.pi/4.0  # 0 to 135 degrees
+
+    pts = []
+    steps = 10
+    for i in range(steps+1):
+        t = start + (end - start) * (i / steps)
+        x = cx + r * math.cos(t)
+        y = cy - r * math.sin(t)  # minus: PDF Y grows downwards
+        pts.append((x, y))
+
+    shp = page.new_shape()
+    # curve approximation with polyline
+    shp.draw_polyline(pts)
+
+    # arrow head at end
+    x2, y2 = pts[-1]
+    x1, y1 = pts[-2]
+    vx, vy = (x2 - x1), (y2 - y1)
+    vlen = math.hypot(vx, vy) or 1.0
+    ux, uy = vx / vlen, vy / vlen
+    head_len = r * 0.9
+    # rotate by ±145° for the two wings
+    ang = math.radians(145)
+    def rot(u_x, u_y, a):
+        return (u_x*math.cos(a) - u_y*math.sin(a), u_x*math.sin(a) + u_y*math.cos(a))
+    rx1, ry1 = rot(ux, uy, +ang)
+    rx2, ry2 = rot(ux, uy, -ang)
+    shp.draw_line(x2, y2, x2 - head_len*rx1, y2 - head_len*ry1)
+    shp.draw_line(x2, y2, x2 - head_len*rx2, y2 - head_len*ry2)
+
+    shp.finish(width=1.2, color=(0.40,0.44,0.50))
+    shp.commit()
+
+    # clickable link back to cover
+    page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
+
+def add_back_to_index_badges(doc: fitz.Document):
+    """Add the chip to every page except the cover."""
     for pno in range(1, doc.page_count):
         page = doc.load_page(pno)
-        pw, ph = page.rect.width, page.rect.height
-        margin_mm = 7.0
-        w_mm, h_mm = 12.0, 10.0  # small chip
-        left = pw - mm_to_pt(margin_mm + w_mm)
-        top  = mm_to_pt(margin_mm)
-        rect = fitz.Rect(left, top, left + mm_to_pt(w_mm), top + mm_to_pt(h_mm))
-        # draw light gray chip
-        try:
-            page.draw_rect(rect, fill=(0.95,0.96,0.98), color=(0.88,0.9,0.93), width=0.5)
-        except Exception:
-            pass  # older PyMuPDF – skip decoration, keep link & glyph
-        # arrow glyph (light gray)
-        page.insert_textbox(rect, "↩", fontsize=10, fontname="helv", align=1, color=(0.40,0.44,0.50))
-        # clickable link back to cover
-        page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
+        draw_turnback_arrow_chip(page)
 
 # ---------- PDF generation ----------
 if gen_pdf:
@@ -415,8 +455,8 @@ if gen_pdf:
     }
     add_cover_links(main_doc, cover_rects_mm, targets, IPMA_URL)
 
-    # Add tiny arrow chip to every page except cover
-    add_back_to_index_badge(main_doc)
+    # Add tiny ⮌-style arrow chip to every page except cover
+    add_back_to_index_badges(main_doc)
 
     # Export
     final_bytes = main_doc.tobytes()
@@ -425,4 +465,3 @@ if gen_pdf:
     final_name = f"Briefing - Mission {safe_str(locals().get('mission_no') or 'X')}.pdf"
     st.download_button("Download PDF", data=final_bytes, file_name=final_name,
                        mime="application/pdf", use_container_width=True)
-
