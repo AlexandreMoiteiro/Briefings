@@ -1,4 +1,3 @@
-
 # app.py — Briefings (no AI) — A4 Landscape
 # Order: Cover → Charts → Flight Plan → Routes → NOTAMs → Mass & Balance
 from typing import Dict, Any, List, Tuple, Optional
@@ -118,7 +117,6 @@ class BriefPDF(FPDF):
     def draw_header_band(self, text: str):
         self.set_draw_color(229,231,235)
         self.set_line_width(0.3)
-               # Title band
         self.set_font("Helvetica", "B", 18)
         self.cell(0, 12, text, ln=True, align="C", border="B")
 
@@ -144,7 +142,8 @@ class BriefPDF(FPDF):
         # Title / info
         self.set_xy(0, 20)
         self.set_font("Helvetica","B",32)
-        self.cell(0, 16, "Briefing", ln=True, align="C")
+        shead = "Briefing"
+        self.cell(0, 16, shead, ln=True, align="C")
 
         self.set_font("Helvetica","",14)
         info = []
@@ -311,40 +310,58 @@ def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,fl
                 page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
 
 def add_back_to_index_badge(doc: fitz.Document):
-    """Tiny light-gray '⮌-style' back arrow chip on every page (except the cover)."""
+    """
+    Tiny, rounded, low-contrast back chip on every page (except the cover).
+    Uses very light stroke/fill and (where available) low opacity.
+    """
     for pno in range(1, doc.page_count):
         page = doc.load_page(pno)
         pw, ph = page.rect.width, page.rect.height
-        margin_mm = 7.0
-        w_mm, h_mm = 12.0, 10.0  # small chip
+
+        # smaller chip, tighter margin
+        margin_mm = 6.0
+        w_mm, h_mm = 9.5, 8.0
         left = pw - mm_to_pt(margin_mm + w_mm)
         top  = mm_to_pt(margin_mm)
         rect = fitz.Rect(left, top, left + mm_to_pt(w_mm), top + mm_to_pt(h_mm))
-        # chip
+
+        # draw rounded capsule, very light + semi-transparent if supported
+        stroke = (0.84, 0.87, 0.92)   # light gray stroke
+        fill   = (0.98, 0.985, 1.0)   # near-white fill
         try:
-            page.draw_rect(rect, fill=(0.96,0.97,0.99), color=(0.86,0.89,0.93), width=0.6)
+            page.draw_rect(
+                rect,
+                color=stroke, fill=fill, width=0.4,
+                radius=mm_to_pt(1.2),
+                fill_opacity=0.10, stroke_opacity=0.20  # subtle if PyMuPDF supports opacity
+            )
         except Exception:
-            pass  # older PyMuPDF – decoration optional
+            # Fallback without opacity / radius
+            try:
+                page.draw_rect(rect, color=stroke, fill=fill, width=0.3)
+            except Exception:
+                pass
 
-        # draw a vector back arrow with a small upward hook (⮌-like), no glyphs
-        pad = mm_to_pt(2.0)
-        col = (0.40, 0.44, 0.50)
-        width = 1.2
+        # subtle ⮌ vector (so we avoid glyph rendering issues)
+        pad = mm_to_pt(1.4)
+        col = (0.52, 0.56, 0.62)  # soft gray
+        width = 0.8
 
-        # shaft (right → left)
-        y_mid = rect.y0 + rect.height * 0.55
+        y_mid   = rect.y0 + rect.height * 0.55
         x_right = rect.x1 - pad
-        x_head  = rect.x0 + pad + mm_to_pt(4.0)
+        x_head  = rect.x0 + pad + mm_to_pt(2.6)
+
+        # shaft (→ ←)
         page.draw_line(fitz.Point(x_right, y_mid), fitz.Point(x_head, y_mid), color=col, width=width)
 
         # arrowhead
-        head = mm_to_pt(3.0)
+        head = mm_to_pt(2.2)
         page.draw_line(fitz.Point(x_head, y_mid), fitz.Point(x_head + head, y_mid - head), color=col, width=width)
         page.draw_line(fitz.Point(x_head, y_mid), fitz.Point(x_head + head, y_mid + head), color=col, width=width)
 
-        # small upward hook at the right end
-        hook_h = mm_to_pt(3.0)
-        page.draw_line(fitz.Point(x_right, y_mid), fitz.Point(x_right, y_mid - hook_h), color=col, width=width*0.9)
+        # tiny upward hook at the right end
+        hook_h = mm_to_pt(2.0)
+        page.draw_line(fitz.Point(x_right, y_mid), fitz.Point(x_right, y_mid - hook_h), color=col, width=width*0.85)
 
         # clickable link back to cover
         page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
@@ -435,7 +452,7 @@ if gen_pdf:
     }
     add_cover_links(main_doc, cover_rects_mm, targets, IPMA_URL)
 
-    # Add tiny ⮌-style back chip to every page except cover
+    # Add subtle ⮌ chip to every page except cover
     add_back_to_index_badge(main_doc)
 
     # Export
