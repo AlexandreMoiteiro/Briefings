@@ -1,6 +1,6 @@
 # app.py — Briefings (sem IA) — A4 Landscape
 # Ordem: Capa → Charts → Flight Plan → Rotas → NOTAMs → Mass & Balance
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import io, os, tempfile
 import streamlit as st
 from PIL import Image
@@ -11,26 +11,26 @@ import fitz  # PyMuPDF
 st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown("""
 <style>
-:root { --muted:#6b7280; --line:#e5e7eb; --ink:#0f172a; --bg:#ffffff; }
-.app-top { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; margin:.25rem 0 .5rem }
+:root { --muted:#6b7280; --line:#e5e7eb; --ink:#0f172a; --bg:#ffffff; --chip:#f8fafc; --accent:#5a7fb3; }
+.app-top { display:flex; align-items:center; justify-content:space-between; gap:.75rem; flex-wrap:wrap; margin:.25rem 0 .75rem }
 .app-title { font-size: 2.2rem; font-weight: 800; margin: 0 }
-.btnbar a{display:inline-block;padding:6px 10px;border:1px solid var(--line);
-  border-radius:8px;text-decoration:none;font-weight:600;color:#111827;background:#f8fafc}
+.btnbar a{display:inline-block;padding:6px 10px;border:1px solid var(--line);border-radius:8px;text-decoration:none;
+  font-weight:600;color:#111827;background:var(--chip)}
 .btnbar a:hover{background:#f1f5f9}
-.section-card{ border:1px solid var(--line); border-radius:14px; padding:14px 16px; background:var(--bg); }
 hr{border:none;border-top:1px solid var(--line); margin:12px 0}
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
 [data-testid="stSidebarCollapseButton"] { display:none !important; }
 header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
+.cardhint{color:var(--muted);font-size:.92rem;margin-top:.2rem}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Links topo ----------
-IPMA_URL = "https://brief-ng.ipma.pt/#showLogin"
-APP_VFRMAP_URL  = "https://briefings.streamlit.app/VFRMap"
-APP_MNB_URL     = "https://briefings.streamlit.app/MassBalance"
-APP_NAV_LOG     = "https://briefings.streamlit.app/NavLog"
-APP_JPG         = "https://briefings.streamlit.app/JPG"
+# ---------- Links topo (apps externas) ----------
+IPMA_URL       = "https://brief-ng.ipma.pt/#showLogin"
+APP_VFRMAP_URL = "https://briefings.streamlit.app/VFRMap"
+APP_MNB_URL    = "https://briefings.streamlit.app/MassBalance"
+APP_NAV_LOG    = "https://briefings.streamlit.app/NavLog"
+APP_JPG        = "https://briefings.streamlit.app/JPG"
 
 st.markdown(
     f'''<div class="app-top">
@@ -57,7 +57,7 @@ def read_upload_bytes(upload) -> bytes:
     except Exception: return b""
 
 def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
-    """Aceita PDF/PNG/JPG/JPEG/GIF e devolve bytes PNG (primeira página no caso de PDF)."""
+    """Aceita PDF/PNG/JPG/JPEG/GIF e devolve PNG (para PDF usa 1.ª pág.)."""
     try:
         m = (mime or "").lower()
         if m == "application/pdf":
@@ -89,6 +89,9 @@ def image_bytes_to_pdf_bytes_fullbleed(img_bytes: bytes, orientation: str = "L")
 def fpdf_to_bytes(doc: FPDF) -> bytes:
     data = doc.output(dest="S")
     return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
+
+def mm_to_pt(mm: float) -> float:
+    return mm * 72.0 / 25.4
 
 # ---------- Charts helpers ----------
 _KIND_RANK = {"SIGWX": 1, "SPC": 2, "Wind & Temp": 3, "Other": 9}
@@ -127,7 +130,7 @@ class BriefPDF(FPDF):
         self.cell(0, 12, text, ln=True, align="C", border="B")
 
     def add_fullbleed_image(self, img_png: io.BytesIO):
-        # adiciona a imagem na página atual (já em landscape) com margens superiores p/ cabeçalho
+        # imagem na página atual com margens p/ cabeçalho
         max_w = self.w - 22; max_h = self.h - 58
         img = Image.open(img_png); iw, ih = img.size
         r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
@@ -137,17 +140,13 @@ class BriefPDF(FPDF):
         self.image(path, x=x, y=y, w=w, h=h); os.remove(path)
         self.ln(h + 10)
 
-    def section_cover(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc,
-                      links: Dict[str, int], ext_ipma_url: str):
+    def cover_with_cards(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc) -> List[Dict[str, Any]]:
+        """
+        Devolve lista de cartões: [{"key":..., "rect_mm":(x,y,w,h)}] para linkar depois com PyMuPDF.
+        Layout: 2 col x 3 linhas, cartões com fundo suave.
+        """
         self.add_page(orientation="L")
-        # Pré-atribuir temporariamente destinos aos links (atualizados nas secções)
-        for k, lid in (links or {}).items():
-            try:
-                self.set_link(lid, y=0, page=self.page_no())
-            except Exception:
-                pass
-
-        self.set_xy(0, 22)
+        self.set_xy(0, 20)
         self.set_font("Helvetica","B",30)
         self.cell(0, 16, "Briefing", ln=True, align="C")
 
@@ -157,44 +156,57 @@ class BriefPDF(FPDF):
                       ln=True, align="C")
         if date_str or time_utc:
             self.cell(0, 9, f"Date: {date_str}    UTC: {time_utc}", ln=True, align="C")
+        self.ln(8)
+
+        # Cartões do índice (mais sugestivos)
+        margin_x, margin_y = 18, 65   # posição de topo aproximada
+        col_gap, row_gap = 8, 8
+        cols = 2
+        usable_w = self.w - 2*margin_x
+        box_w = (usable_w - col_gap*(cols-1)) / cols
+        box_h = 24
+
+        labels = [
+            ("ipma",         "METARs, TAFs, SIGMET & GAMET (IPMA)"),
+            ("charts",       "Charts"),
+            ("flight_plan",  "Flight Plan"),
+            ("routes",       "Rotas"),
+            ("notams",       "NOTAMs"),
+            ("mass_balance", "Mass & Balance"),
+        ]
+
+        boxes = []
+        self.set_font("Helvetica","B",13)
+        for i, (key, label) in enumerate(labels):
+            r, c = divmod(i, cols)
+            x = margin_x + c*(box_w + col_gap)
+            y = margin_y + r*(box_h + row_gap)
+
+            # cartão
+            self.set_draw_color(210, 214, 219)
+            self.set_fill_color(241, 245, 249)  # cinza-claro
+            self.rect(x, y, box_w, box_h, style="DF")
+
+            # texto
+            self.set_text_color(15, 23, 42)
+            self.set_xy(x+6, y+7)  # padding
+            self.cell(box_w-12, 8, label, ln=False, align="L")
+
+            # setinha decorativa (→)
+            self.set_text_color(PASTEL[0], PASTEL[1], PASTEL[2])
+            self.set_xy(x+box_w-12, y+7)
+            self.cell(8, 8, "→", ln=False, align="R")
+            self.set_text_color(0,0,0)
+
+            boxes.append({"key": key, "rect_mm": (x, y, box_w, box_h)})
+
         self.ln(6)
-
-        # Índice
-        left = 30
-        lh = 9
-        self.set_font("Helvetica","B",14); self.cell(0,10,"Índice", ln=True, align="C")
-        self.set_font("Helvetica","",12)
-
-        # 1. IPMA (externo)
-        self.set_text_color(20,40,120)
-        self.set_xy(left, self.get_y()); self.cell(0, lh, "METARs, TAFs, SIGMET & GAMET (IPMA)", link=ext_ipma_url, ln=True)
+        self.set_font("Helvetica","I",10)
+        self.set_text_color(100,100,100)
+        self.cell(0,6,"Toque / clique num cartão para abrir a secção.", ln=True, align="C")
         self.set_text_color(0,0,0)
 
-        def item(label: str, key: str):
-            link_id = links.get(key)
-            self.set_xy(left, self.get_y())
-            if link_id:
-                self.cell(0, lh, label, link=link_id, ln=True)
-            else:
-                self.cell(0, lh, label, ln=True)
-
-        item("Charts", "charts")
-        item("Flight Plan", "flight_plan")
-        item("Rotas", "routes")
-        item("NOTAMs", "notams")
-        item("Mass & Balance", "mass_balance")
-
-    def section_anchor(self, title: str, link_id: int) -> int:
-        self.add_page(orientation="L")
-        self.draw_header_band(title)
-        # Atualiza destino real do link interno para esta página
-        self.set_link(link_id, y=self.get_y(), page=self.page_no())
-        return self.page_no()
-
-    def route_header(self, route_label: str) -> int:
-        self.add_page(orientation="L")
-        self.draw_header_band(f"Rota — {route_label}")
-        return self.page_no()
+        return boxes
 
 # ---------- UI: Abas ----------
 tab_mission, tab_charts, tab_fpmb, tab_pairs, tab_notams, tab_generate = st.tabs(
@@ -202,15 +214,17 @@ tab_mission, tab_charts, tab_fpmb, tab_pairs, tab_notams, tab_generate = st.tabs
 )
 
 # Missão
+REG_LIST = ["CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW","CS-ECC","CS-ECD"]
+
 with tab_mission:
     st.markdown("### Dados da Missão")
     colA, colB, colC = st.columns(3)
     with colA:
         pilot = st.text_input("Pilot name", "Alexandre Moiteiro")
-        callsign = st.text_input("Mission callsign", "")
+        callsign = st.text_input("Mission callsign", "RVP")  # padrão = RVP
     with colB:
         aircraft_type = st.text_input("Aircraft type", "Tecnam P2008")
-        registration = st.text_input("Registration", "CS-XXX")
+        registration = st.selectbox("Registration", REG_LIST, index=0)
     with colC:
         mission_no = st.text_input("Mission number", "")
         flight_date = st.date_input("Flight date")
@@ -278,12 +292,14 @@ with tab_notams:
     notams_upload = st.file_uploader("NOTAMs (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
 
 # Gerar
-with tab_generate:
+with st.tabs(["Gerar"])[0]:
     gen_pdf = st.button("Generate PDF")
 
-# ---------- Inserções com PyMuPDF ----------
-def open_upload_as_pdf(upload, orientation_for_images="L") -> fitz.Document:
+# ---------- Helpers PyMuPDF ----------
+def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Document]:
+    if upload is None: return None
     raw = read_upload_bytes(upload)
+    if not raw: return None
     mime = (getattr(upload, "type", "") or "").lower()
     if mime == "application/pdf":
         return fitz.open(stream=raw, filetype="pdf")
@@ -291,32 +307,12 @@ def open_upload_as_pdf(upload, orientation_for_images="L") -> fitz.Document:
     ext_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation=orientation_for_images)
     return fitz.open(stream=ext_bytes, filetype="pdf")
 
-def insert_uploads_after_page(doc: fitz.Document, page_no_1based: int, uploads: List):
-    """Insere cada upload APÓS a página page_no_1based, preservando a ordem fornecida."""
-    if not uploads: return
-    start_at = page_no_1based  # PyMuPDF é 0-based; after page P (1-based) => start_at = P
-    for up in uploads:
-        if up is None: continue
-        ext = open_upload_as_pdf(up, orientation_for_images="L")
-        doc.insert_pdf(ext, start_at=start_at)
-        start_at += ext.page_count
-        ext.close()
-
-# ---------- Geração do PDF (ordem pedida) ----------
+# ---------- Geração do PDF (ordem pedida, sem páginas vazias) ----------
 if gen_pdf:
     pdf = BriefPDF(orientation="L", unit="mm", format="A4")
 
-    # Links internos (um único FPDF para tudo!)
-    links = {
-        "charts": pdf.add_link(),
-        "flight_plan": pdf.add_link(),
-        "routes": pdf.add_link(),
-        "notams": pdf.add_link(),
-        "mass_balance": pdf.add_link(),
-    }
-
-    # CAPA (com índice e link IPMA)
-    pdf.section_cover(
+    # 1) CAPA com cartões (sem links ainda — serão adicionados via PyMuPDF)
+    index_cards = pdf.cover_with_cards(
         mission_no=safe_str(locals().get("mission_no","")),
         pilot=safe_str(locals().get("pilot","")),
         aircraft=safe_str(locals().get("aircraft_type","")),
@@ -324,60 +320,120 @@ if gen_pdf:
         reg=safe_str(locals().get("registration","")),
         date_str=safe_str(locals().get("flight_date","")),
         time_utc=safe_str(locals().get("time_utc","")),
-        links=links,
-        ext_ipma_url=IPMA_URL
     )
 
-    # CHARTS (âncora + páginas dos charts)
-    charts_anchor_page = pdf.section_anchor("Charts", links["charts"])
+    # 2) CHARTS (páginas renderizadas aqui no FPDF)
     charts_local: List[Dict[str,Any]] = locals().get("charts", [])
+    charts_start_page = None
     if charts_local:
-        for c in sorted(charts_local, key=chart_sort_key):
+        for i, c in enumerate(sorted(charts_local, key=chart_sort_key)):
             pdf.add_page(orientation="L")
+            if charts_start_page is None:
+                charts_start_page = pdf.page_no()-1  # 0-based para PyMuPDF
             pdf.draw_header_band(c["title"] or "Chart")
             if c.get("subtitle"):
                 pdf.set_font("Helvetica","I",12); pdf.cell(0,9,c["subtitle"], ln=True, align="C")
             pdf.add_fullbleed_image(c["img_png"])
-    else:
-        pdf.set_font("Helvetica","I",12); pdf.ln(6); pdf.cell(0,8,"(Sem charts carregados)", ln=True, align="C")
 
-    # FLIGHT PLAN (âncora; ficheiro será inserido depois)
-    fp_anchor_page = pdf.section_anchor("Flight Plan", links["flight_plan"])
-
-    # ROTAS (âncora + cabeçalhos por rota; ficheiros inseridos depois)
-    routes_anchor_page = pdf.section_anchor("Rotas", links["routes"])
-    routes_pages: List[Tuple[int, Any, Any]] = []  # [(page_no, nav_upload, vfr_upload)]
-    nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
-    for p in (nav_pairs or []):
-        route_label = (p.get("route") or "ROTA").strip().upper() or "ROTA"
-        page_no = pdf.route_header(route_label)
-        routes_pages.append((page_no, p.get("nav"), p.get("vfr")))
-
-    # NOTAMs (âncora)
-    notams_anchor_page = pdf.section_anchor("NOTAMs", links["notams"])
-
-    # M&B (âncora)
-    mb_anchor_page = pdf.section_anchor("Mass & Balance", links["mass_balance"])
-
-    # Exportar esqueleto (com links corretos) e inserir anexos após as páginas-âncora
+    # Exportar esqueleto (capa + charts)
     skeleton_bytes = fpdf_to_bytes(pdf)
-    main_doc = fitz.open(stream=skeleton_bytes, filetype="pdf")
+    doc = fitz.open(stream=skeleton_bytes, filetype="pdf")
 
-    # Inserir em ordem inversa de secções (para não deslocar índices anteriores)
-    # 1) M&B
-    insert_uploads_after_page(main_doc, mb_anchor_page, [locals().get("mb_upload")])
-    # 2) NOTAMs
-    insert_uploads_after_page(main_doc, notams_anchor_page, [locals().get("notams_upload")])
-    # 3) Rotas (da última para a primeira)
-    for page_no, nav_up, vfr_up in reversed(routes_pages):
-        insert_uploads_after_page(main_doc, page_no, [nav_up, vfr_up])
-    # 4) Flight Plan
-    insert_uploads_after_page(main_doc, fp_anchor_page, [locals().get("fp_upload")])
-    # (Charts já estão no FPDF)
+    # Página de referência (capa) em PyMuPDF é 0
+    cover_page = doc[0]
+
+    # 3) Inserir embebidos — Flight Plan → Rotas → NOTAMs → M&B
+    insert_pos = doc.page_count  # vamos inserindo no fim (depois dos charts)
+
+    # Flight Plan
+    fp_start_page = None
+    _fp_doc = open_upload_as_pdf(locals().get("fp_upload"))
+    if _fp_doc:
+        fp_start_page = insert_pos
+        doc.insert_pdf(_fp_doc, start_at=insert_pos); insert_pos += _fp_doc.page_count; _fp_doc.close()
+
+    # Rotas (para cada par, inserir nav e vfr; sem páginas em branco)
+    routes_start_page = None
+    nav_pairs: List[Dict[str, Any]] = locals().get("pairs", [])
+    for idx, p in enumerate(nav_pairs or []):
+        nav_up, vfr_up = p.get("nav"), p.get("vfr")
+        # se nenhum dos dois, salta
+        if not nav_up and not vfr_up:
+            continue
+        if routes_start_page is None:
+            routes_start_page = insert_pos
+        for up in [nav_up, vfr_up]:
+            ext = open_upload_as_pdf(up)
+            if ext:
+                doc.insert_pdf(ext, start_at=insert_pos)
+                insert_pos += ext.page_count
+                ext.close()
+
+    # NOTAMs
+    notams_start_page = None
+    _nt_doc = open_upload_as_pdf(locals().get("notams_upload"))
+    if _nt_doc:
+        notams_start_page = insert_pos
+        doc.insert_pdf(_nt_doc, start_at=insert_pos); insert_pos += _nt_doc.page_count; _nt_doc.close()
+
+    # M&B
+    mb_start_page = None
+    _mb_doc = open_upload_as_pdf(locals().get("mb_upload"))
+    if _mb_doc:
+        mb_start_page = insert_pos
+        doc.insert_pdf(_mb_doc, start_at=insert_pos); insert_pos += _mb_doc.page_count; _mb_doc.close()
+
+    # 4) Links clicáveis nos cartões do índice (PyMuPDF)
+    #    Reconstituímos as caixas (mm -> pt) no cover e apontamos para a 1.ª página real de cada secção.
+    targets: Dict[str, Optional[int]] = {
+        "ipma": None,  # externo (URI)
+        "charts": charts_start_page if charts_start_page is not None else (1 if doc.page_count > 1 else None),
+        "flight_plan": fp_start_page,
+        "routes": routes_start_page,
+        "notams": notams_start_page,
+        "mass_balance": mb_start_page,
+    }
+
+    for card in index_cards:
+        key = card["key"]
+        x_mm, y_mm, w_mm, h_mm = card["rect_mm"]
+        # converter para pontos (fitz usa pt; origem topo-esquerda)
+        rect = fitz.Rect(
+            mm_to_pt(x_mm), mm_to_pt(y_mm),
+            mm_to_pt(x_mm + w_mm), mm_to_pt(y_mm + h_mm)
+        )
+        if key == "ipma":
+            cover_page.insert_link({
+                "kind": fitz.LINK_URI,
+                "from": rect,
+                "uri": IPMA_URL
+            })
+        else:
+            dest_page = targets.get(key)
+            if dest_page is not None and 0 <= dest_page < doc.page_count:
+                cover_page.insert_link({
+                    "kind": fitz.LINK_GOTO,
+                    "from": rect,
+                    "page": int(dest_page),
+                    "to": fitz.Point(0,0),
+                    "zoom": 0
+                })
+            # caso não haja conteúdo, deixamos o cartão sem link
+
+    # (Opcional) Marcadores/TOC
+    toc = []
+    toc.append([1, "Charts", (charts_start_page or 1)+1 if doc.page_count>1 else 1])
+    if fp_start_page is not None:     toc.append([1, "Flight Plan",  fp_start_page+1])
+    if routes_start_page is not None: toc.append([1, "Rotas",        routes_start_page+1])
+    if notams_start_page is not None: toc.append([1, "NOTAMs",       notams_start_page+1])
+    if mb_start_page is not None:     toc.append([1, "Mass & Balance", mb_start_page+1])
+    if toc:
+        try: doc.set_toc(toc)
+        except Exception: pass
 
     # Exportar
-    final_bytes = main_doc.tobytes()
-    main_doc.close()
+    final_bytes = doc.tobytes()
+    doc.close()
 
     final_name = f"Briefing - Missao {safe_str(locals().get('mission_no') or 'X')}.pdf"
     st.download_button("Download PDF", data=final_bytes, file_name=final_name,
