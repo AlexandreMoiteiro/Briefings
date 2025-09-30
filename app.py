@@ -1,3 +1,4 @@
+
 # app.py — Briefings (sem IA) — A4 Landscape
 # Ordem: Capa → Charts → Flight Plan → Rotas → NOTAMs → Mass & Balance
 from typing import Dict, Any, List, Tuple, Optional
@@ -131,6 +132,7 @@ class BriefPDF(FPDF):
         self.cell(0, 12, text, ln=True, align="C", border="B")
 
     def add_fullbleed_image(self, img_png: io.BytesIO):
+        # imagem na página atual (landscape) com margem p/ cabeçalho
         max_w = self.w - 22; max_h = self.h - 58
         img = Image.open(img_png); iw, ih = img.size
         r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
@@ -140,71 +142,73 @@ class BriefPDF(FPDF):
         self.image(path, x=x, y=y, w=w, h=h); os.remove(path)
         self.ln(h + 10)
 
-    def cover_with_index(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc
-                         ) -> Dict[str, Tuple[float,float,float,float]]:
+    def cover_with_simple_index(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc) -> Dict[str, Tuple[float,float,float,float]]:
         """
-        Capa com índice simples e chamativo (lista vertical grande).
-        Devolve rectângulos (mm) para: ipma, charts, flight_plan, routes, notams, mass_balance
+        Capa minimal com lista grande e marcadores.
+        Devolve rectângulos (mm) clicáveis para: ipma, charts, flight_plan, routes, notams, mass_balance
         """
         self.add_page(orientation="L")
 
-        # Cabeçalho
-        self.set_xy(0, 22)
-        self.set_font("Helvetica","B",30)
+        # Título / info
+        self.set_xy(0, 20)
+        self.set_font("Helvetica","B",32)
         self.cell(0, 16, "Briefing", ln=True, align="C")
 
         self.set_font("Helvetica","",14)
-        if any([mission_no, pilot, aircraft, callsign, reg]):
-            self.cell(0, 9, f"Mission: {mission_no}    Pilot: {pilot}    Aircraft: {aircraft}    Callsign: {callsign}    Reg: {reg}",
-                      ln=True, align="C")
+        info = []
+        if mission_no: info.append(f"Mission: {mission_no}")
+        if pilot: info.append(f"Pilot: {pilot}")
+        if aircraft: info.append(f"Aircraft: {aircraft}")
+        if callsign: info.append(f"Callsign: {callsign}")
+        if reg: info.append(f"Reg: {reg}")
+        if info:
+            self.cell(0, 9, "   ".join(info), ln=True, align="C")
         if date_str or time_utc:
-            self.cell(0, 9, f"Date: {date_str}    UTC: {time_utc}", ln=True, align="C")
-        self.ln(10)
+            self.cell(0, 9, f"Date: {date_str}   UTC: {time_utc}", ln=True, align="C")
 
-        # Índice — simples, grande, com barra lateral colorida
-        self.set_font("Helvetica","B",18)
+        # Índice simples
+        self.ln(8)
+        self.set_font("Helvetica","B",16)
         self.cell(0, 10, "Índice", ln=True, align="C")
         self.ln(2)
 
-        left = 34.0
-        top  = 80.0
-        w    = self.w - 2*left
-        lh   = 14.0
-        gap  = 6.0
-
-        items = [
-            ("ipma",         "METARs, TAFs, SIGMET & GAMET — IPMA"),
-            ("charts",       "Charts"),
-            ("flight_plan",  "Flight Plan"),
-            ("routes",       "Rotas"),
-            ("notams",       "NOTAMs"),
+        labels = [
+            ("ipma", "METARs, TAFs, SIGMET & GAMET"),
+            ("charts", "Charts"),
+            ("flight_plan", "Flight Plan"),
+            ("routes", "Rotas"),
+            ("notams", "NOTAMs"),
             ("mass_balance", "Mass & Balance"),
         ]
 
         rects_mm: Dict[str, Tuple[float,float,float,float]] = {}
-        y = top
-        for key, label in items:
-            # barra lateral
-            self.set_fill_color(*PASTEL); self.rect(left, y, 2.8, lh, style="F")
-            # fundo leve
-            self.set_draw_color(220,224,228); self.set_fill_color(245,247,250)
-            self.rect(left+2.8, y, w-2.8, lh, style="DF")
+
+        x_bullet = 40.0
+        x_label  = 50.0
+        y        = 80.0
+        step     = 14.0
+        bullet_s = 5.0
+
+        for key, label in labels:
+            # marcador
+            self.set_fill_color(*PASTEL)
+            self.rect(x_bullet, y - bullet_s, bullet_s, bullet_s, style="F")
             # texto
-            self.set_text_color(15,23,42)
-            self.set_xy(left+8, y+ (lh/2 - 5))
-            self.set_font("Helvetica","B",14)
-            self.cell(w-12, 10, label, ln=False, align="L")
-            # guardar rect para link
-            rects_mm[key] = (left, y, w, lh)
-            y += lh + gap
+            self.set_xy(x_label, y - 6.5)
+            self.set_font("Helvetica","B",18)
+            self.set_text_color(15, 23, 42)
+            self.cell(0, 13, label, ln=True, align="L")
+            # sub-linha discreta
+            self.set_draw_color(220,224,228)
+            self.set_line_width(0.3)
+            self.line(x_label, y + 6.0, x_label + 200.0, y + 6.0)
+            # rect clicável (largura fixa para não falhar o clique)
+            rects_mm[key] = (x_label - 2.0, y - 7.0, 205.0, 14.0)
+            # próximo
+            y += step
 
-        # rodapé de nota
-        self.set_text_color(100,100,100)
-        self.set_font("Helvetica","I",10)
-        self.set_xy(left, y+2)
-        self.cell(0,6,"Clique num item para abrir a secção correspondente. O primeiro abre o IPMA.", ln=True)
+        # reset cor
         self.set_text_color(0,0,0)
-
         return rects_mm
 
 # ---------- UI: Abas ----------
@@ -301,46 +305,46 @@ def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Docu
     mime = (getattr(upload, "type", "") or "").lower()
     if mime == "application/pdf":
         return fitz.open(stream=raw, filetype="pdf")
+    # imagem -> pdf
     ext_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation=orientation_for_images)
     return fitz.open(stream=ext_bytes, filetype="pdf")
 
 def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,float,float]], targets: Dict[str, Optional[int]], ipma_url: str):
-    """Adiciona anotações de link na capa (página 0) com base nos rectângulos em mm e páginas alvo (0-based)."""
+    """Links clicáveis na capa (página 0), usando rectângulos em mm e páginas alvo (0-based)."""
     if doc.page_count == 0: return
     page0 = doc.load_page(0)
-    for key, rect_mm in rects_mm.items():
-        x, y, w, h = rect_mm
+    for key, (x, y, w, h) in rects_mm.items():
         rect = fitz.Rect(mm_to_pt(x), mm_to_pt(y), mm_to_pt(x+w), mm_to_pt(y+h))
         if key == "ipma":
             page0.insert_link({"kind": fitz.LINK_URI, "from": rect, "uri": ipma_url})
         else:
             target = targets.get(key)
-            if isinstance(target, int):
-                page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": target})
+            if target is not None:
+                page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
 
 # ---------- Geração do PDF ----------
 if gen_pdf:
     pdf = BriefPDF(orientation="L", unit="mm", format="A4")
 
-    # CAPA com índice simples (guardar rects para links)
-    cover_rects_mm = pdf.cover_with_index(
+    # CAPA (índice simples e chamativo)
+    cover_rects_mm = pdf.cover_with_simple_index(
         mission_no=safe_str(locals().get("mission_no","")),
         pilot=safe_str(locals().get("pilot","")),
         aircraft=safe_str(locals().get("aircraft_type","")),
-        callsign=safe_str(locals().get("callsign","RVP")),
+        callsign=safe_str(locals().get("callsign","")),
         reg=safe_str(locals().get("registration","")),
         date_str=safe_str(locals().get("flight_date","")),
         time_utc=safe_str(locals().get("time_utc",""))
     )
 
-    # CHARTS (páginas reais; o link vai para a primeira destas)
+    # CHARTS (logo após a capa)
     charts_local: List[Dict[str,Any]] = locals().get("charts", [])
     charts_first_page0: Optional[int] = None
     if charts_local:
-        for c in sorted(charts_local, key=chart_sort_key):
+        for idx, c in enumerate(sorted(charts_local, key=chart_sort_key)):
             pdf.add_page(orientation="L")
             if charts_first_page0 is None:
-                charts_first_page0 = pdf.page_no() - 1  # 0-based no PyMuPDF
+                charts_first_page0 = pdf.page_no() - 1  # 0-based na exportação
             pdf.draw_header_band(c["title"] or "Chart")
             if c.get("subtitle"):
                 pdf.set_font("Helvetica","I",12); pdf.cell(0,9,c["subtitle"], ln=True, align="C")
@@ -350,14 +354,11 @@ if gen_pdf:
     skeleton_bytes = fpdf_to_bytes(pdf)
     main_doc = fitz.open(stream=skeleton_bytes, filetype="pdf")
 
-    # Apontadores de início (0-based) antes de inserir anexos
+    # Posição de append
     current_page_count = main_doc.page_count
-    fp_start_page = None
-    routes_start_page = None
-    notams_start_page = None
-    mb_start_page = None
 
     # FLIGHT PLAN
+    fp_start_page = None
     fp_doc = open_upload_as_pdf(locals().get("fp_upload"))
     if fp_doc:
         fp_start_page = current_page_count
@@ -365,7 +366,8 @@ if gen_pdf:
         current_page_count += fp_doc.page_count
         fp_doc.close()
 
-    # ROTAS (concatena nav+vfr de cada rota, o link aponta ao 1º que existir)
+    # ROTAS (concatenar nav+vfr de cada rota)
+    routes_start_page = None
     pairs_local: List[Dict[str, Any]] = locals().get("pairs", [])
     for p in (pairs_local or []):
         for up in [p.get("nav"), p.get("vfr")]:
@@ -378,6 +380,7 @@ if gen_pdf:
                 ext.close()
 
     # NOTAMs
+    notams_start_page = None
     notams_doc = open_upload_as_pdf(locals().get("notams_upload"))
     if notams_doc:
         notams_start_page = current_page_count
@@ -386,6 +389,7 @@ if gen_pdf:
         notams_doc.close()
 
     # M&B
+    mb_start_page = None
     mb_doc = open_upload_as_pdf(locals().get("mb_upload"))
     if mb_doc:
         mb_start_page = current_page_count
@@ -393,10 +397,10 @@ if gen_pdf:
         current_page_count += mb_doc.page_count
         mb_doc.close()
 
-    # Adicionar links clicáveis aos itens do índice (capa = página 0)
+    # Links clicáveis na capa (página 0)
     targets = {
-        "ipma": None,
-        "charts": charts_first_page0 if charts_first_page0 is not None else None,
+        "ipma": None,  # externo
+        "charts": charts_first_page0,
         "flight_plan": fp_start_page,
         "routes": routes_start_page,
         "notams": notams_start_page,
@@ -411,6 +415,5 @@ if gen_pdf:
     final_name = f"Briefing - Missao {safe_str(locals().get('mission_no') or 'X')}.pdf"
     st.download_button("Download PDF", data=final_bytes, file_name=final_name,
                        mime="application/pdf", use_container_width=True)
-
 
 
