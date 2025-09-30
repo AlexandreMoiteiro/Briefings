@@ -1,5 +1,5 @@
-# app.py — Briefings (sem IA) — A4 Landscape
-# Ordem: Capa → Charts → Flight Plan → Rotas → NOTAMs → Mass & Balance
+# app.py — Briefings (no AI) — A4 Landscape
+# Order: Cover → Charts → Flight Plan → Routes → NOTAMs → Mass & Balance
 from typing import Dict, Any, List, Tuple, Optional
 import io, os, tempfile
 import streamlit as st
@@ -7,7 +7,7 @@ from PIL import Image
 from fpdf import FPDF
 import fitz  # PyMuPDF
 
-# ---------- Config página & estilos ----------
+# ---------- Page config & styles ----------
 st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown("""
 <style>
@@ -23,7 +23,7 @@ header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Links topo ----------
+# ---------- Top links ----------
 IPMA_URL = "https://brief-ng.ipma.pt/#showLogin"
 APP_VFRMAP_URL  = "https://briefings.streamlit.app/VFRMap"
 APP_MNB_URL     = "https://briefings.streamlit.app/MassBalance"
@@ -55,7 +55,7 @@ def read_upload_bytes(upload) -> bytes:
     except Exception: return b""
 
 def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
-    """Aceita PDF/PNG/JPG/JPEG/GIF e devolve bytes PNG (primeira página no caso de PDF)."""
+    """Accept PDF/PNG/JPG/JPEG/GIF and return PNG bytes (first page if PDF)."""
     try:
         m = (mime or "").lower()
         if m == "application/pdf":
@@ -67,12 +67,11 @@ def ensure_png_from_bytes(file_bytes: bytes, mime: str) -> io.BytesIO:
             img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
             out = io.BytesIO(); img.save(out, "PNG"); out.seek(0); return out
     except Exception:
-        from PIL import Image as PILImage
-        ph = PILImage.new("RGB", (1200, 800), (245, 246, 248))
+        ph = Image.new("RGB", (1200, 800), (245, 246, 248))
         out = io.BytesIO(); ph.save(out, "PNG"); out.seek(0); return out
 
 def image_bytes_to_pdf_bytes_fullbleed(img_bytes: bytes, orientation: str = "L") -> bytes:
-    """Imagem -> 1 página PDF full-bleed A4 (landscape)."""
+    """Image -> single-page full-bleed A4 PDF (landscape)."""
     doc = FPDF(orientation=orientation, unit="mm", format="A4")
     doc.add_page(orientation=orientation)
     max_w, max_h = doc.w, doc.h
@@ -129,7 +128,7 @@ class BriefPDF(FPDF):
         self.cell(0, 12, text, ln=True, align="C", border="B")
 
     def add_fullbleed_image(self, img_png: io.BytesIO):
-        # imagem na página atual (landscape) com margem p/ cabeçalho
+        # place image on current (landscape) page with top margin for header
         max_w = self.w - 22; max_h = self.h - 58
         img = Image.open(img_png); iw, ih = img.size
         r = min(max_w / iw, max_h / ih); w, h = int(iw * r), int(ih * r)
@@ -142,12 +141,12 @@ class BriefPDF(FPDF):
     def cover_with_numbered_index(self, mission_no, pilot, aircraft, callsign, reg, date_str, time_utc
                                   ) -> Dict[str, Tuple[float,float,float,float]]:
         """
-        Capa com índice minimal mas chamativo: números grandes 01–06 + rótulos.
-        Devolve rectângulos (mm) clicáveis para: ipma, charts, flight_plan, routes, notams, mass_balance
+        Cover with a clean numbered index (01–06).
+        Returns clickable rectangles (mm) for: ipma, charts, flight_plan, routes, notams, mass_balance
         """
         self.add_page(orientation="L")
 
-        # Título / info
+        # Title / info
         self.set_xy(0, 20)
         self.set_font("Helvetica","B",32)
         self.cell(0, 16, "Briefing", ln=True, align="C")
@@ -166,14 +165,14 @@ class BriefPDF(FPDF):
 
         self.ln(8)
         self.set_font("Helvetica","B",16)
-        self.cell(0, 10, "Índice", ln=True, align="C")
+        self.cell(0, 10, "Index", ln=True, align="C")
         self.ln(2)
 
         items = [
             ("ipma", "METARs, TAFs, SIGMET & GAMET (IPMA)"),
             ("charts", "Charts"),
             ("flight_plan", "Flight Plan"),
-            ("routes", "Rotas"),
+            ("routes", "Routes"),
             ("notams", "NOTAMs"),
             ("mass_balance", "Mass & Balance"),
         ]
@@ -187,7 +186,7 @@ class BriefPDF(FPDF):
 
         for i, (key, label) in enumerate(items, start=1):
             num = f"{i:02d}"
-            # número grande à esquerda
+            # big number
             self.set_text_color(*PASTEL)
             self.set_xy(x_num, y-8)
             self.set_font("Helvetica","B",28)
@@ -197,24 +196,24 @@ class BriefPDF(FPDF):
             self.set_xy(x_lbl, y-6)
             self.set_font("Helvetica","B",18)
             self.cell(0, 13, label, ln=1)
-            # sub-linha
+            # divider
             self.set_draw_color(220,224,228); self.set_line_width(0.3)
             self.line(x_lbl, y + 6.5, x_lbl + 210.0, y + 6.5)
-            # rect clicável
+            # clickable rect
             rects_mm[key] = (x_lbl - 2.0, y - 7.0, 215.0, 14.0)
             y += step
 
         self.set_text_color(0,0,0)
         return rects_mm
 
-# ---------- UI: Abas ----------
+# ---------- UI: Tabs ----------
 tab_mission, tab_charts, tab_fpmb, tab_pairs, tab_notams, tab_generate = st.tabs(
-    ["Missão", "Charts", "Flight Plan & M&B", "Rotas", "NOTAMs", "Gerar PDF"]
+    ["Mission", "Charts", "Flight Plan & M&B", "Routes", "NOTAMs", "Generate PDF"]
 )
 
-# Missão
+# Mission
 with tab_mission:
-    st.markdown("### Dados da Missão")
+    st.markdown("### Mission")
     colA, colB, colC = st.columns(3)
     with colA:
         pilot = st.text_input("Pilot name", "Alexandre Moiteiro")
@@ -231,8 +230,8 @@ with tab_mission:
 # Charts
 with tab_charts:
     st.markdown("### Charts")
-    st.caption("Carrega SIGWX / Surface Pressure (SPC) / Winds & Temps / Outros. Aceita PDF/PNG/JPG/JPEG/GIF.")
-    preview_w = st.slider("Largura da pré-visualização (px)", min_value=240, max_value=640, value=460, step=10)
+    st.caption("Upload SIGWX / Surface Pressure (SPC) / Winds & Temps / Other. Accepts PDF/PNG/JPG/JPEG/GIF (PDF uses first page).")
+    preview_w = st.slider("Preview width (px)", min_value=240, max_value=640, value=460, step=10)
     uploads = st.file_uploader("Upload charts", type=["pdf","png","jpg","jpeg","gif"], accept_multiple_files=True)
 
     charts: List[Dict[str,Any]] = []
@@ -240,20 +239,20 @@ with tab_charts:
         for idx, f in enumerate(uploads):
             raw = read_upload_bytes(f); mime = f.type or ""
             img_png = ensure_png_from_bytes(raw, mime)
-            name = safe_str(getattr(f, "name", "")) or "(sem nome)"
+            name = safe_str(getattr(f, "name", "")) or "(untitled)"
             col_img, col_meta = st.columns([0.5, 0.5])
             with col_img:
                 try: st.image(img_png.getvalue(), caption=name, width=preview_w)
                 except Exception: st.write(name)
             with col_meta:
                 kind_guess = guess_chart_kind_from_name(name)
-                kind = st.selectbox(f"Tipo do chart #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"],
+                kind = st.selectbox(f"Chart type #{idx+1}", ["SIGWX","SPC","Wind & Temp","Other"],
                                     index=["SIGWX","SPC","Wind & Temp","Other"].index(kind_guess),
                                     key=f"kind_{idx}")
                 title_default = default_title_for_kind(kind)
-                title = st.text_input("Título", value=title_default, key=f"title_{idx}")
-                subtitle = st.text_input("Subtítulo (opcional)", value="", key=f"subtitle_{idx}")
-                order_val = st.number_input("Ordem", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
+                title = st.text_input("Title", value=title_default, key=f"title_{idx}")
+                subtitle = st.text_input("Subtitle (optional)", value="", key=f"subtitle_{idx}")
+                order_val = st.number_input("Order", min_value=1, max_value=len(uploads)+10, value=idx+1, step=1, key=f"ord_{idx}")
             charts.append({"kind": kind, "title": title, "subtitle": subtitle, "img_png": img_png, "order": order_val, "filename": name})
 
 # Flight Plan & M&B
@@ -262,38 +261,38 @@ with tab_fpmb:
     c1, c2 = st.columns(2)
     with c1:
         fp_upload = st.file_uploader("Flight Plan (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
-        if fp_upload: st.success(f"Flight Plan carregado: {safe_str(fp_upload.name)}")
+        if fp_upload: st.success(f"Flight Plan loaded: {safe_str(fp_upload.name)}")
     with c2:
         mb_upload = st.file_uploader("Mass & Balance (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
-        if mb_upload: st.success(f"M&B carregado: {safe_str(mb_upload.name)}")
+        if mb_upload: st.success(f"M&B loaded: {safe_str(mb_upload.name)}")
 
-# Rotas
+# Routes
 with tab_pairs:
-    st.markdown("### Rotas")
-    st.caption("Para cada rota (ex.: LPSO-LPCB) carrega um Navlog e o respetivo mapa VFR. Aceita PDF/PNG/JPG/JPEG.")
-    num_pairs = st.number_input("Número de pares (Rotas)", min_value=0, max_value=10, value=0, step=1)
+    st.markdown("### Routes")
+    st.caption("For each route (e.g., LPSO-LPCB) upload a Navlog and its VFR map. Accepts PDF/PNG/JPG/JPEG.")
+    num_pairs = st.number_input("Number of route pairs", min_value=0, max_value=10, value=0, step=1)
     pairs: List[Dict[str, Any]] = []
     for i in range(int(num_pairs)):
-        with st.expander(f"Rota #{i+1}", expanded=False):
-            route = safe_str(st.text_input("ROTA (ex.: LPSO-LPCB)", key=f"pair_route_{i}")).upper().strip()
+        with st.expander(f"Route #{i+1}", expanded=False):
+            route = safe_str(st.text_input("ROUTE (e.g., LPSO-LPCB)", key=f"pair_route_{i}")).upper().strip()
             c1, c2 = st.columns(2)
             with c1:
-                nav_file = st.file_uploader(f"Navlog ({route or 'ROTA'})", type=["pdf","png","jpg","jpeg"], key=f"pair_nav_{i}")
+                nav_file = st.file_uploader(f"Navlog ({route or 'ROUTE'})", type=["pdf","png","jpg","jpeg"], key=f"pair_nav_{i}")
             with c2:
-                vfr_file = st.file_uploader(f"VFR Map ({route or 'ROTA'})", type=["pdf","png","jpg","jpeg"], key=f"pair_vfr_{i}")
+                vfr_file = st.file_uploader(f"VFR Map ({route or 'ROUTE'})", type=["pdf","png","jpg","jpeg"], key=f"pair_vfr_{i}")
             pairs.append({"route": route, "nav": nav_file, "vfr": vfr_file})
 
-# NOTAMs (PDF/Imagem embutido)
+# NOTAMs
 with tab_notams:
     st.markdown("### NOTAMs")
-    st.caption("Carrega o PDF oficial de NOTAMs (ou imagem). Será inserido no PDF final na secção NOTAMs.")
+    st.caption("Upload the official NOTAMs PDF (or image). It will be appended into the NOTAMs section of the final PDF.")
     notams_upload = st.file_uploader("NOTAMs (PDF/PNG/JPG)", type=["pdf","png","jpg","jpeg"])
 
-# Gerar
+# Generate
 with tab_generate:
     gen_pdf = st.button("Generate PDF")
 
-# ---------- Inserções com PyMuPDF ----------
+# ---------- PyMuPDF helpers ----------
 def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Document]:
     if upload is None: return None
     raw = read_upload_bytes(upload)
@@ -301,13 +300,13 @@ def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Docu
     mime = (getattr(upload, "type", "") or "").lower()
     if mime == "application/pdf":
         return fitz.open(stream=raw, filetype="pdf")
-    # imagem -> pdf
+    # image -> pdf
     ext_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation=orientation_for_images)
     return fitz.open(stream=ext_bytes, filetype="pdf")
 
 def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,float,float]],
                     targets: Dict[str, Optional[int]], ipma_url: str):
-    """Links clicáveis na capa (página 0)."""
+    """Clickable links on the cover (page 0)."""
     if doc.page_count == 0: return
     page0 = doc.load_page(0)
     for key, (x, y, w, h) in rects_mm.items():
@@ -319,27 +318,27 @@ def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float,float,fl
             if target is not None:
                 page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
 
-def add_back_to_index_buttons(doc: fitz.Document, label: str = "← Índice"):
-    """Escreve um pequeno 'botão' de voltar ao índice (pág. 1) em TODAS as páginas excepto a capa."""
+def add_back_to_index_buttons(doc: fitz.Document, label: str = "← Index"):
+    """Adds a small 'back to index' button to every page except the cover."""
     for pno in range(1, doc.page_count):
         page = doc.load_page(pno)
         pw, ph = page.rect.width, page.rect.height
-        # botão no canto superior direito
+        # top-right button
         margin_mm = 8.0
         btn_w_mm, btn_h_mm = 28.0, 10.0
         left = pw - mm_to_pt(margin_mm + btn_w_mm)
         top  = mm_to_pt(margin_mm)
         rect = fitz.Rect(left, top, left + mm_to_pt(btn_w_mm), top + mm_to_pt(btn_h_mm))
-        # texto centrado
+        # text
         page.insert_textbox(rect, label, fontsize=10, fontname="helv", align=1, color=(0,0,0))
-        # link
+        # link to cover
         page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
 
-# ---------- Geração do PDF ----------
+# ---------- PDF generation ----------
 if gen_pdf:
     pdf = BriefPDF(orientation="L", unit="mm", format="A4")
 
-    # CAPA com índice numerado (simples e visível)
+    # COVER with simple numbered index
     cover_rects_mm = pdf.cover_with_numbered_index(
         mission_no=safe_str(locals().get("mission_no","")),
         pilot=safe_str(locals().get("pilot","")),
@@ -350,7 +349,7 @@ if gen_pdf:
         time_utc=safe_str(locals().get("time_utc","")),
     )
 
-    # CHARTS (logo após a capa)
+    # CHARTS (immediately after cover)
     charts_local: List[Dict[str,Any]] = locals().get("charts", [])
     charts_first_page0: Optional[int] = None
     if charts_local:
@@ -363,14 +362,14 @@ if gen_pdf:
                 pdf.set_font("Helvetica","I",12); pdf.cell(0,9,c["subtitle"], ln=True, align="C")
             pdf.add_fullbleed_image(c["img_png"])
 
-    # Exportar esqueleto (capa + charts)
+    # Export skeleton (cover + charts)
     skeleton_bytes = fpdf_to_bytes(pdf)
     main_doc = fitz.open(stream=skeleton_bytes, filetype="pdf")
 
-    # Posição de append
+    # Append in order and record first pages
     current_page_count = main_doc.page_count
 
-    # FLIGHT PLAN
+    # Flight Plan
     fp_start_page = None
     fp_doc = open_upload_as_pdf(locals().get("fp_upload"))
     if fp_doc:
@@ -379,7 +378,7 @@ if gen_pdf:
         current_page_count += fp_doc.page_count
         fp_doc.close()
 
-    # ROTAS
+    # Routes (append each Navlog and VFR in given order)
     routes_start_page = None
     pairs_local: List[Dict[str, Any]] = locals().get("pairs", [])
     for p in (pairs_local or []):
@@ -401,7 +400,7 @@ if gen_pdf:
         current_page_count += notams_doc.page_count
         notams_doc.close()
 
-    # M&B
+    # Mass & Balance
     mb_start_page = None
     mb_doc = open_upload_as_pdf(locals().get("mb_upload"))
     if mb_doc:
@@ -410,9 +409,9 @@ if gen_pdf:
         current_page_count += mb_doc.page_count
         mb_doc.close()
 
-    # Links na capa
+    # Add cover links
     targets = {
-        "ipma": None,  # externo
+        "ipma": None,  # external
         "charts": charts_first_page0,
         "flight_plan": fp_start_page,
         "routes": routes_start_page,
@@ -421,14 +420,14 @@ if gen_pdf:
     }
     add_cover_links(main_doc, cover_rects_mm, targets, IPMA_URL)
 
-    # Botão “← Índice” em todas as páginas (excepto a capa)
-    add_back_to_index_buttons(main_doc, label="← Índice")
+    # Add "← Index" button to every page except cover
+    add_back_to_index_buttons(main_doc, label="← Index")
 
-    # Exportar
+    # Export
     final_bytes = main_doc.tobytes()
     main_doc.close()
 
-    final_name = f"Briefing - Missao {safe_str(locals().get('mission_no') or 'X')}.pdf"
+    final_name = f"Briefing - Mission {safe_str(locals().get('mission_no') or 'X')}.pdf"
     st.download_button("Download PDF", data=final_bytes, file_name=final_name,
                        mime="application/pdf", use_container_width=True)
 
