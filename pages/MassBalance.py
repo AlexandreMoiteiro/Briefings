@@ -1,11 +1,13 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v7.3
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.0 (Open-Meteo)
 # Requisitos:
 #   streamlit, requests, pypdf>=4.2.0, pytz
 #
-# Segredos:
-#   WINDY_API_KEY
+# Segredos usados (opcionais para outras partes):
 #   GITHUB_GIST_TOKEN
 #   GITHUB_GIST_ID
+#
+# Nota: Substitui o Windy pela API gratuita do Open-Meteo (sem chave).
+#       A hora escolhida em "Aerodromes & MET" aplica-se aos 3 aeródromos.
 
 import streamlit as st
 import datetime as dt
@@ -64,7 +66,8 @@ def fmt_hm(total_min: int) -> str:
 # Constants & Data
 # -----------------------------
 PDF_TEMPLATE_PATHS = [
-    "TecnamP2008MBPerformanceSheet_MissionX.pdf",
+    "pages/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf",
+    "/mnt/data/RVP.CFI.068.02TecnamP2008JCMBandPerformanceSheet.pdf",
 ]
 
 AC = {
@@ -141,7 +144,7 @@ AERODROMES_DB = {
     },
 }
 
-# AFM tables
+# AFM tables (TO/LND) — omitido aqui para brevidade? Não: completo.
 TAKEOFF = {
     0:     {"GR":{-25:144, 0:182, 25:224, 50:272, "ISA":207}, "50ft":{-25:304,0:379,25:463,50:557,"ISA":428}},
     1000:  {"GR":{-25:157, 0:198, 25:245, 50:297, "ISA":222}, "50ft":{-25:330,0:412,25:503,50:605,"ISA":458}},
@@ -277,30 +280,86 @@ def ldg_corrections(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     return max(gr, 0.0)
 
 # -----------------------------
-# Windy API (hourly)
+# Forecast provider (Open-Meteo)
 # -----------------------------
-WINDY_ENDPOINT = "https://api.windy.com/api/point-forecast/v2"
+OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 @st.cache_data(ttl=900, show_spinner=False)
-def windy_point_forecast(lat, lon, model, params, api_key):
-    headers = {"Content-Type": "application/json"}
-    body = {
-        "lat": round(float(lat), 3),
-        "lon": round(float(lon), 3),
-        "model": model,                   # "iconEu", "gfs", "arome"
-        "parameters": params,             # ["wind","temp","pressure","windGust"]
-        "levels": ["surface"],
-        "key": api_key,
+def om_point_forecast(lat, lon, start_date_iso, end_date_iso):
+    """
+    Devolve um dicionário com o MESMO formato usado antes (tipo 'Windy'):
+      - 'ts' em milissegundos
+      - 'wind_u-surface', 'wind_v-surface' (m/s)
+      - 'gust-surface' (m/s)
+      - 'temp-surface' (°C)
+      - 'pressure-surface' (Pa)
+    """
+    params = {
+        "latitude": round(float(lat), 4),
+        "longitude": round(float(lon), 4),
+        "hourly": ",".join([
+            "temperature_2m",
+            "wind_speed_10m",
+            "wind_direction_10m",
+            "wind_gusts_10m",
+            "surface_pressure",
+        ]),
+        "timezone": "UTC",
+        "windspeed_unit": "kn",
+        "temperature_unit": "celsius",
+        "pressure_unit": "hpa",
+        "start_date": start_date_iso,
+        "end_date": end_date_iso,
     }
     try:
-        r = requests.post(WINDY_ENDPOINT, headers=headers, data=json.dumps(body), timeout=20)
+        r = requests.get(OPENMETEO_URL, params=params, timeout=20)
         if r.status_code != 200:
             return {"error": f"HTTP {r.status_code}", "detail": r.text}
-        return r.json()
+        data = r.json()
+        h = data.get("hourly", {})
+        times = h.get("time", []) or []
+        wspd_kn = h.get("wind_speed_10m", []) or []
+        wdir = h.get("wind_direction_10m", []) or []
+        gust_kn = h.get("wind_gusts_10m", []) or []
+        temp_c = h.get("temperature_2m", []) or []
+        sp_hpa = h.get("surface_pressure", []) or []
+
+        # converter para arrays compatíveis
+        ts = []
+        u_ms = []
+        v_ms = []
+        gust_ms = []
+        temp = []
+        press_pa = []
+        for i, t in enumerate(times):
+            # t: "YYYY-MM-DDTHH:00"
+            dt_utc = dt.datetime.fromisoformat(t).replace(tzinfo=dt.timezone.utc)
+            ts.append(int(dt_utc.timestamp() * 1000))
+            spd_kn = wspd_kn[i] if i < len(wspd_kn) and wspd_kn[i] is not None else 0.0
+            dir_deg = wdir[i] if i < len(wdir) and wdir[i] is not None else 0.0  # FROM
+            # componentes (m/s) — meteorológico FROM
+            theta = radians(dir_deg)
+            spd_ms = spd_kn * 0.514444
+            u_ms.append(-spd_ms * sin(theta))
+            v_ms.append(-spd_ms * cos(theta))
+            gust_val = gust_kn[i] if i < len(gust_kn) and gust_kn[i] is not None else 0.0
+            gust_ms.append(gust_val * 0.514444)
+            temp.append(temp_c[i] if i < len(temp_c) else None)
+            pres = sp_hpa[i] if i < len(sp_hpa) and sp_hpa[i] is not None else None
+            press_pa.append(pres * 100.0 if pres is not None else None)
+
+        return {
+            "ts": ts,
+            "wind_u-surface": u_ms,
+            "wind_v-surface": v_ms,
+            "gust-surface": gust_ms,
+            "temp-surface": temp,
+            "pressure-surface": press_pa,
+        }
     except Exception as e:
         return {"error": str(e)}
 
-def windy_list_hours(resp):
+def om_list_hours(resp):
     if not resp or "ts" not in resp or not resp["ts"]:
         return []
     out = []
@@ -309,14 +368,14 @@ def windy_list_hours(resp):
         out.append((i, dt_utc))
     return out
 
-def windy_unpack_at(resp, idx):
+def om_unpack_at(resp, idx):
     if idx is None: return None
     def getv(key):
         arr = resp.get(key, [])
         return arr[idx] if arr and idx < len(arr) else None
     u = getv("wind_u-surface"); v = getv("wind_v-surface"); gust = getv("gust-surface")
     if u is None or v is None: return None
-    # >>> CORREÇÃO: direção "FROM" (meteorológica)
+    # direção FROM correta
     speed_ms = sqrt(u*u + v*v)
     dir_deg = (degrees(atan2(u, v)) + 180.0) % 360.0
     speed_kt = speed_ms * 1.94384
@@ -324,11 +383,8 @@ def windy_unpack_at(resp, idx):
     temp_c = None
     if temp_val is not None:
         temp_c = float(temp_val)
-        if temp_c > 100:
-            temp_c -= 273.15
-        temp_c = round(temp_c, 1)
     pres_pa = getv("pressure-surface")
-    qnh_hpa = round(pres_pa/100.0) if pres_pa is not None else None  # às unidades
+    qnh_hpa = round(pres_pa/100.0) if pres_pa is not None else None
     return {
         "wind_dir": round(dir_deg),
         "wind_kt": round(speed_kt),
@@ -389,7 +445,7 @@ if not st.session_state.fleet_loaded:
     token = st.secrets.get("GITHUB_GIST_TOKEN", "")
     gist_id = st.secrets.get("GITHUB_GIST_ID", "")
     if token and gist_id:
-        gdata, gerr = gist_load_fleet(token, gist_id)
+        gdata, _ = gist_load_fleet(token, gist_id)
         if gdata is not None:
             st.session_state.fleet = gdata
     st.session_state.fleet_loaded = True
@@ -410,13 +466,10 @@ if "hour_idx" not in st.session_state:
     st.session_state.hour_idx = [None, None, None]
 if "met" not in st.session_state:
     st.session_state.met = [{"temp": 15.0, "qnh": 1013.0, "wind_dir": 0.0, "wind_kt": 0.0} for _ in range(3)]
-if "windy_target_utc" not in st.session_state:
-    st.session_state.windy_target_utc = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)
+if "forecast_target_utc" not in st.session_state:
+    st.session_state.forecast_target_utc = dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)
 if "mission_no" not in st.session_state:
     st.session_state.mission_no = ""
-if "WINDY_MODEL" not in st.session_state:
-    st.session_state.WINDY_MODEL = "iconEu"
-# >>> manter a data de voo em sessão (usada para o Windy)
 if "flight_date" not in st.session_state:
     st.session_state.flight_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).date()
 if "date_str" not in st.session_state:
@@ -427,9 +480,7 @@ if "date_str" not in st.session_state:
 # -----------------------------
 with st.sidebar:
     st.subheader("⚙️ Settings")
-    windy_models = {"ICON-EU (default)": "iconEu", "GFS": "gfs", "AROME": "arome"}
-    model_label = st.selectbox("Windy model", list(windy_models.keys()), index=0)
-    st.session_state.WINDY_MODEL = windy_models[model_label]
+    st.caption("Fonte de previsão: **Open-Meteo** (sem chave).")
 
     st.markdown("---")
     st.subheader("🛩️ Fleet (EW & Moment)")
@@ -496,14 +547,13 @@ with tab_setup:
 
         st.session_state.mission_no = st.text_input("Mission number", value=st.session_state.mission_no)
 
-        lisbon_now = dt.datetime.now(pytz.timezone("Europe/Lisbon"))
         flight_date = st.date_input("Flight date (Europe/Lisbon)", value=st.session_state.flight_date)
         st.session_state.flight_date = flight_date
         st.session_state["date_str"] = flight_date.strftime("%d/%m/%Y")
 
     with c2:
         st.markdown("### Info")
-        st.info("A hora do Windy é escolhida no separador **Aerodromes & MET** e aplica-se a todos.")
+        st.info("A hora da previsão é escolhida no separador **Aerodromes & MET** e aplica-se a todos.")
 
 # ---- helper: choose best runway ----
 def choose_best_runway(ad, temp_c, qnh, wind_dir, wind_kt, total_weight):
@@ -542,67 +592,62 @@ def choose_best_runway(ad, temp_c, qnh, wind_dir, wind_kt, total_weight):
 with tab_aero:
     st.markdown("### Aerodromes (Departure, Arrival, Alternate) + MET (hourly)")
 
-    # Seletor da hora do Windy aqui (aplica a todos) — COM DATA da 1ª aba
+    # Seletor de hora (UTC) aplicado aos 3 aeródromos — usa a data da 1ª aba
     col_h1, col_h2 = st.columns([0.55, 0.45])
     with col_h1:
-        st.caption("A hora selecionada (UTC) aplica-se aos 3 aeródromos.")
+        st.caption("A hora (UTC) aplica-se aos 3 aeródromos.")
     with col_h2:
-        windy_target = st.time_input(
-            "Windy – target hour (UTC)",
-            value=st.session_state.windy_target_utc.time().replace(second=0, microsecond=0),
+        target_time = st.time_input(
+            "Forecast – target hour (UTC)",
+            value=st.session_state.forecast_target_utc.time().replace(second=0, microsecond=0),
             step=3600
         )
-        # >>> CORREÇÃO: usar a data escolhida na 1ª aba
-        st.session_state.windy_target_utc = dt.datetime.combine(
-            st.session_state.flight_date, windy_target
+        st.session_state.forecast_target_utc = dt.datetime.combine(
+            st.session_state.flight_date, target_time
         ).replace(tzinfo=dt.timezone.utc)
 
     c_fetch1, c_fetch2 = st.columns([0.6, 0.4])
     with c_fetch1:
-        st.caption("Usa o botão para obter do Windy e preencher os campos.")
+        st.caption("Carrega para obter do Open-Meteo e preencher os campos.")
     with c_fetch2:
-        if st.button("Fetch Windy for all legs", type="primary"):
-            api_key = st.secrets.get("WINDY_API_KEY", "")
-            if not api_key:
-                st.error("Windy API key not found in secrets (WINDY_API_KEY).")
-            else:
-                for idx, leg in enumerate(st.session_state.legs):
-                    icao = leg["icao"]
-                    ad = AERODROMES_DB[icao]
-                    resp = windy_point_forecast(
-                        ad["lat"], ad["lon"],
-                        st.session_state.WINDY_MODEL,
-                        ["wind","temp","pressure","windGust"],
-                        api_key
-                    )
-                    if "error" in resp:
-                        st.error(f"{icao}: Windy error: {resp.get('error')} {resp.get('detail','')}")
-                        continue
-                    st.session_state.forecast[idx] = resp
-                    hours = windy_list_hours(resp)
-                    st.session_state.hours[idx] = hours
-                    if hours:
-                        target = st.session_state.windy_target_utc
-                        nearest_idx, _nearest_dt = min(hours, key=lambda h: abs(h[1]-target))
-                        st.session_state.hour_idx[idx] = nearest_idx
-                        met = windy_unpack_at(resp, nearest_idx)
-                        if met:
-                            st.session_state.met[idx].update({
-                                "temp": met["temp"] if met["temp"] is not None else st.session_state.met[idx]["temp"],
-                                "qnh": met["qnh"] if met["qnh"] is not None else st.session_state.met[idx]["qnh"],
-                                "wind_dir": met["wind_dir"] if met["wind_dir"] is not None else st.session_state.met[idx]["wind_dir"],
-                                "wind_kt": met["wind_kt"] if met["wind_kt"] is not None else st.session_state.met[idx]["wind_kt"],
-                            })
-                            st.session_state[f"temp_{idx}"] = float(st.session_state.met[idx]["temp"])
-                            st.session_state[f"qnh_{idx}"]  = float(round(st.session_state.met[idx]["qnh"]))
-                            st.session_state[f"wdir_{idx}"] = float(st.session_state.met[idx]["wind_dir"])
-                            st.session_state[f"wspd_{idx}"] = float(st.session_state.met[idx]["wind_kt"])
-                        else:
-                            st.warning(f"{icao}: No usable data at selected hour.")
+        if st.button("Fetch forecast for all legs", type="primary"):
+            for idx, leg in enumerate(st.session_state.legs):
+                icao = leg["icao"]
+                ad = AERODROMES_DB[icao]
+
+                # pedir só o dia da data seleccionada (UTC)
+                start_iso = st.session_state.flight_date.strftime("%Y-%m-%d")
+                end_iso = start_iso
+
+                resp = om_point_forecast(ad["lat"], ad["lon"], start_iso, end_iso)
+                if "error" in resp:
+                    st.error(f"{icao}: Forecast error: {resp.get('error')} {resp.get('detail','')}")
+                    continue
+                st.session_state.forecast[idx] = resp
+                hours = om_list_hours(resp)
+                st.session_state.hours[idx] = hours
+                if hours:
+                    target = st.session_state.forecast_target_utc
+                    nearest_idx, _nearest_dt = min(hours, key=lambda h: abs(h[1]-target))
+                    st.session_state.hour_idx[idx] = nearest_idx
+                    met = om_unpack_at(resp, nearest_idx)
+                    if met:
+                        st.session_state.met[idx].update({
+                            "temp": met["temp"] if met["temp"] is not None else st.session_state.met[idx]["temp"],
+                            "qnh": met["qnh"] if met["qnh"] is not None else st.session_state.met[idx]["qnh"],
+                            "wind_dir": met["wind_dir"] if met["wind_dir"] is not None else st.session_state.met[idx]["wind_dir"],
+                            "wind_kt": met["wind_kt"] if met["wind_kt"] is not None else st.session_state.met[idx]["wind_kt"],
+                        })
+                        st.session_state[f"temp_{idx}"] = float(st.session_state.met[idx]["temp"])
+                        st.session_state[f"qnh_{idx}"]  = float(round(st.session_state.met[idx]["qnh"]))
+                        st.session_state[f"wdir_{idx}"] = float(st.session_state.met[idx]["wind_dir"])
+                        st.session_state[f"wspd_{idx}"] = float(st.session_state.met[idx]["wind_kt"])
                     else:
-                        st.warning(f"{icao}: No hours returned by Windy.")
-                st.success("Windy data applied to all legs.")
-                st.rerun()
+                        st.warning(f"{icao}: No usable data at selected hour.")
+                else:
+                    st.warning(f"{icao}: No hours returned by provider.")
+            st.success("Forecast applied to all legs.")
+            st.rerun()
 
     perf_rows = []
     for i, leg in enumerate(st.session_state.legs):
@@ -635,7 +680,7 @@ with tab_aero:
             if hours and idx is not None:
                 label = next((h[1].strftime("%Y-%m-%d %H:00Z") for h in hours if h[0]==idx), None)
                 if label:
-                    st.caption(f"Windy hour applied: **{label}**")
+                    st.caption(f"Forecast hour applied: **{label}**")
 
         total_weight_for_perf = st.session_state.get("_wb", {}).get("total_weight", 0.0) or 0.0
         best, _ = choose_best_runway(ad, float(temp_c), float(qnh), float(wind_dir), float(wind_kt), total_weight_for_perf)
@@ -977,7 +1022,7 @@ with tab_pdf:
             put_any(named_map, fieldset, f"LDR_{suf}", ldr_str)
             put_any(named_map, fieldset, f"ROC_{suf}", f"{r.get('roc', 0):.0f}")
 
-        # Fuel — tempos e litros (com " L")
+        # Fuel — com “ L” à frente
         RATE_LPH = 20.0
         def L_from_min(m): return int(round(RATE_LPH * ((m or 0)/60.0)))
 
@@ -1039,4 +1084,3 @@ with tab_pdf:
 
     except Exception as e:
         st.error(f"Cannot prepare PDF mapping: {e}")
-
