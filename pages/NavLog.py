@@ -40,17 +40,18 @@ def _round_unit(x: float) -> int:
     if x is None: return 0
     return int(round(float(x)))
 
-def _round_half(x: float) -> float:
+def _round_tenth(x: float) -> float:
     if x is None: return 0.0
-    return round(float(x)*2.0)/2.0
+    return round(float(x), 1)
 
 def _round_angle(x: float) -> int:
     if x is None: return 0
     return int(round(float(x))) % 360
 
-def ceil_to_10s(sec: float) -> int:
+def round_to_10s(sec: float) -> int:
+    """Arredonda ao múltiplo de 10 segundos mais próximo (mínimo 10s se >0)."""
     if sec <= 0: return 0
-    s = int(math.ceil(sec/10.0)*10)
+    s = int(round(sec/10.0)*10)
     return max(s, 10)
 
 def mmss_from_seconds(tsec: int) -> str:
@@ -63,7 +64,7 @@ def hhmmss_from_seconds(tsec: int) -> str:
 
 def fmt(x: float, kind: str) -> str:
     if kind == "dist":   return f"{round(float(x or 0),1):.1f}"     # nm (0.1)
-    if kind == "fuel":   return f"{_round_half(x):.1f}"             # L (0.5)
+    if kind == "fuel":   return f"{_round_tenth(x):.1f}"            # L (0.1)
     if kind == "ff":     return str(_round_unit(x))                 # L/h (1)
     if kind == "speed":  return str(_round_unit(x))                 # kt (1)
     if kind == "angle":  return str(_round_angle(x))                # °
@@ -247,6 +248,10 @@ ensure("descent_ff",15.0); ensure("rod_fpm",700); ensure("start_fuel",85.0)
 ensure("cruise_ref_kt",90); ensure("descent_ref_kt",65)
 ensure("use_navaids",False)
 
+# Taxi: campo só para minutos; FF fixo a 20 L/h
+ensure("taxi_min",15)
+ensure("taxi_ff_lph",20.0)  # sem campo; fixo
+
 # =========================================================
 # FORM único: Cabeçalho + Atmosfera/Performance/Opções
 # =========================================================
@@ -291,15 +296,18 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         f_ff_ds  = st.number_input("Descent FF (L/h)", 0.0, 30.0, float(st.session_state.descent_ff), step=0.1)
     with c9:
         f_rod    = st.number_input("ROD (ft/min)", 200, 1500, int(st.session_state.rod_fpm), step=10)
-        f_fuel0  = st.number_input("Fuel inicial (EFOB_START) [L]", 0.0, 1000.0, float(st.session_state.start_fuel), step=0.5)
+        f_fuel0  = st.number_input("Fuel inicial (EFOB_START) [L]", 0.0, 1000.0, float(st.session_state.start_fuel), step=0.1)
 
     st.markdown("---")
-    c10,c11 = st.columns(2)
+    c10,c11,c12 = st.columns(3)
     with c10:
         f_use_nav = st.checkbox("Mostrar/usar NAVAIDs no PDF", value=bool(st.session_state.use_navaids))
+        f_taxi_min = st.number_input("Taxi (min)", 0, 60, int(st.session_state.taxi_min), step=1)
     with c11:
         f_spd_cr  = st.number_input("Cruise speed (kt)", 40, 140, int(st.session_state.cruise_ref_kt), step=1)
         f_spd_ds  = st.number_input("Descent speed (kt)", 40, 120, int(st.session_state.descent_ref_kt), step=1)
+    with c12:
+        st.write("Taxi FF (L/h): **20** (fixo)")
 
     submitted = st.form_submit_button("Aplicar cabeçalho + performance")
     if submitted:
@@ -312,6 +320,9 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         st.session_state.descent_ff=f_ff_ds; st.session_state.rod_fpm=f_rod; st.session_state.start_fuel=f_fuel0
         st.session_state.cruise_ref_kt=f_spd_cr; st.session_state.descent_ref_kt=f_spd_ds
         st.session_state.use_navaids=f_use_nav
+        st.session_state.taxi_min=f_taxi_min
+        st.session_state.taxi_ff_lph=20.0  # força para 20 L/h fixo
+
         # Propagar cruise para a tabela de altitudes (não fixados) e DEP/ARR = elevação
         def sync_alt_rows_to_cruise():
             pts = st.session_state.get("points") or [st.session_state.dept, st.session_state.arr]
@@ -608,7 +619,7 @@ rows=[]; seq_points=[]
 efob=float(st.session_state.start_fuel)
 
 startup = parse_hhmm(st.session_state.startup)
-takeoff = add_seconds(startup, 10*60) if startup else None  # TAXI = 10 min
+takeoff = add_seconds(startup, int(st.session_state.taxi_min*60)) if startup else None  # TAXI = input (min)
 clock = takeoff
 
 # DEP
@@ -626,7 +637,7 @@ def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
     mh = apply_var(th, st.session_state.var_deg, st.session_state.var_is_e)
 
     ete_sec_raw = (60.0 * d_nm / max(gs,1e-6)) * 60.0
-    ete_sec = ceil_to_10s(ete_sec_raw)
+    ete_sec = round_to_10s(ete_sec_raw)
     burn_raw = ff_lph * (ete_sec_raw/3600.0)
     alt_end = alt_start_ft + (rate_fpm*(ete_sec_raw/60.0) if phase=="CLIMB" else (-rate_fpm*(ete_sec_raw/60.0) if phase=="DESCENT" else 0.0))
 
@@ -635,7 +646,7 @@ def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
         clock = add_seconds(clock, int(ete_sec))
         eto = clock.strftime("%H:%M")
 
-    efob = max(0.0, _round_half(efob - burn_raw))
+    efob = max(0.0, _round_tenth(efob - burn_raw))
 
     rows.append({
         "Fase": {"CLIMB":"↑","CRUISE":"→","DESCENT":"↓"}[phase],
@@ -690,6 +701,16 @@ for i in range(N):
 eta = clock
 shutdown = add_seconds(eta, 5*60) if eta else None
 
+# ==== Totais por fase (para OBSERVATIONS do NAVLOG) ====
+taxi_min = int(st.session_state.taxi_min)
+taxi_ff_lph = 20.0  # fixo
+fuel_taxi = taxi_ff_lph * (taxi_min / 60.0)
+
+fuel_climb = sum(float(p['burn']) for p in seq_points if p.get('phase') == 'CLIMB')
+fuel_enroute = sum(float(p['burn']) for p in seq_points if p.get('phase') == 'CRUISE')
+fuel_descent = sum(float(p['burn']) for p in seq_points if p.get('phase') == 'DESCENT')
+descent_min_total = int(round(sum(int(p.get('ete_sec',0)) for p in seq_points if p.get('phase') == 'DESCENT') / 60.0))
+
 # =========================================================
 # Resultados
 # =========================================================
@@ -712,7 +733,7 @@ st.dataframe(rows, use_container_width=True)
 
 tot_ete_sec = sum(int(p.get('ete_sec',0)) for p in seq_points if isinstance(p.get('ete_sec'), (int,float)))
 tot_nm  = sum(float(p['dist']) for p in seq_points if isinstance(p.get('dist'), (int,float)))
-tot_bo  = _round_half(sum(float(p['burn']) for p in seq_points if isinstance(p.get('burn'), (int,float))))
+tot_bo  = _round_tenth(sum(float(p['burn']) for p in seq_points if isinstance(p.get('burn'), (int,float))))
 line = f"**Totais** — Dist {fmt(tot_nm,'dist')} nm • ETE {hhmmss_from_seconds(int(tot_ete_sec))} • Burn {fmt(tot_bo,'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"
 if eta: line += f" • **ETA {eta.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
 st.markdown(line)
@@ -738,7 +759,7 @@ def PAll(keys: List[str], value: str):
             put(named, fieldset, k, value, maxlens)
 
 if fieldset:
-    etd = (add_seconds(parse_hhmm(st.session_state.startup), 10*60).strftime("%H:%M") if st.session_state.startup else "")
+    etd = (add_seconds(parse_hhmm(st.session_state.startup), st.session_state.taxi_min*60).strftime("%H:%M") if st.session_state.startup else "")
     eta_txt = (eta.strftime("%H:%M") if eta else "")
     shutdown_txt = (shutdown.strftime("%H:%M") if shutdown else "")
 
@@ -768,7 +789,10 @@ if fieldset:
 
     PAll(["DEPARTURE_AIRFIELD","Departure_Airfield"], points[0])
     PAll(["ARRIVAL_AIRFIELD","Arrival_Airfield"], points[-1])
-    PAll(["Leg_Number","LEG_NUMBER"], str(len(seq_points)))
+
+    # Leg_Number = nº de pontos "oficiais" (sem TOC/TOD)
+    PAll(["Leg_Number","LEG_NUMBER"], str(len(points)))
+
     PAll(["ALTERNATE_AIRFIELD","Alternate_Airfield"], st.session_state.altn)
     PAll(["ALTERNATE_ELEVATION","Alternate_Elevation","TextField_7"], fmt(altn_elev,'alt'))
 
@@ -810,6 +834,15 @@ if fieldset:
             P(tag+"ETO", p["eto"])
             P(tag+"Estimated_FOB", fmt(p["efob"], 'fuel'))
 
+    # ===== OBSERVATIONS (pedido) =====
+    observations_text = "\n".join([
+        f"Start-up & Taxi: {taxi_min} min @ 20 L/h → {fmt(fuel_taxi,'fuel')} L",
+        f"Climb: {fmt(fuel_climb,'fuel')} L",
+        f"Enroute: {fmt(fuel_enroute,'fuel')} L",
+        f"Descent (min): {descent_min_total} min → {fmt(fuel_descent,'fuel')} L"
+    ])
+    P("OBSERVATIONS", observations_text)
+
 if st.button("Gerar PDF NAVLOG", type="primary"):
     try:
         if not template_bytes: raise RuntimeError("Template PDF não carregado")
@@ -835,7 +868,7 @@ def build_report_pdf():
                             topMargin=12*mm, bottomMargin=12*mm)
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontSize=9.2, leading=12))
-    H1=styles["Heading1"]; H2=styles["Heading2"]; P=styles["Small"]
+    H1=styles["Heading1"]; H2=styles["Heading2"]; Psty=styles["Small"]
 
     story=[]
     story.append(Paragraph("NAVLOG — Relatório do Planeamento", H1))
@@ -845,7 +878,7 @@ def build_report_pdf():
         ["DEP / ARR / ALTN", f"{points[0]} / {points[-1]} / {st.session_state.altn}"],
         ["Elev DEP/ARR/ALTN (ft)", f"{fmt(dep_elev,'alt')} / {fmt(arr_elev,'alt')} / {fmt(altn_elev,'alt')}"],
         ["Cruise Alt (ft)", fmt(cruise_alt,'alt')],
-        ["Startup / Taxi / ETD", f"{st.session_state.startup} / 10 min / {(add_seconds(parse_hhmm(st.session_state.startup),10*60).strftime('%H:%M') if st.session_state.startup else '')}"],
+        ["Startup / Taxi / ETD", f"{st.session_state.startup} / {st.session_state.taxi_min} min / {(add_seconds(parse_hhmm(st.session_state.startup),st.session_state.taxi_min*60).strftime('%H:%M') if st.session_state.startup else '')}"],
         ["QNH / OAT / ISA dev", f"{int(st.session_state.qnh)} / {int(st.session_state.temp_c)} / {int(round(st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))))}"],
         ["Vento FROM / Var", f"{int(round(st.session_state.wind_from)):03d}/{int(round(st.session_state.wind_kt)):02d} / {int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}"],
         ["TAS (cl/cru/des)", f"{_round_unit(tas_climb)}/{_round_unit(tas_cruise)}/{_round_unit(tas_descent)} kt"],
@@ -854,7 +887,7 @@ def build_report_pdf():
         ["Totais", f"Dist {fmt(tot_nm,'dist')} nm • ETE {hhmmss_from_seconds(int(tot_ete_sec))} • Burn {fmt(tot_bo,'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"],
         ["TOC/TOD", (", ".join([f'{name} L{leg+1}@{fmt(pos,"dist")}nm' for (leg,pos,name) in toc_list]) + ("; " if toc_list and tod_list else "") +
                      ", ".join([f'{name} L{leg+1}@{fmt(pos,"dist")}nm' for (leg,pos,name) in tod_list])) or "—"],
-        ["Regras de arredondamento", "Tempo: ceil a 10s • Dist: 0.1 nm • Fuel: 0.5 L • Alt: <1000→50 / ≥1000→100 • Ângulos & velocidades: unidade."],
+        ["Regras de arredondamento", "Tempo: múltiplo de 10 s (mais próximo) • Dist: 0.1 nm • Fuel: 0.1 L • Alt: <1000→50 / ≥1000→100 • Ângulos & velocidades: unidade."],
     ]
     t1 = LongTable(resume, colWidths=[64*mm, None], hAlign="LEFT")
     t1.setStyle(TableStyle([
@@ -873,17 +906,32 @@ def build_report_pdf():
         prev = seq_points[i-1]
         seg = p
         leg_no = seg["leg_idx"]+1 if seg["leg_idx"] is not None else i
-        lines = []
-        lines.append(f"<b>Leg {leg_no}: {prev['name']} → {seg['name']}</b>")
-        lines.append(f"TC={seg['tc']}°T, TAS={seg['tas']} kt, Vento FROM={int(st.session_state.wind_from):03d}/{int(st.session_state.wind_kt):02d} kt")
-        lines.append(f"WCA={seg['wca']}°, TH={seg['th']}°T, MH={seg['mh']}°M, GS={seg['gs']} kt")
-        lines.append(f"Dist={fmt(seg['dist'],'dist')} nm")
-        lines.append(f"ETE_bruto={hhmmss_from_seconds(int(seg['ete_raw']))} → ETE_arred=ceil10s={mmss_from_seconds(seg['ete_sec'])}")
-        lines.append(f"FF={_round_unit(ff_climb if p['phase']=='CLIMB' else ff_descent if p['phase']=='DESCENT' else ff_cruise)} L/h; "
-                     f"Burn_bruto={seg['burn']:.2f} L → Burn_arred={fmt(seg['burn'],'fuel')} L")
-        lines.append(f"ALT {prev['alt']}→{seg['alt']} ft usando rate={'+' if p['phase']=='CLIMB' else '-' if p['phase']=='DESCENT' else '±0'}{int(abs(seg['rate_fpm']))} ft/min")
-        par = Paragraph("<br/>".join(lines), styles["Small"])
-        story.append(KeepTogether([par, Spacer(1,4)]))
+
+        steps = [
+            ["1) Dados de entrada", f"TC={seg['tc']}°T; TAS={seg['tas']} kt; Vento FROM={int(st.session_state.wind_from):03d}/{int(st.session_state.wind_kt):02d} kt"],
+            ["2) Triângulo de vento", f"WCA={seg['wca']}°; TH={seg['th']}°T; MH={seg['mh']}°M; GS={seg['gs']} kt"],
+            ["3) Distância", f"{fmt(seg['dist'],'dist')} nm"],
+            ["4) ETE bruto", f"{hhmmss_from_seconds(int(seg['ete_raw']))}"],
+            ["5) ETE arred.", f"nearest 10 s → {mmss_from_seconds(seg['ete_sec'])}"],
+            ["6) Débito combustível", f"{_round_unit(ff_climb if p['phase']=='CLIMB' else ff_descent if p['phase']=='DESCENT' else ff_cruise)} L/h"],
+            ["7) Burn", f"bruto={seg['burn']:.2f} L → arred={fmt(seg['burn'],'fuel')} L"],
+            ["8) Perfil vertical", f"{prev['alt']}→{seg['alt']} ft @ {'+' if p['phase']=='CLIMB' else '-' if p['phase']=='DESCENT' else '±0'}{int(abs(seg['rate_fpm']))} ft/min"],
+            ["9) ETO / EFOB", f"ETO={seg['eto'] or '—'}; EFOB={fmt(seg['efob'],'fuel')} L"]
+        ]
+        t = LongTable([ [Paragraph(f"<b>Leg {leg_no}: {prev['name']} → {seg['name']}</b>", Psty), "" ] ] + steps,
+                      colWidths=[56*mm, None], hAlign="LEFT")
+        t.setStyle(TableStyle([
+            ("SPAN",(0,0),(1,0)),
+            ("BACKGROUND",(0,0),(1,0),colors.whitesmoke),
+            ("GRID",(0,1),(-1,-1),0.25,colors.lightgrey),
+            ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("FONTSIZE",(0,0),(-1,-1),9),
+            ("LEFTPADDING",(0,0),(-1,-1),4),
+            ("RIGHTPADDING",(0,0),(-1,-1),6),
+            ("TOPPADDING",(0,0),(-1,-1),3),
+            ("BOTTOMPADDING",(0,0),(-1,-1),3),
+        ]))
+        story.append(KeepTogether([t, Spacer(1,6)]))
 
     doc.build(story)
     return bio.getvalue()
@@ -900,3 +948,4 @@ if st.button("Gerar Relatório (PDF)"):
         st.success("Relatório gerado.")
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
+
