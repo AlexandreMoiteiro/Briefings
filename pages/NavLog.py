@@ -199,88 +199,106 @@ def get_form_fields(template_bytes: bytes):
     return field_names, maxlens
 
 def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
-    if not PYPDF_OK: raise RuntimeError("pypdf missing")
-    reader = PdfReader(io.BytesIO(template_bytes))
-    writer = PdfWriter()
+    """
+    Preenche o PDF e força a fonte dos campos para Arm-Regular.ttf (no path 'Arm-Regular.ttf')
+    via um PDF 'carrier' gerado com ReportLab, injetado em /AcroForm/DR/Font como /Arm.
+    Define /DA = '/Arm 10 Tf 0 g' e /NeedAppearances = True.
+    """
+    if not PYPDF_OK:
+        raise RuntimeError("pypdf missing")
+
+    # imports locais para evitar dependência global quando não usados
+    from pypdf import PdfReader as _PdfReader, PdfWriter as _PdfWriter
+    from pypdf.generic import NameObject as _NameObject, TextStringObject as _TextStringObject, DictionaryObject as _DictionaryObject
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+
+    # 1) ler template e clonar no writer
+    reader = _PdfReader(io.BytesIO(template_bytes))
+    writer = _PdfWriter()
     if hasattr(writer, "clone_document_from_reader"):
         writer.clone_document_from_reader(reader)
     else:
-        for p in reader.pages: writer.add_page(p)
+        for p in reader.pages:
+            writer.add_page(p)
         acro = reader.trailer["/Root"].get("/AcroForm")
         if acro is not None:
-            writer._root_object.update({NameObject("/AcroForm"): acro})
+            writer._root_object.update({_NameObject("/AcroForm"): acro})
+
+    # 2) construir um 'carrier' com a fonte Arm embutida
+    def _build_font_carrier(ttf_path: str, ps_name: str = "Arm") -> "_PdfReader":
+        bio = io.BytesIO()
+        pdfmetrics.registerFont(TTFont(ps_name, ttf_path))
+        c = canvas.Canvas(bio)
+        c.setFont(ps_name, 10)
+        c.drawString(10, 10, ".")
+        c.save()
+        bio.seek(0)
+        return _PdfReader(bio)
+
+    try:
+        carrier_reader = _build_font_carrier("Arm-Regular.ttf", "Arm")
+        try:
+            carrier_font_dict = carrier_reader.pages[0]["/Resources"].get("/Font")
+        except Exception:
+            carrier_font_dict = None
+
+        # 3) garantir AcroForm e DR
+        acroform = writer._root_object.get("/AcroForm")
+        if acroform is None:
+            acroform = _DictionaryObject()
+            writer._root_object[_NameObject("/AcroForm")] = acroform
+
+        dr = acroform.get("/DR")
+        if dr is None:
+            dr = _DictionaryObject()
+            acroform[_NameObject("/DR")] = dr
+
+        dr_font = dr.get("/Font")
+        if dr_font is None:
+            dr_font = _DictionaryObject()
+
+        # 4) copiar a fonte embutida como /Arm
+        if carrier_font_dict and len(carrier_font_dict) > 0:
+            any_font_obj = next(iter(carrier_font_dict.values()))
+            dr_font[_NameObject("/Arm")] = writer._add_object(any_font_obj.get_object())
+            dr[_NameObject("/Font")] = dr_font
+
+            # 5) default appearance: Arm 10pt, preto
+            acroform[_NameObject("/DA")] = _TextStringObject("/Arm 10 Tf 0 g")
+
+        # 6) pede regeneração das aparências
+        acroform[_NameObject("/NeedAppearances")] = True
+
+    except Exception:
+        # fallback: tenta ao menos pôr Helv
+        try:
+            acroform = writer._root_object.get("/AcroForm")
+            if acroform:
+                if "/DA" not in acroform:
+                    acroform[_NameObject("/DA")] = _TextStringObject("/Helv 10 Tf 0 g")
+                acroform[_NameObject("/NeedAppearances")] = True
+        except Exception:
+            pass
+
+    # 7) reforço de DA se ainda não existir
     try:
         acroform = writer._root_object.get("/AcroForm")
-        if acroform:
-            acroform.update({
-                NameObject("/NeedAppearances"): True,
-                # vamos já definir um DA "neutro"; será substituído pela fonte Arm abaixo
-                NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")
-            })
+        if acroform and "/DA" not in acroform:
+            acroform[_NameObject("/DA")] = _TextStringObject("/Arm 10 Tf 0 g")
     except Exception:
         pass
 
-    # ===== PATCH: Embutir Arm-Regular.ttf e usar no /DA =====
-    # cria um mini-PDF com a fonte TTF para materializar o objeto de fonte
-    try:
-        from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.ttfonts import TTFont
-        from reportlab.pdfgen import canvas
-        from pypdf.generic import DictionaryObject
-
-        def _build_font_carrier(ttf_path: str, ps_name: str = "Arm") -> "PdfReader":
-            bio = io.BytesIO()
-            pdfmetrics.registerFont(TTFont(ps_name, ttf_path))
-            c = canvas.Canvas(bio)
-            c.setFont(ps_name, 10)     # força a criação do resource
-            c.drawString(10, 10, ".")  # um ponto chega
-            c.save()
-            bio.seek(0)
-            return PdfReader(bio)
-
-        font_reader = _build_font_carrier("/mnt/data/Arm-Regular.ttf", "Arm")
-
-        # obter /Resources/Font da 1ª página do carrier
-        font_res = None
-        try:
-            res = font_reader.pages[0].get("/Resources")
-            if res:
-                font_res = res.get("/Font")
-        except Exception:
-            font_res = None
-
-        if font_res:
-            acroform = writer._root_object.get("/AcroForm")
-            if acroform is None:
-                acroform = DictionaryObject()
-                writer._root_object[NameObject("/AcroForm")] = writer._add_object(acroform)
-
-            dr = acroform.get("/DR")
-            if dr is None:
-                dr = DictionaryObject()
-                acroform[NameObject("/DR")] = dr
-
-            dr_font = dr.get("/Font")
-            if dr_font is None:
-                dr_font = DictionaryObject()
-                dr[NameObject("/Font")] = dr_font
-
-            # pegar num dos objetos de fonte do carrier e adicioná-lo como /Arm
-            any_font_obj = next(iter(font_res.values()))
-            dr_font[NameObject("/Arm")] = writer._add_object(any_font_obj.get_object())
-
-            # atualizar o Default Appearance para usar /Arm
-            acroform[NameObject("/DA")] = TextStringObject("/Arm 10 Tf 0 g")
-            acroform[NameObject("/NeedAppearances")] = True
-    except Exception:
-        # se falhar o embedding, segue com Helv sem quebrar
-        pass
-    # ===== FIM PATCH =====
-
+    # 8) preencher campos
     str_fields = {k:(str(v) if v is not None else "") for k,v in fields.items()}
     for page in writer.pages:
         writer.update_page_form_field_values(page, str_fields)
-    bio = io.BytesIO(); writer.write(bio); return bio.getvalue()
+
+    # 9) saída
+    bio = io.BytesIO()
+    writer.write(bio)
+    return bio.getvalue()
 
 def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
     if key in fieldset:
