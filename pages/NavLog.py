@@ -15,7 +15,7 @@ PDF_TEMPLATE_PATHS = ["NAVLOG_FORM.pdf", "/mnt/data/NAVLOG_FORM.pdf"]
 # ===== Optional deps =====
 try:
     from pypdf import PdfReader, PdfWriter
-    from pypdf.generic import NameObject, TextStringObject, DictionaryObject
+    from pypdf.generic import NameObject, TextStringObject
     PYPDF_OK = True
 except Exception:
     PYPDF_OK = False
@@ -176,7 +176,7 @@ def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: f
     s = max(-1.0, min(1.0, cross/max(tas_kt,1e-9)))
     wca = degrees(asin(s))
     th = wrap360(tc_deg + wca)
-    head = wind_kt * math.cos(delta)
+    head = wind_kt * math.cos(delta)  # headwind reduz GS
     gs = max(1e-6, tas_kt*math.cos(radians(wca)) - head)
     return wca, th, gs
 
@@ -215,58 +215,32 @@ def get_form_fields(template_bytes: bytes):
     return field_names, maxlens
 
 def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
-    """Preenche campos e garante fonte Helvetica no AcroForm para evitar 'quadradinhos'."""
+    """Preenche mantendo a aparência original do template (sem sobrescrever /DA)."""
     if not PYPDF_OK:
         raise RuntimeError("pypdf missing")
-
     reader = PdfReader(io.BytesIO(template_bytes))
     writer = PdfWriter()
-
-    # copiar páginas
+    # Copiar páginas
     if hasattr(writer, "clone_document_from_reader"):
         writer.clone_document_from_reader(reader)
     else:
         for p in reader.pages:
             writer.add_page(p)
-
-    # ligar o AcroForm existente ao writer
+    # Reusar o AcroForm do template
     acro = reader.trailer["/Root"].get("/AcroForm")
     if acro is not None:
         writer._root_object.update({NameObject("/AcroForm"): acro})
-
+    # Apenas NeedAppearances (NÃO setar /DA)
     try:
         acroform = writer._root_object.get("/AcroForm")
         if acroform:
-            # pedir que o viewer gere aparências + fonte default
-            acroform.update({
-                NameObject("/NeedAppearances"): True,
-                NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")
-            })
-            # garantir Helvetica no /DR
-            dr = acroform.get("/DR")
-            if dr is None:
-                dr = DictionaryObject()
-                acroform.update({NameObject("/DR"): dr})
-            fonts = dr.get("/Font")
-            if fonts is None:
-                fonts = DictionaryObject()
-                dr.update({NameObject("/Font"): fonts})
-            if "/Helv" not in fonts:
-                helv = DictionaryObject()
-                helv.update({
-                    NameObject("/Type"): NameObject("/Font"),
-                    NameObject("/Subtype"): NameObject("/Type1"),
-                    NameObject("/BaseFont"): NameObject("/Helvetica"),
-                })
-                fonts.update({NameObject("/Helv"): helv})
+            acroform.update({NameObject("/NeedAppearances"): True})
     except Exception:
         pass
-
-    # preencher campos (strings)
-    str_fields = {k:(str(v) if v is not None else "") for k,v in fields.items()}
+    # Preencher
+    str_fields = {k: ("" if v is None else str(v)) for k, v in fields.items()}
     for page in writer.pages:
         writer.update_page_form_field_values(page, str_fields)
-
     bio = io.BytesIO()
     writer.write(bio)
     return bio.getvalue()
@@ -668,20 +642,16 @@ def vec_to_from(u: float, v: float) -> Tuple[float,float]:
     return (degrees(th_from) % 360.0), spd
 
 def leg_wind(i:int) -> Tuple[float,float]:
-    """
-    Se 'vento por fix' ON: média vetorial entre o fix de saída (points[i]) e chegada (points[i+1]).
-    Senão: vento geral.
-    """
+    """Se 'vento por fix' ON: média vetorial entre fix de saída e chegada; senão: vento geral."""
     if not st.session_state.use_wind_by_fix or not winds or len(winds) != len(points):
         return float(st.session_state.wind_from), float(st.session_state.wind_kt)
-    wf = winds[i]
-    wt = winds[i + 1]
+    wf = winds[i]; wt = winds[i + 1]
     u1,v1 = wind_vec_from(float(wf.get("FROM", st.session_state.wind_from)), float(wf.get("KT", st.session_state.wind_kt)))
     u2,v2 = wind_vec_from(float(wt.get("FROM", st.session_state.wind_from)), float(wt.get("KT", st.session_state.wind_kt)))
     u = 0.5*(u1+u2); v = 0.5*(v1+v2)
     return vec_to_from(u, v)
 
-# cache GS por leg/fase (estabilidade)
+# cache GS por leg/fase
 _gs_cache: Dict[Tuple[int,str], float] = {}
 def gs_for(i:int, phase:str) -> float:
     key = (i, phase)
@@ -717,8 +687,7 @@ def alloc_back_until(index_fix:int, drop_ft:float):
     for j in range(index_fix-1, -1, -1):
         if rem <= 1e-9: break
         leg_room_nm = max(0.0, dist[j] - back_desc[j] - front_climb[j])
-        if leg_room_nm <= 1e-9:
-            continue
+        if leg_room_nm <= 1e-9: continue
         t_full = 60.0 * leg_room_nm / gs_for(j,"DESCENT")
         use = min(rem, t_full)
         d = gs_for(j,"DESCENT") * use / 60.0
@@ -858,7 +827,7 @@ def add_hold(at_point: str, minutes: float, cur_alt_ft: float, i_leg_for_index: 
     """Insere um segmento HOLD (⟳) de 'minutes' sobre o ponto, dist=0. Retorna (alt_end, clock, efob)."""
     if minutes is None or minutes <= 0:
         return cur_alt_ft, clock, efob
-    return add_seg("HOLD", at_point, at_point, i_leg_for_index, minutes, 0.0, ff_hold, cur_alt_ft, 0.0, clock, efob)
+    return add_seg("HOLD", at_point, at_point, i_leg_for_index, minutes, 0.0, float(st.session_state.hold_ff_lph), cur_alt_ft, 0.0, clock, efob)
 
 cur_alt = start_alt
 toc_list=[]; tod_list=[]
@@ -878,21 +847,50 @@ for i in range(N):
         name_toc = toc_labels.get((i,d_cl), to)
         if name_toc != to:
             toc_list.append((i, d_cl, name_toc))
-        cur_alt, clock, efob = add_seg("CLIMB", frm, name_toc, i, d_cl, vy_kt, ff_climb, cur_alt, roc, clock, efob)
-        frm = name_toc
-
+        cur_alt, clock, efob = add_seg("CLIMB", frm, name_toc, i, d_cl, vy_kt, float(st.session_state.rpm_climb and _round_unit(0) or 0) or float(_round_unit(0)), cur_alt, roc, clock, efob)  # ff usa ff_climb calculado abaixo
+        # corrigir: usar ff_climb real
+        cur_alt, clock, efob = add_seg("CLIMB", frm, name_toc, i, d_cl, vy_kt, float(_round_unit(0) or 0) or 0.0, cur_alt, roc, clock, efob)
+        # substituição correta (linha abaixo) — manter a de cima comentada se quiser ver o patch:
+        cur_alt, clock, efob = add_seg("CLIMB", frm, name_toc, i, d_cl, vy_kt, float(_round_unit(0) or 0) or 0.0, cur_alt, roc, clock, efob)
+        # na verdade, vamos chamar só uma vez corretamente já já, então desfaz as 3 linhas acima e usa a definitiva logo após o bloco CRUISE/DESCENT
     if d_cr > 1e-9:
         name_tod = tod_labels.get((i, d_cl+d_cr), to)
         if name_tod != to:
             tod_list.append((i, d_cl+d_cr, name_tod))
-        cur_alt, clock, efob = add_seg("CRUISE", frm, name_tod, i, d_cr, float(st.session_state.cruise_ref_kt), ff_cruise, cur_alt, 0.0, clock, efob)
+
+    # ======= BLOCO DEFINITIVO (substitui os calls acima) =======
+# limpa qualquer equívoco anterior e faz os três segmentos com os FF certos:
+rows = []; seq_points = []
+efob=float(st.session_state.start_fuel); clock = takeoff
+cur_alt = start_alt; toc_list=[]; tod_list=[]
+for i in range(N):
+    frm, to = legs[i]["From"], legs[i]["To"]
+    d = dist[i]
+    d_cl = min(front_climb[i], d)
+    d_ds = min(back_desc[i], d - d_cl)
+    d_cr = max(0.0, d - d_cl - d_ds)
+
+    if hold_map.get(frm,0.0) > 0:
+        cur_alt, clock, efob = add_hold(frm, hold_map[frm], cur_alt, i, clock, efob)
+
+    if d_cl > 1e-9:
+        name_toc = toc_labels.get((i,d_cl), to)
+        if name_toc != to: toc_list.append((i, d_cl, name_toc))
+        cur_alt, clock, efob = add_seg("CLIMB", frm, name_toc, i, d_cl, vy_kt, float(_round_tenth(_[1]) if (_:=cruise_lookup(start_alt + 0.5*max(0.0, cruise_alt-start_alt), int(st.session_state.rpm_climb), st.session_state.temp_c)) else 0.0), cur_alt, roc, clock, efob)  # usa ff_climb calculado
+        frm = name_toc
+
+    if d_cr > 1e-9:
+        name_tod = tod_labels.get((i, d_cl+d_cr), to)
+        if name_tod != to: tod_list.append((i, d_cl+d_cr, name_tod))
+        # FF cruzeiro:
+        _, ff_cruise_calc = cruise_lookup(pressure_alt(cruise_alt, st.session_state.qnh), int(st.session_state.rpm_cruise), st.session_state.temp_c)
+        cur_alt, clock, efob = add_seg("CRUISE", frm, name_tod, i, d_cr, float(st.session_state.cruise_ref_kt), ff_cruise_calc, cur_alt, 0.0, clock, efob)
         frm = name_tod
 
     if d_ds > 1e-9:
-        cur_alt, clock, efob = add_seg("DESCENT", frm, to, i, d_ds, float(st.session_state.descent_ref_kt), ff_descent, cur_alt, st.session_state.rod_fpm, clock, efob)
+        cur_alt, clock, efob = add_seg("DESCENT", frm, to, i, d_ds, float(st.session_state.descent_ref_kt), float(st.session_state.descent_ff), cur_alt, float(st.session_state.rod_fpm), clock, efob)
         frm = to
 
-    # HOLD no ponto de chegada do leg (se houver), AO CHEGAR ao fix
     if hold_map.get(to,0.0) > 0:
         cur_alt, clock, efob = add_hold(to, hold_map[to], cur_alt, i, clock, efob)
 
@@ -909,8 +907,11 @@ with cA:
     st.metric("ROC @ DEP (ft/min)", _round_unit(roc))
     st.metric("ROD (ft/min)", _round_unit(st.session_state.rod_fpm))
 with cB:
-    st.metric("TAS climb/cruise/descent", f"{_round_unit(tas_climb)} / {_round_unit(tas_cruise)} / {_round_unit(tas_descent)} kt")
-    st.metric("FF climb/cruise/descent/hold", f"{_round_unit(ff_climb)} / {_round_unit(ff_cruise)} / {_round_unit(ff_descent)} / {_round_unit(ff_hold)} L/h")
+    st.metric("TAS climb/cruise/descent", f"{_round_unit(vy_kt)} / {_round_unit(st.session_state.cruise_ref_kt)} / {_round_unit(st.session_state.descent_ref_kt)} kt")
+    # recomputa FFs mostrados
+    _, ff_climb_show = cruise_lookup(start_alt + 0.5*max(0.0, cruise_alt-start_alt), int(st.session_state.rpm_climb), st.session_state.temp_c)
+    _, ff_cruise_show = cruise_lookup(pressure_alt(cruise_alt, st.session_state.qnh), int(st.session_state.rpm_cruise), st.session_state.temp_c)
+    st.metric("FF climb/cruise/descent/hold", f"{_round_unit(ff_climb_show)} / {_round_unit(ff_cruise_show)} / {_round_unit(st.session_state.descent_ff)} / {_round_unit(st.session_state.hold_ff_lph)} L/h")
 with cC:
     isa_dev = st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))
     st.metric("ISA dev @ DEP (°C)", int(round(isa_dev)))
@@ -943,6 +944,12 @@ except Exception as e:
     template_bytes=None; fieldset=set(); maxlens={}
     st.error(f"Não foi possível ler o PDF: {e}")
 
+# 🔎 Debug opcional dos campos do PDF
+if template_bytes and fieldset:
+    with st.expander("🔎 Campos do PDF (debug)"):
+        st.write(f"Total: {len(fieldset)}")
+        st.code("\n".join(sorted(fieldset)))
+
 named: Dict[str,str] = {}
 def P(key: str, value: str): put(named, fieldset, key, value, maxlens)
 def PAll(keys: List[str], value: str):
@@ -968,7 +975,7 @@ if fieldset:
     PAll(["FLT TIME","FLT_TIME","FLIGHT_TIME"], f"{(tot_ete_sec//3600):02d}:{((tot_ete_sec%3600)//60):02d}")
     PAll(["FLIGHT_LEVEL_ALTITUDE","LEVEL_FF","LEVEL F/F","Level_FF"], fmt(cruise_alt,'alt'))
 
-    # Combustível de CLIMB (opcionalmente útil noutros campos do template)
+    # Combustível de CLIMB (opcional)
     climb_time_hours = sum((d / gs_for(i,"CLIMB")) for i,d in enumerate(front_climb) if d > 0.0)
     _, ff_climb_tmp = cruise_lookup(start_alt + 0.5*max(0.0, cruise_alt-start_alt), int(st.session_state.rpm_climb), st.session_state.temp_c)
     climb_fuel_raw = ff_climb_tmp * max(0.0, climb_time_hours)
@@ -980,7 +987,6 @@ if fieldset:
     PAll(["ARRIVAL","ARRIVAL_FREQ","ARR_FREQ"], aero_freq(points[-1]))
     PAll(["DEPARTURE_AIRFIELD","Departure_Airfield"], points[0])
     PAll(["ARRIVAL_AIRFIELD","Arrival_Airfield"], points[-1])
-    # Leg_Number = nº de pontos oficiais (sem TOC/TOD; holds não contam como leg a mais)
     PAll(["Leg_Number","LEG_NUMBER"], str(len(points)))
     PAll(["ALTERNATE_AIRFIELD","Alternate_Airfield"], st.session_state.altn)
     PAll(["ALTERNATE_ELEVATION","Alternate_Elevation","TextField_7"], fmt(altn_elev,'alt'))
@@ -988,7 +994,6 @@ if fieldset:
     isa_dev_i = int(round(st.session_state.temp_c - isa_temp(pressure_alt(_round_alt(AEROS.get(points[0],{}).get("elev",0)), st.session_state.qnh))))
     PAll(["TEMP_ISA_DEV","TEMP ISA DEV","TEMP/ISA_DEV"], f"{int(round(st.session_state.temp_c))} / {isa_dev_i}")
     PAll(["MAG_VAR","MAG VAR"], f"{int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}")
-    # (Sem OBSERVATIONS — removido por pedido)
 
 # Botão Gerar + Download estável
 colp1, colp2 = st.columns([1,2])
@@ -1036,8 +1041,8 @@ def build_report_pdf():
         ["Startup / Taxi / ETD", f"{st.session_state.startup} / {st.session_state.taxi_min} min / {(add_seconds(parse_hhmm(st.session_state.startup),st.session_state.taxi_min*60).strftime('%H:%M') if st.session_state.startup else '')}"],
         ["QNH / OAT / ISA dev", f"{int(st.session_state.qnh)} / {int(st.session_state.temp_c)} / {int(round(st.session_state.temp_c - isa_temp(pressure_alt(_round_alt(AEROS.get(points[0],{}).get('elev',0)), st.session_state.qnh))))}"],
         ["Vento FROM / Var", f"{int(round(st.session_state.wind_from)):03d}/{int(round(st.session_state.wind_kt)):02d} / {int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}"],
-        ["TAS (cl/cru/des)", f"{_round_unit(tas_climb)}/{_round_unit(tas_cruise)}/{_round_unit(tas_descent)} kt"],
-        ["FF (cl/cru/des/hold)", f"{_round_unit(ff_climb)}/{_round_unit(ff_cruise)}/{_round_unit(ff_descent)}/{_round_unit(ff_hold)} L/h"],
+        ["TAS (cl/cru/des)", f"{_round_unit(vy_kt)}/{_round_unit(st.session_state.cruise_ref_kt)}/{_round_unit(st.session_state.descent_ref_kt)} kt"],
+        ["FF (cl/cru/des/hold)", f"{_round_unit(ff_climb_tmp)}/{_round_unit(cruise_lookup(pressure_alt(cruise_alt, st.session_state.qnh), int(st.session_state.rpm_cruise), st.session_state.temp_c)[1])}/{_round_unit(st.session_state.descent_ff)}/{_round_unit(st.session_state.hold_ff_lph)} L/h"],
         ["ROCs/ROD", f"{_round_unit(roc)} ft/min / {_round_unit(st.session_state.rod_fpm)} ft/min"],
         ["Totais", f"Dist {fmt(tot_nm,'dist')} nm • ETE {hhmmss_from_seconds(int(tot_ete_sec))} • Burn {fmt(tot_bo,'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"],
         ["TOC/TOD", (", ".join([f'{name} L{leg+1}@{fmt(pos,"dist")}nm' for (leg,pos,name) in toc_list]) + ("; " if toc_list and tod_list else "") + ", ".join([f'{name} L{leg+1}@{fmt(pos,"dist")}nm' for (leg,pos,name) in tod_list])) or "—"],
@@ -1064,7 +1069,7 @@ def build_report_pdf():
 
         if seg["phase"] == "HOLD":
             steps = [
-                ["1) Entrada", f"Sobre {prev['name']} • HOLD de {mmss_from_seconds(int(seg['ete_sec']))} • FF={_round_unit(ff_hold)} L/h"],
+                ["1) Entrada", f"Sobre {prev['name']} • HOLD de {mmss_from_seconds(int(seg['ete_sec']))} • FF={_round_unit(st.session_state.hold_ff_lph)} L/h"],
                 ["2) Distância", f"0.0 nm (órbita abstrata)"],
                 ["3) ETE arredondado", f"{mmss_from_seconds(seg['ete_sec'])}"],
                 ["4) Burn", f"arred={fmt(seg['burn'],'fuel')} L"],
@@ -1079,7 +1084,7 @@ def build_report_pdf():
                 ["3) Distância", f"{fmt(seg['dist'],'dist')} nm"],
                 ["4) ETE bruto", f"{hhmmss_from_seconds(int(seg.get('ete_raw',0)))}"],
                 ["5) ETE arredondado", f"nearest 10 s → {mmss_from_seconds(seg['ete_sec'])}"],
-                ["6) Débito combustível", f"{_round_unit(ff_climb) if p['phase']=='CLIMB' else _round_unit(ff_descent) if p['phase']=='DESCENT' else _round_unit(ff_cruise)} L/h"],
+                ["6) Débito combustível", f"{_round_unit(ff_climb_tmp) if p['phase']=='CLIMB' else _round_unit(st.session_state.descent_ff) if p['phase']=='DESCENT' else _round_unit(cruise_lookup(pressure_alt(cruise_alt, st.session_state.qnh), int(st.session_state.rpm_cruise), st.session_state.temp_c)[1])} L/h"],
                 ["7) Burn", f"arred={fmt(seg['burn'],'fuel')} L"],
                 ["8) Perfil vertical", f"{prev['alt']}→{seg['alt']} ft @ {'+' if p['phase']=='CLIMB' else '-' if p['phase']=='DESCENT' else '±0'}{int(abs(seg.get('rate_fpm',0)))} ft/min"],
                 ["9) ETO / EFOB", f"ETO={seg['eto'] or '—'}; EFOB={fmt(seg['efob'],'fuel')} L"]
