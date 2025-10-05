@@ -334,7 +334,6 @@ if "wind_rows" not in st.session_state or len(st.session_state.wind_rows) != len
     st.session_state.wind_rows = [{"Point":p, "FROM": float(st.session_state.wind_from), "KT": float(st.session_state.wind_kt)} for p in st.session_state.points]
 # hold por fix — alinhar tamanho
 if "hold_rows" not in st.session_state or len(st.session_state.hold_rows) != len(st.session_state.points):
-    # mantém valores anteriores quando possível
     old_map = {r.get("Point"): r for r in (st.session_state.get("hold_rows") or [])}
     st.session_state.hold_rows = [{"Point": p, "HOLD_MIN": float(old_map.get(p,{}).get("HOLD_MIN", 0.0))} for p in st.session_state.points]
 
@@ -749,25 +748,30 @@ hold_map = {r["Point"]: float(r.get("HOLD_MIN",0.0) or 0.0) for r in holds}
 # DEP
 seq_points.append({"name": points[0], "alt": _round_alt(start_alt), "tc":"", "th":"", "mc":"", "mh":"", "tas":"", "gs":"", "dist":"", "ete_sec":0, "eto": (takeoff.strftime("%H:%M") if takeoff else ""), "burn":"", "efob": efob, "leg_idx": None})
 
-def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
-    nonlocal clock, efob
-    if d_nm <= 1e-9 and phase!="HOLD":
-        return alt_start_ft
-    wdir,wkt = leg_wind(i_leg) if phase!="HOLD" else (st.session_state.wind_from, st.session_state.wind_kt)
-    tc=float(tcs[i_leg]) if phase!="HOLD" else 0.0
-    if phase!="HOLD":
+def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm, clock, efob):
+    """Retorna (alt_end, clock, efob)"""
+    if d_nm <= 1e-9 and phase != "HOLD":
+        return alt_start_ft, clock, efob
+
+    wdir, wkt = leg_wind(i_leg) if phase != "HOLD" else (st.session_state.wind_from, st.session_state.wind_kt)
+    tc = float(tcs[i_leg]) if phase != "HOLD" else 0.0
+
+    if phase != "HOLD":
         wca, th, gs = wind_triangle(tc, tas, wdir, wkt)
         mc = apply_var(tc, st.session_state.var_deg, st.session_state.var_is_e)
         mh = apply_var(th, st.session_state.var_deg, st.session_state.var_is_e)
-        ete_sec_raw = (60.0 * d_nm / max(gs,1e-6)) * 60.0
-        burn_raw = ff_lph * (ete_sec_raw/3600.0)
-        alt_end = alt_start_ft + (rate_fpm*(ete_sec_raw/60.0) if phase=="CLIMB" else (-rate_fpm*(ete_sec_raw/60.0) if phase=="DESCENT" else 0.0))
+        ete_sec_raw = (60.0 * d_nm / max(gs, 1e-6)) * 60.0
+        burn_raw = ff_lph * (ete_sec_raw / 3600.0)
+        alt_end = alt_start_ft + (
+            rate_fpm * (ete_sec_raw / 60.0) if phase == "CLIMB"
+            else (-rate_fpm * (ete_sec_raw / 60.0) if phase == "DESCENT" else 0.0)
+        )
     else:
-        # HOLD: Dist=0; usar FF de hold; tempo vem em 'd_nm' reinterpretado como minutos (ver função add_hold)
+        # HOLD: Dist=0; tempo vem em 'd_nm' (minutos), FF = hold
         wca, th, gs = 0.0, 0.0, 0.0
         mc = ""; mh = ""
         ete_sec_raw = float(d_nm) * 60.0
-        burn_raw = ff_lph * (ete_sec_raw/3600.0)
+        burn_raw = ff_lph * (ete_sec_raw / 3600.0)
         alt_end = alt_start_ft
 
     ete_sec = round_to_10s(ete_sec_raw)
@@ -795,7 +799,7 @@ def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
         "EFOB (L)": fmt(efob,'fuel')
     })
 
-    if phase!="HOLD":
+    if phase != "HOLD":
         seq_points.append({
             "name": to, "alt": _round_alt(alt_end),
             "tc": _round_angle(tc), "th": _round_angle(th),
@@ -808,7 +812,6 @@ def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
             "phase": phase, "efob": float(efob), "leg_idx": int(i_leg)
         })
     else:
-        # HOLD não avança ponto, mas registra passo a passo
         seq_points.append({
             "name": frm, "alt": _round_alt(alt_end),
             "tc": "", "th": "", "mc": "", "mh": "",
@@ -817,13 +820,14 @@ def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
             "eto": eto, "burn": float(burn_raw),
             "rate_fpm": 0.0, "phase": "HOLD", "efob": float(efob), "leg_idx": int(i_leg)
         })
-    return alt_end
 
-def add_hold(at_point:str, minutes: float, cur_alt_ft: float, i_leg_for_index:int):
-    """Insere um segmento HOLD (⟳) de 'minutes' sobre o ponto, dist=0."""
-    if minutes is None or minutes <= 0: return cur_alt_ft
-    # usamos 'd_nm' como minutos na função add_seg quando phase="HOLD"
-    return add_seg("HOLD", at_point, at_point, i_leg_for_index, minutes, 0.0, ff_hold, cur_alt_ft, 0.0)
+    return alt_end, clock, efob
+
+def add_hold(at_point: str, minutes: float, cur_alt_ft: float, i_leg_for_index: int, clock, efob):
+    """Insere um segmento HOLD (⟳) de 'minutes' sobre o ponto, dist=0. Retorna (alt_end, clock, efob)."""
+    if minutes is None or minutes <= 0:
+        return cur_alt_ft, clock, efob
+    return add_seg("HOLD", at_point, at_point, i_leg_for_index, minutes, 0.0, ff_hold, cur_alt_ft, 0.0, clock, efob)
 
 cur_alt = start_alt
 toc_list=[]; tod_list=[]
@@ -837,29 +841,29 @@ for i in range(N):
 
     # HOLD no ponto de partida do leg (se houver), ANTES de sair do fix
     if hold_map.get(frm,0.0) > 0:
-        cur_alt = add_hold(frm, hold_map[frm], cur_alt, i)
+        cur_alt, clock, efob = add_hold(frm, hold_map[frm], cur_alt, i, clock, efob)
 
     if d_cl > 1e-9:
         name_toc = toc_labels.get((i,d_cl), to)
         if name_toc != to:
             toc_list.append((i, d_cl, name_toc))
-        cur_alt = add_seg("CLIMB", frm, name_toc, i, d_cl, vy_kt, ff_climb, cur_alt, roc)
+        cur_alt, clock, efob = add_seg("CLIMB", frm, name_toc, i, d_cl, vy_kt, ff_climb, cur_alt, roc, clock, efob)
         frm = name_toc
 
     if d_cr > 1e-9:
         name_tod = tod_labels.get((i, d_cl+d_cr), to)
         if name_tod != to:
             tod_list.append((i, d_cl+d_cr, name_tod))
-        cur_alt = add_seg("CRUISE", frm, name_tod, i, d_cr, float(st.session_state.cruise_ref_kt), ff_cruise, cur_alt, 0.0)
+        cur_alt, clock, efob = add_seg("CRUISE", frm, name_tod, i, d_cr, float(st.session_state.cruise_ref_kt), ff_cruise, cur_alt, 0.0, clock, efob)
         frm = name_tod
 
     if d_ds > 1e-9:
-        cur_alt = add_seg("DESCENT", frm, to, i, d_ds, float(st.session_state.descent_ref_kt), ff_descent, cur_alt, st.session_state.rod_fpm)
+        cur_alt, clock, efob = add_seg("DESCENT", frm, to, i, d_ds, float(st.session_state.descent_ref_kt), ff_descent, cur_alt, st.session_state.rod_fpm, clock, efob)
         frm = to
 
     # HOLD no ponto de chegada do leg (se houver), AO CHEGAR ao fix
     if hold_map.get(to,0.0) > 0:
-        cur_alt = add_hold(to, hold_map[to], cur_alt, i)
+        cur_alt, clock, efob = add_hold(to, hold_map[to], cur_alt, i, clock, efob)
 
 eta = clock
 shutdown = add_seconds(eta, 5*60) if eta else None
