@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from math import sin, asin, radians, degrees, fmod, cos
 
 st.set_page_config(page_title="NAVLOG (PDF + Relatório)", layout="wide", initial_sidebar_state="collapsed")
-PDF_TEMPLATE_PATHS = ["NAVLOG_FORM.pdf", "NAVLOG_FORM.pdf"]  # procura local
+PDF_TEMPLATE_PATHS = ["NAVLOG_FORM.pdf", "/mnt/data/NAVLOG_FORM.pdf"]
 
 # ===== Optional deps =====
 try:
@@ -63,12 +63,12 @@ def hhmmss_from_seconds(tsec: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 def fmt(x: float, kind: str) -> str:
-    if kind == "dist":   return f"{round(float(x or 0),1):.1f}"
-    if kind == "fuel":   return f"{_round_tenth(x):.1f}"
-    if kind == "ff":     return str(_round_unit(x))
-    if kind == "speed":  return str(_round_unit(x))
-    if kind == "angle":  return str(_round_angle(x))
-    if kind == "alt":    return str(_round_alt(x))
+    if kind == "dist":   return f"{round(float(x or 0),1):.1f}"     # nm (0.1)
+    if kind == "fuel":   return f"{_round_tenth(x):.1f}"            # L (0.1)
+    if kind == "ff":     return str(_round_unit(x))                 # L/h (1)
+    if kind == "speed":  return str(_round_unit(x))                 # kt (1)
+    if kind == "angle":  return str(_round_angle(x))                # °
+    if kind == "alt":    return str(_round_alt(x))                  # <1000→50; ≥1000→100
     return str(x)
 
 # ===== Utils =====
@@ -198,141 +198,88 @@ def get_form_fields(template_bytes: bytes):
         if ml: maxlens[k] = int(ml)
     return field_names, maxlens
 
-# ======= FONT PATCH (com toggle e correção de IndirectObject) =======
-from pypdf.generic import (
-    DictionaryObject, NameObject, TextStringObject,
-    IndirectObject, ArrayObject
-)
-
-def _embed_arm_into_writer(writer: "PdfWriter", use_arm_font: bool):
-    """
-    Quando use_arm_font=True:
-      - embute Arm-Regular.ttf (ficheiro local pelo nome)
-      - mapeia /AcroForm/DR/Font/Arm
-      - define /DA global e por widget como '/Arm 10 Tf 0 g'
-      - recria cada widget e substitui no array /Annots (evita 'IndirectObject' assignment)
-    """
-    # Garantir AcroForm
-    acroform = writer._root_object.get("/AcroForm")
-    if acroform is None:
-        acroform = DictionaryObject()
-        writer._root_object[NameObject("/AcroForm")] = writer._add_object(acroform)
-
-    def _deref(obj):
-        while isinstance(obj, IndirectObject):
-            obj = obj.get_object()
-        return obj
-
-    if not use_arm_font:
-        acroform[NameObject("/NeedAppearances")] = True
-        acroform[NameObject("/DA")] = TextStringObject("/Helv 10 Tf 0 g")
-        return
-
-    try:
-        from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.ttfonts import TTFont
-        from reportlab.pdfgen import canvas
-
-        # localizar TTF ao lado do app
-        font_path = None
-        for p in ("Arm-Regular.ttf", "./Arm-Regular.ttf"):
-            if Path(p).exists():
-                font_path = p; break
-        if not font_path:
-            raise FileNotFoundError("Arm-Regular.ttf não encontrada no diretório do app.")
-
-        # construir mini-PDF para materializar a fonte
-        bio = io.BytesIO()
-        pdfmetrics.registerFont(TTFont("Arm", font_path))
-        c = canvas.Canvas(bio)
-        c.setFont("Arm", 10); c.drawString(10, 10, "."); c.save()
-        bio.seek(0)
-        carrier = PdfReader(bio)
-
-        res = _deref(carrier.pages[0]).get("/Resources")
-        font_res = _deref(res).get("/Font") if res else None
-        if not font_res:
-            raise RuntimeError("Falha a extrair recurso de fonte do carrier.")
-
-        # /AcroForm/DR/Font
-        dr = acroform.get("/DR")
-        if dr is None:
-            dr = DictionaryObject(); acroform[NameObject("/DR")] = dr
-        dr_font = dr.get("/Font")
-        if dr_font is None:
-            dr_font = DictionaryObject(); dr[NameObject("/Font")] = dr_font
-
-        any_font_obj = next(iter(font_res.values()))
-        arm_font_ref = writer._add_object(_deref(any_font_obj))
-        dr_font[NameObject("/Arm")] = arm_font_ref
-
-        # /DA global
-        acroform[NameObject("/DA")] = TextStringObject("/Arm 10 Tf 0 g")
-        acroform[NameObject("/NeedAppearances")] = True
-
-        # Recriar widgets e substituir no /Annots
-        for page in writer.pages:
-            annots_ref = page.get("/Annots")
-            if not annots_ref:
-                continue
-            annots = _deref(annots_ref)
-            if not isinstance(annots, ArrayObject):
-                continue
-
-            for idx, a in enumerate(list(annots)):
-                annot = _deref(a)
-                if not isinstance(annot, DictionaryObject):
-                    continue
-                if annot.get("/Subtype") != "/Widget":
-                    continue
-
-                # novo dicionário do widget, sem AP/DA/DR antigos
-                new_annot = DictionaryObject()
-                for k, v in annot.items():
-                    if k in (NameObject("/AP"), NameObject("/DA"), NameObject("/DR")):
-                        continue
-                    new_annot[NameObject(k)] = v
-
-                # /DA do widget
-                new_annot[NameObject("/DA")] = TextStringObject("/Arm 10 Tf 0 g")
-
-                # /DR/Font do widget
-                wdr = DictionaryObject()
-                wdr_font = DictionaryObject()
-                wdr_font[NameObject("/Arm")] = arm_font_ref
-                wdr[NameObject("/Font")] = wdr_font
-                new_annot[NameObject("/DR")] = wdr
-
-                # adicionar ao writer e substituir a referência no array /Annots
-                new_ref = writer._add_object(new_annot)
-                annots[idx] = new_ref
-
-    except Exception:
-        # fallback para Helv se algo correr mal
-        acroform[NameObject("/NeedAppearances")] = True
-        acroform[NameObject("/DA")] = TextStringObject("/Helv 10 Tf 0 g")
-
-def fill_pdf(template_bytes: bytes, fields: dict, use_arm_font: bool) -> bytes:
+def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     if not PYPDF_OK: raise RuntimeError("pypdf missing")
     reader = PdfReader(io.BytesIO(template_bytes))
     writer = PdfWriter()
     if hasattr(writer, "clone_document_from_reader"):
         writer.clone_document_from_reader(reader)
     else:
-        for p in reader.pages:
-            writer.add_page(p)
+        for p in reader.pages: writer.add_page(p)
         acro = reader.trailer["/Root"].get("/AcroForm")
         if acro is not None:
             writer._root_object.update({NameObject("/AcroForm"): acro})
+    try:
+        acroform = writer._root_object.get("/AcroForm")
+        if acroform:
+            acroform.update({
+                NameObject("/NeedAppearances"): True,
+                # vamos já definir um DA "neutro"; será substituído pela fonte Arm abaixo
+                NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")
+            })
+    except Exception:
+        pass
 
-    # Embedding/config de fonte (toggle)
-    _embed_arm_into_writer(writer, use_arm_font)
+    # ===== PATCH: Embutir Arm-Regular.ttf e usar no /DA =====
+    # cria um mini-PDF com a fonte TTF para materializar o objeto de fonte
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.pdfgen import canvas
+        from pypdf.generic import DictionaryObject
 
-    # Preencher campos
+        def _build_font_carrier(ttf_path: str, ps_name: str = "Arm") -> "PdfReader":
+            bio = io.BytesIO()
+            pdfmetrics.registerFont(TTFont(ps_name, ttf_path))
+            c = canvas.Canvas(bio)
+            c.setFont(ps_name, 10)     # força a criação do resource
+            c.drawString(10, 10, ".")  # um ponto chega
+            c.save()
+            bio.seek(0)
+            return PdfReader(bio)
+
+        font_reader = _build_font_carrier("/mnt/data/Arm-Regular.ttf", "Arm")
+
+        # obter /Resources/Font da 1ª página do carrier
+        font_res = None
+        try:
+            res = font_reader.pages[0].get("/Resources")
+            if res:
+                font_res = res.get("/Font")
+        except Exception:
+            font_res = None
+
+        if font_res:
+            acroform = writer._root_object.get("/AcroForm")
+            if acroform is None:
+                acroform = DictionaryObject()
+                writer._root_object[NameObject("/AcroForm")] = writer._add_object(acroform)
+
+            dr = acroform.get("/DR")
+            if dr is None:
+                dr = DictionaryObject()
+                acroform[NameObject("/DR")] = dr
+
+            dr_font = dr.get("/Font")
+            if dr_font is None:
+                dr_font = DictionaryObject()
+                dr[NameObject("/Font")] = dr_font
+
+            # pegar num dos objetos de fonte do carrier e adicioná-lo como /Arm
+            any_font_obj = next(iter(font_res.values()))
+            dr_font[NameObject("/Arm")] = writer._add_object(any_font_obj.get_object())
+
+            # atualizar o Default Appearance para usar /Arm
+            acroform[NameObject("/DA")] = TextStringObject("/Arm 10 Tf 0 g")
+            acroform[NameObject("/NeedAppearances")] = True
+    except Exception:
+        # se falhar o embedding, segue com Helv sem quebrar
+        pass
+    # ===== FIM PATCH =====
+
     str_fields = {k:(str(v) if v is not None else "") for k,v in fields.items()}
     for page in writer.pages:
         writer.update_page_form_field_values(page, str_fields)
-
     bio = io.BytesIO(); writer.write(bio); return bio.getvalue()
 
 def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
@@ -359,13 +306,12 @@ ensure("rpm_climb",2250); ensure("rpm_cruise",2000)
 ensure("descent_ff",15.0); ensure("rod_fpm",700); ensure("start_fuel",85.0)
 ensure("cruise_ref_kt",90); ensure("descent_ref_kt",65)
 ensure("use_navaids",False)
-ensure("use_arm_font", False)  # TOGGLE DA FONTE ARM
 
 # Taxi
 ensure("taxi_min",15)
-ensure("taxi_ff_lph",20.0)
+ensure("taxi_ff_lph",20.0)  # fixo
 
-# Vento por fix
+# Vento por fix (toggle + tabela)
 ensure("use_wind_by_fix", False)
 ensure("last_use_wind_by_fix", False)
 ensure("last_wind_from", float(st.session_state.wind_from))
@@ -477,7 +423,6 @@ with st.form("hdr_perf_form", clear_on_submit=False):
     with c12:
         f_use_wbf = st.checkbox("Vento por fix?", value=bool(st.session_state.use_wind_by_fix))
         st.caption("Quando ativo, define Wind FROM/kt por fix; cálculo usa média vetorial por leg.")
-        f_use_arm = st.checkbox("Usar fonte ARM (TTF) nos campos do PDF", value=bool(st.session_state.use_arm_font))
 
     submitted = st.form_submit_button("Aplicar cabeçalho + performance")
     if submitted:
@@ -485,7 +430,7 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         prev_wf  = float(st.session_state.wind_from)
         prev_wk  = float(st.session_state.wind_kt)
 
-        # guardar
+        # guardar novos valores
         st.session_state.aircraft=f_aircraft; st.session_state.registration=f_registration; st.session_state.callsign=f_callsign
         st.session_state.startup=f_startup; st.session_state.student=f_student; st.session_state.lesson=f_lesson; st.session_state.instrutor=f_instrut
         st.session_state.dept=f_dep; st.session_state.arr=f_arr; st.session_state.altn=f_altn
@@ -497,17 +442,21 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         st.session_state.use_navaids=f_use_nav
         st.session_state.taxi_min=f_taxi_min
         st.session_state.use_wind_by_fix=f_use_wbf
-        st.session_state.use_arm_font=f_use_arm
 
-        # sync vento por fix
+        # --- sincronizações desejadas ---
         pts = st.session_state.get("points") or [st.session_state.dept, st.session_state.arr]
+
         def fill_all_winds_from_general():
             st.session_state.wind_rows = [
                 {"Point":p, "FROM": float(st.session_state.wind_from), "KT": float(st.session_state.wind_kt)}
                 for p in pts
             ]
+
+        # 1) se ativou agora o toggle (OFF -> ON), preencher com vento geral atual
         if f_use_wbf and not prev_use:
             fill_all_winds_from_general()
+
+        # 2) se já estava ON e mudou o vento geral, propagar só se as linhas ainda estavam todas iguais ao vento geral anterior
         def all_rows_equal_to(from_deg, kt):
             wr = st.session_state.get("wind_rows") or []
             return len(wr)==len(pts) and all(abs(float(r.get("FROM",from_deg))-from_deg)<1e-9 and
@@ -523,7 +472,7 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         st.success("Parâmetros aplicados.")
 
 # =========================================================
-# Export / Import JSON v2
+# Export / Import JSON v2 (SEM vento por fix no ficheiro)
 # =========================================================
 st.subheader("Export / Import JSON v2 (rota, TCs/Dist, Altitudes por fix)")
 
@@ -563,6 +512,7 @@ with cJ2:
             st.session_state.route_text = " ".join(pts)
             st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
             st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
+            # vento por fix — reindexar preservando
             old_w = {r.get("Point"): r for r in (st.session_state.get("wind_rows") or [])}
             st.session_state.wind_rows = [{"Point":p,
                                            "FROM": float(old_w.get(p,{}).get("FROM", st.session_state.wind_from)),
@@ -585,6 +535,7 @@ if st.button("Aplicar rota"):
     st.session_state.route_text = " ".join(pts)
     st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
     st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
+    # vento por fix — reindexar preservando
     old_w = {r.get("Point"): r for r in (st.session_state.get("wind_rows") or [])}
     st.session_state.wind_rows = [{"Point":p,
                                    "FROM": float(old_w.get(p,{}).get("FROM", st.session_state.wind_from)),
@@ -619,7 +570,7 @@ alt_df = st.data_editor(
     column_config=alt_cfg, column_order=list(alt_cfg.keys())
 )
 
-# VENTO POR FIX — editor + sync
+# VENTO POR FIX — editor + botão de sync quando ativo
 if st.session_state.use_wind_by_fix:
     st.subheader("Vento por Fix")
     cwb1, cwb2 = st.columns([3,1])
@@ -640,7 +591,7 @@ if st.session_state.use_wind_by_fix:
                                           for r in st.session_state.wind_rows]
             st.success("Vento geral aplicado a todos os fixes.")
 
-# ===== AUTO-COMMIT =====
+# ===== AUTO-COMMIT: puxar edições pendentes dos editores =====
 def apply_pending_edits():
     if "plan_table" in st.session_state and isinstance(st.session_state.plan_table, list):
         st.session_state.plan_rows = st.session_state.plan_table
@@ -648,6 +599,7 @@ def apply_pending_edits():
         st.session_state.alt_rows = st.session_state.alt_table
     if st.session_state.use_wind_by_fix and "wind_by_fix_table" in st.session_state and isinstance(st.session_state.wind_by_fix_table, list):
         st.session_state.wind_rows = st.session_state.wind_by_fix_table
+
 apply_pending_edits()
 
 # =========================================================
@@ -693,6 +645,7 @@ def vec_to_from(u: float, v: float) -> Tuple[float,float]:
     return (degrees(th_from) % 360.0), spd
 
 def leg_wind(i:int) -> Tuple[float,float]:
+    """Se 'vento por fix' ON: média vetorial entre fix de saída e chegada; senão: vento geral."""
     if not st.session_state.use_wind_by_fix or not winds or len(winds) != len(points):
         return (float(st.session_state.wind_from), float(st.session_state.wind_kt))
     frm = legs[i]["From"]; to = legs[i]["To"]
@@ -709,9 +662,9 @@ def gs_for(i:int, phase:str) -> float:
     _,_,gs = wind_triangle(tcs[i], tas, wdir, wkt)
     return max(gs,1e-6)
 
-# climb frente
+# 1) climb para Cruise (frente)
 front_climb = [0.0]*N
-t_need_climb = max(0.0, cruise_alt - start_alt) / max(roc,1e-6)
+t_need_climb = max(0.0, cruise_alt - start_alt) / max(roc,1e-6)  # min
 rem = t_need_climb
 for i in range(N):
     if rem <= 1e-9: break
@@ -720,7 +673,7 @@ for i in range(N):
     front_climb[i] = gs_for(i,"CLIMB") * use / 60.0
     rem -= use
 
-# descidas atrás
+# 2) descidas obrigatórias (atrás)
 back_desc = [0.0]*N
 hard_map = {idx: float(r["Alt_ft"]) for idx,r in enumerate(alts) if bool(r.get("Fix"))}
 hard_map[0] = start_alt
@@ -747,7 +700,7 @@ for fix_idx, alt_ft in sorted(hard_map.items()):
         if miss and miss>1e-6:
             impossible_notes.append(f"Impossível descer para {int(alt_ft)} ft em {points[fix_idx]} (faltam {miss:.1f} min).")
 
-# overlap climb vs descent
+# 3) resolver overlap climb vs descent
 for i in range(N-1, -1, -1):
     overlap = max(0.0, front_climb[i] + back_desc[i] - dist[i])
     if overlap>1e-9:
@@ -757,7 +710,7 @@ for i in range(N-1, -1, -1):
             can = min(overlap, front_climb[k])
             front_climb[k]-=can; overlap-=can; k-=1
 
-# TOC/TOD
+# 4) TOC/TOD
 toc_positions=[]; tod_positions=[]
 for i in range(N):
     d = dist[i]; d_cl = min(front_climb[i], d)
@@ -776,12 +729,12 @@ if len(tod_positions)==1: tod_labels[tod_positions[0]] = "TOD"
 else:
     for n, key in enumerate(tod_positions, start=1): tod_labels[key] = f"TOD-{n}"
 
-# construir segmentos
+# 5) construir segmentos
 rows=[]; seq_points=[]
 efob=float(st.session_state.start_fuel)
 
 startup = parse_hhmm(st.session_state.startup)
-takeoff = add_seconds(startup, int(st.session_state.taxi_min*60)) if startup else None
+takeoff = add_seconds(startup, int(st.session_state.taxi_min*60)) if startup else None  # TAXI = input (min)
 clock = takeoff
 
 # DEP
@@ -930,6 +883,7 @@ if fieldset:
     PAll(["FLT TIME","FLT_TIME","FLIGHT_TIME"], f"{(tot_ete_sec//3600):02d}:{((tot_ete_sec%3600)//60):02d}")
     PAll(["FLIGHT_LEVEL_ALTITUDE","LEVEL_FF","LEVEL F/F","Level_FF"], fmt(cruise_alt,'alt'))
 
+    # Combustível de CLIMB (opcionalmente útil noutros campos do template)
     climb_time_hours = sum((d / gs_for(i,"CLIMB")) for i,d in enumerate(front_climb) if d > 0.0)
     _, ff_climb_tmp = cruise_lookup(start_alt + 0.5*max(0.0, cruise_alt-start_alt), int(st.session_state.rpm_climb), st.session_state.temp_c)
     climb_fuel_raw = ff_climb_tmp * max(0.0, climb_time_hours)
@@ -943,6 +897,7 @@ if fieldset:
     PAll(["DEPARTURE_AIRFIELD","Departure_Airfield"], points[0])
     PAll(["ARRIVAL_AIRFIELD","Arrival_Airfield"], points[-1])
 
+    # Leg_Number = nº de pontos oficiais (sem TOC/TOD)
     PAll(["Leg_Number","LEG_NUMBER"], str(len(points)))
 
     PAll(["ALTERNATE_AIRFIELD","Alternate_Airfield"], st.session_state.altn)
@@ -953,10 +908,12 @@ if fieldset:
     PAll(["TEMP_ISA_DEV","TEMP ISA DEV","TEMP/ISA_DEV"], f"{int(round(st.session_state.temp_c))} / {isa_dev_i}")
     PAll(["MAG_VAR","MAG VAR"], f"{int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}")
 
+    # (Sem OBSERVATIONS — removido por pedido)
+
 if st.button("Gerar PDF NAVLOG", type="primary"):
     try:
         if not template_bytes: raise RuntimeError("Template PDF não carregado")
-        out = fill_pdf(template_bytes, named, use_arm_font=bool(st.session_state.use_arm_font))
+        out = fill_pdf(template_bytes, named)
         m = re.search(r'(\d+)', st.session_state.lesson or "")
         lesson_num = m.group(1) if m else "00"
         safe_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%Y-%m-%d")
@@ -1011,7 +968,7 @@ def build_report_pdf():
 
     story.append(Paragraph("Cálculos por segmento (passo a passo)", H2))
     for i, p in enumerate(seq_points):
-        if i==0:
+        if i==0:  # DEP line
             continue
         prev = seq_points[i-1]
         seg = p
@@ -1059,5 +1016,3 @@ if st.button("Gerar Relatório (PDF)"):
         st.success("Relatório gerado.")
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
-
-
