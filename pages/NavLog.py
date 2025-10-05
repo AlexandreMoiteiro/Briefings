@@ -1060,3 +1060,4 @@ if st.button("Gerar Relatório (PDF)"):
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
 
+
