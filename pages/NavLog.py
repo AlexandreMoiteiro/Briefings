@@ -15,7 +15,7 @@ PDF_TEMPLATE_PATHS = ["NAVLOG_FORM.pdf", "/mnt/data/NAVLOG_FORM.pdf"]
 # ===== Optional deps =====
 try:
     from pypdf import PdfReader, PdfWriter
-    from pypdf.generic import NameObject, TextStringObject
+    from pypdf.generic import NameObject, TextStringObject, DictionaryObject
     PYPDF_OK = True
 except Exception:
     PYPDF_OK = False
@@ -176,7 +176,6 @@ def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: f
     s = max(-1.0, min(1.0, cross/max(tas_kt,1e-9)))
     wca = degrees(asin(s))
     th = wrap360(tc_deg + wca)
-    # componente headwind (positivo reduz GS)
     head = wind_kt * math.cos(delta)
     gs = max(1e-6, tas_kt*math.cos(radians(wca)) - head)
     return wca, th, gs
@@ -216,29 +215,61 @@ def get_form_fields(template_bytes: bytes):
     return field_names, maxlens
 
 def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
-    if not PYPDF_OK: raise RuntimeError("pypdf missing")
+    """Preenche campos e garante fonte Helvetica no AcroForm para evitar 'quadradinhos'."""
+    if not PYPDF_OK:
+        raise RuntimeError("pypdf missing")
+
     reader = PdfReader(io.BytesIO(template_bytes))
     writer = PdfWriter()
+
+    # copiar páginas
     if hasattr(writer, "clone_document_from_reader"):
         writer.clone_document_from_reader(reader)
     else:
-        for p in reader.pages: writer.add_page(p)
+        for p in reader.pages:
+            writer.add_page(p)
+
+    # ligar o AcroForm existente ao writer
     acro = reader.trailer["/Root"].get("/AcroForm")
     if acro is not None:
         writer._root_object.update({NameObject("/AcroForm"): acro})
+
     try:
         acroform = writer._root_object.get("/AcroForm")
         if acroform:
+            # pedir que o viewer gere aparências + fonte default
             acroform.update({
                 NameObject("/NeedAppearances"): True,
                 NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")
             })
+            # garantir Helvetica no /DR
+            dr = acroform.get("/DR")
+            if dr is None:
+                dr = DictionaryObject()
+                acroform.update({NameObject("/DR"): dr})
+            fonts = dr.get("/Font")
+            if fonts is None:
+                fonts = DictionaryObject()
+                dr.update({NameObject("/Font"): fonts})
+            if "/Helv" not in fonts:
+                helv = DictionaryObject()
+                helv.update({
+                    NameObject("/Type"): NameObject("/Font"),
+                    NameObject("/Subtype"): NameObject("/Type1"),
+                    NameObject("/BaseFont"): NameObject("/Helvetica"),
+                })
+                fonts.update({NameObject("/Helv"): helv})
     except Exception:
         pass
+
+    # preencher campos (strings)
     str_fields = {k:(str(v) if v is not None else "") for k,v in fields.items()}
     for page in writer.pages:
         writer.update_page_form_field_values(page, str_fields)
-    bio = io.BytesIO(); writer.write(bio); return bio.getvalue()
+
+    bio = io.BytesIO()
+    writer.write(bio)
+    return bio.getvalue()
 
 def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
     if key in fieldset:
