@@ -450,13 +450,13 @@ if "plan_rows" not in st.session_state:
 if "alt_rows" not in st.session_state:
     st.session_state.alt_rows = rebuild_alt_rows(st.session_state.points, st.session_state.cruise_alt, None)
 
-# ===== Helpers para o editor -> records (à prova de sort/tipo) =====
+# ===== Helpers para o editor -> records =====
 def to_records(obj) -> List[dict]:
     try:
         import pandas as pd
         if isinstance(obj, pd.DataFrame):
             obj = obj.fillna(0)
-            return [{k: (clean_point_name(v) if k=="Point" else (float(v) if k=="Alt_ft" or k=="Hold_min" else bool(v) if k in ("Fix","Hold") else v))
+            return [{k: (clean_point_name(v) if k=="Point" else (float(v) if k in ("Alt_ft","Hold_min") else bool(v) if k in ("Fix","Hold") else v))
                      for k,v in row.items()} for _, row in obj.iterrows()]
     except Exception:
         pass
@@ -473,7 +473,6 @@ def to_records(obj) -> List[dict]:
         return rec
     return []
 
-# --- Normalizadores à prova de ordenação ---
 def normalize_legs(points: List[str], edited_rows: List[dict]) -> List[dict]:
     edited_map = {(clean_point_name(r["From"]), clean_point_name(r["To"])): r for r in edited_rows}
     rows = []
@@ -830,7 +829,7 @@ for p in seq_points:
         holds_by_point[nm]["burn"] += float(p.get("burn",0.0))
 
 # =========================================================
-# Depuração: Perfil alvo aplicado (para tu confirmares que aplicou)
+# Depuração: Perfil alvo aplicado
 # =========================================================
 st.subheader("Perfil alvo aplicado (ponto / Fixar? / Altitude alvo)")
 _applied_rows = []
@@ -1016,8 +1015,8 @@ def build_report_pdf():
         ["ROCs/ROD", f"{_round_unit(roc)} ft/min / {_round_unit(st.session_state.rod_fpm)} ft/min"],
         ["Tempos por fase", f"Climb {mmss_from_seconds(phase_secs['CLIMB'])} • Enroute {mmss_from_seconds(phase_secs['CRUISE'])} • Descent {mmss_from_seconds(phase_secs['DESCENT'])} • Holding {mmss_from_seconds(phase_secs['HOLD'])}"],
         ["Totais", f"Dist {fmt(sum(float(p['dist']) for p in seq_points if p.get('dist')), 'dist')} nm • ETE {hhmmss_from_seconds(int(sum(int(p.get('ete_sec',0)) for p in seq_points)))} • Burn {fmt(sum(float(p.get('burn',0)) for p in seq_points),'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"],
-        ["TOC/TOD", (", ".join([f'{name} L{leg+1}@{fmt(pos,"dist")}nm' for (leg,pos,name) in toc_list]) + ("; " if toc_list and tod_list else "") +
-                     ", ".join([f'{name} L{leg+1}@{fmt(pos,"dist")}nm' for (leg,pos,name) in tod_list])) or "—"],
+        ["TOC/TOD", (", ".join([f'{name} L{leg+1}@{fmt(pos,\"dist\")}nm' for (leg,pos,name) in toc_list]) + ("; " if toc_list and tod_list else "") +
+                     ", ".join([f'{name} L{leg+1}@{fmt(pos,\"dist\")}nm' for (leg,pos,name) in tod_list])) or "—"],
     ]
     t1 = LongTable(resume, colWidths=[64*mm, None], hAlign="LEFT")
     t1.setStyle(TableStyle([
@@ -1047,7 +1046,7 @@ def build_report_pdf():
             ]
         else:
             steps = [
-                ["1) Dados de entrada", f"TC={seg.get('tc','')}°T; TAS={seg.get('tas','')} kt; Vento FROM={int(st.session_state.wind_from):03d}/{int(st.session_state.wind_kt)):02d} kt"],
+                ["1) Dados de entrada", f"TC={seg.get('tc','')}°T; TAS={seg.get('tas','')} kt; Vento FROM={int(st.session_state.wind_from):03d}/{int(st.session_state.wind_kt):02d} kt"],
                 ["2) Triângulo de vento", f"WCA={seg.get('wca',0)}°; TH={seg.get('th','')}°T; MH={seg.get('mh','')}°M; GS={seg.get('gs','')} kt"],
                 ["3) Distância", f"{fmt(seg.get('dist',0),'dist')} nm"],
                 ["4) ETE arred.", f"{mmss_from_seconds(seg.get('ete_sec',0))} (nearest 10s)"],
@@ -1080,4 +1079,5 @@ if st.button("Gerar Relatório (PDF)"):
         st.success("Relatório gerado.")
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
+
 
