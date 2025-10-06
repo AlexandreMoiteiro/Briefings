@@ -1,5 +1,4 @@
-# app.py — NAVLOG (TOC/TOD só para CRUISE, TC/Dist editáveis, altitudes iniciais/finais editáveis,
-# sem duplicar fixes, contagem correta de fases, tempos "min"/"h", holds contam no Enroute)
+# app.py — NAVLOG (TOC/TOD só para CRUISE, sem linha DEP, Alt DEP/ARR editáveis, HOLD soma em ENROUTE)
 # Reqs: streamlit, pypdf, reportlab, pytz
 
 import streamlit as st
@@ -56,15 +55,6 @@ def round_to_10s(sec: float) -> int:
     if sec <= 0: return 0
     s = int(round(sec/10.0)*10)
     return max(s, 10)
-
-def mm_or_h_from_seconds(sec: int) -> str:
-    """Formata tempos: <60min = 'mm min'; >=60min = 'Hh h'."""
-    m = int(round(sec/60.0))
-    if m < 60:
-        return f"{m} min"
-    h = m/60.0
-    # 1 casa decimal se necessário
-    return f"{h:.1f} h" if abs(h - int(h)) > 1e-6 else f"{int(h)} h"
 
 def mmss_from_seconds(tsec: int) -> str:
     m = tsec // 60; s = tsec % 60
@@ -353,8 +343,7 @@ def export_json_v2():
     pts   = current_points()
     legs  = st.session_state.get("plan_rows") or []
     alts  = st.session_state.get("alt_rows")  or []
-    alt_set  = [ (r.get("Alt_ft") if r.get("Fix") or i in (0, len(pts)-1) else None)
-                 for i,r in enumerate(alts) ] if alts else [None]*len(pts)
+    alt_set  = [(r.get("Alt_ft") if r.get("Fix") or i in (0, len(pts)-1) else None) for i,r in enumerate(alts)] if alts else [None]*len(pts)
     alt_fix  = [ bool(r.get("Fix", False)) for r in alts ] if alts else [False]*len(pts)
     hold_on  = [ bool(r.get("Hold", False)) for r in alts ] if alts else [False]*len(pts)
     hold_min = [ float(r.get("Hold_min", 0.0)) for r in alts ] if alts else [0.0]*len(pts)
@@ -387,17 +376,16 @@ with cJ2:
                 rows[i]["TC"]=float(legs_in[i].get("TC",0.0))
                 rows[i]["Dist"]=float(legs_in[i].get("Dist",0.0))
             st.session_state.plan_rows = rows
-            # alts (por índice; DEP/ARR por defeito = elevação, mas editável)
+            # alts
             dep_e=_round_alt(aero_elev(pts[0])); arr_e=_round_alt(aero_elev(pts[-1]))
             ar=[]
             aset = data.get("alt_set_ft") or []; afix = data.get("alt_fixed") or []
             hOn  = data.get("alt_hold_on") or []; hMin = data.get("alt_hold_min") or []
             for i,p in enumerate(pts):
                 row={"Fix":False,"Point":p,"Alt_ft":float(_round_alt(st.session_state.cruise_alt)),"Hold":False,"Hold_min":0.0}
-                if i==0: row["Fix"]=True; row["Alt_ft"]=float(dep_e)  # default
-                elif i==len(pts)-1: row["Fix"]=True; row["Alt_ft"]=float(arr_e)  # default
-                if i<len(aset) and i<len(afix) and afix[i] and aset[i] is not None:
-                    row["Fix"]=True; row["Alt_ft"]=float(aset[i])
+                if i==0: row["Fix"]=True; row["Alt_ft"]=float(dep_e)
+                elif i==len(pts)-1: row["Fix"]=True; row["Alt_ft"]=float(arr_e)
+                if i<len(aset) and i<len(afix) and afix[i] and aset[i] is not None: row["Fix"]=True; row["Alt_ft"]=float(aset[i])
                 if i<len(hOn) and i<len(hMin): row["Hold"]=bool(hOn[i]); row["Hold_min"]=float(hMin[i])
                 ar.append(row)
             st.session_state.alt_rows = ar
@@ -430,15 +418,15 @@ def rebuild_alt_rows(points: List[str], cruise:int, prev: Optional[List[dict]]):
     out=[]
     prev = prev or []
     for i,p in enumerate(points):
-        base = prev[i] if i < len(prev) else {"Fix": True if i in (0,len(points)-1) else False,
-                                              "Alt_ft": float(_round_alt(cruise if i not in (0,len(points)-1) else (dep_e if i==0 else arr_e))),
-                                              "Hold": False, "Hold_min": 0.0, "Point": p}
-        # Não forçar, apenas defaults; é editável depois
+        base = prev[i] if i < len(prev) else {"Fix": False, "Alt_ft": float(_round_alt(cruise)), "Hold": False, "Hold_min": 0.0, "Point": p}
         row = {"Fix": bool(base.get("Fix", False)),
                "Point": p,
                "Alt_ft": float(base.get("Alt_ft", _round_alt(cruise))),
                "Hold": bool(base.get("Hold", False)),
                "Hold_min": float(base.get("Hold_min", 0.0))}
+        # por defeito DEP/ARR = elevação, mas NÃO força; ficam editáveis na tabela (ver combined)
+        if i==0 and base.get("Alt_ft", None) is None: row["Fix"]=True;  row["Alt_ft"]=float(dep_e)
+        elif i==len(points)-1 and base.get("Alt_ft", None) is None: row["Fix"]=True;  row["Alt_ft"]=float(arr_e)
         out.append(row)
     return out
 
@@ -448,7 +436,7 @@ def to_records(obj) -> List[dict]:
         if isinstance(obj, pd.DataFrame):
             obj = obj.fillna(0)
             return [{k: (clean_point_name(v) if k=="Point" else
-                         (float(v) if k in ("Alt_to_ft","Alt_ft","Hold_to_min","Hold_min","Dist","TC") else
+                         (float(v) if k in ("Alt_to_ft","Alt_dep_ft","Alt_arr_ft","Hold_to_min","Hold_min","Dist","TC") else
                           bool(v) if k in ("Fix","Hold","Fix_to","Hold_to") else v))
                      for k,v in row.items()} for _, row in obj.iterrows()]
     except Exception:
@@ -458,33 +446,34 @@ def to_records(obj) -> List[dict]:
         for r in obj:
             d=dict(r)
             if "Point" in d: d["Point"]=clean_point_name(d.get("Point"))
-            for numk in ("Alt_to_ft","Alt_ft","Hold_to_min","Hold_min","Dist","TC"):
-                if numk in d: d[numk]=float(d[numk]) if d[numk] not in ("",None) else 0.0
+            for numk in ("Alt_to_ft","Alt_dep_ft","Alt_arr_ft","Hold_to_min","Hold_min","Dist","TC"):
+                if numk in d: d[numk]=float(d[numk])
             for boolk in ("Fix","Hold","Fix_to","Hold_to"):
                 if boolk in d: d[boolk]=bool(d[boolk])
             rec.append(d)
         return rec
     return []
 
-# ===== Combined editor (legs + altitude/hold do destino por ÍNDICE) =====
+# ===== Combined editor (legs + altitude/hold do destino por ÍNDICE, Alt DEP/ARR editáveis) =====
 def build_combined_rows(points: List[str], legs: List[dict], alts: List[dict]) -> List[dict]:
     rows=[]
-    dep_e=_round_alt(aero_elev(points[0])); arr_e=_round_alt(aero_elev(points[-1]))
+    dep_alt = float(alts[0]["Alt_ft"]) if alts else float(_round_alt(aero_elev(points[0])))
+    arr_alt = float(alts[-1]["Alt_ft"]) if alts else float(_round_alt(aero_elev(points[-1])))
     for i in range(1, len(points)):
         frm, to = points[i-1], points[i]
         leg = (legs[i-1] if i-1 < len(legs) else {"TC":0.0,"Dist":0.0})
         arow = alts[i] if i < len(alts) else {"Fix": False, "Alt_ft": _round_alt(st.session_state.cruise_alt), "Hold": False, "Hold_min": 0.0}
-        # Defaults para i==0/last, mas editável:
-        default_alt = dep_e if i==0 else (arr_e if i==len(points)-1 else _round_alt(st.session_state.cruise_alt))
         rows.append({
             "From": frm,
             "To": to,
             "TC": float(leg.get("TC", 0.0)),
             "Dist": float(leg.get("Dist", 0.0)),
-            "Fix_to": bool(arow.get("Fix", True if i in (len(points)-1,) else False)),
-            "Alt_to_ft": float(arow.get("Alt_ft", default_alt)),
+            "Fix_to": True if i==len(points)-1 else bool(arow.get("Fix", False)),
+            "Alt_to_ft": float(arow.get("Alt_ft", _round_alt(st.session_state.cruise_alt))) if (i==len(points)-1 or bool(arow.get("Fix", False))) else float(_round_alt(st.session_state.cruise_alt)),
             "Hold_to": bool(arow.get("Hold", False)),
             "Hold_to_min": float(arow.get("Hold_min", 0.0)),
+            "Alt_dep_ft": float(dep_alt) if i==1 else 0.0,
+            "Alt_arr_ft": float(arr_alt) if i==len(points)-1 else 0.0,
         })
     return rows
 
@@ -499,25 +488,31 @@ def normalize_from_combined(points: List[str], edited_rows: List[dict]) -> Tuple
             "TC": float(r.get("TC", 0.0)),
             "Dist": float(r.get("Dist", 0.0)),
         })
-    # alt_rows por índice — totalmente editável em DEP/ARR também
+    # alt_rows por índice (inclui Alt DEP/ARR editáveis)
+    dep_e = float(_round_alt(aero_elev(points[0])))
+    arr_e = float(_round_alt(aero_elev(points[-1])))
+    dep_alt = float(edited_rows[0].get("Alt_dep_ft", dep_e)) if edited_rows else dep_e
+    arr_alt = float(edited_rows[-1].get("Alt_arr_ft", arr_e)) if edited_rows else arr_e
+
     out = []
     for i, p in enumerate(points):
+        base = {"Fix": False, "Alt_ft": float(_round_alt(st.session_state.cruise_alt)),
+                "Hold": False, "Hold_min": 0.0}
         if i == 0:
-            # pega da primeira linha "Alt_to" do primeiro leg (destino do leg 0)
-            first = edited_rows[0] if edited_rows else {}
-            # por default a elevação; mas o utilizador pode definir nesta própria tabela? sim:
-            dep_alt = out[0]["Alt_ft"] if out else _round_alt(aero_elev(p))
-            base = {"Fix": True, "Alt_ft": float(dep_alt), "Hold": False, "Hold_min": 0.0}
+            base["Fix"] = True; base["Alt_ft"] = float(dep_alt)
+        elif i == len(points)-1:
+            base["Fix"] = True; base["Alt_ft"] = float(arr_alt)
+            r_last = edited_rows[-1] if edited_rows else {}
+            base["Hold"] = bool(r_last.get("Hold_to", False))
+            base["Hold_min"] = float(r_last.get("Hold_to_min", 0.0))
         else:
-            r_prev_leg = edited_rows[i-1] if i-1 < len(edited_rows) else {}
-            base = {
-                "Fix": bool(r_prev_leg.get("Fix_to", False)) if i not in (0,) else True,
-                "Alt_ft": float(r_prev_leg.get("Alt_to_ft", _round_alt(st.session_state.cruise_alt))),
-                "Hold": bool(r_prev_leg.get("Hold_to", False)),
-                "Hold_min": float(r_prev_leg.get("Hold_to_min", 0.0)),
-            }
+            r = edited_rows[i-1] if i-1 < len(edited_rows) else {}
+            is_fix = bool(r.get("Fix_to", False))
+            base["Fix"] = is_fix
+            base["Alt_ft"] = float(r.get("Alt_to_ft", _round_alt(st.session_state.cruise_alt))) if is_fix else float(_round_alt(st.session_state.cruise_alt))
+            base["Hold"] = bool(r.get("Hold_to", False))
+            base["Hold_min"] = float(r.get("Hold_to_min", 0.0))
         out.append({"Point": p, **base})
-    # permitir editar DEP/ARR: se quiseres mudar DEP/ARR, o user edita a primeira/última linha do editor (que é o 'To' da perna anterior)
     return plan_rows, out
 
 default_route = f"{st.session_state.dept} {st.session_state.arr}"
@@ -545,7 +540,7 @@ if "combined_rows" not in st.session_state or st.session_state.combined_rows is 
     st.session_state.combined_rows = build_combined_rows(st.session_state.points, st.session_state.plan_rows, st.session_state.alt_rows)
 
 # ===== Editor Único =====
-st.subheader("Plano (TC/Dist + Altitude & HOLD no Fix de destino)")
+st.subheader("Plano (TC/Dist + Altitude & HOLD no Fix de destino) — Alt DEP/ARR editáveis")
 combined_cfg = {
     "From": st.column_config.TextColumn("From", disabled=True),
     "To":   st.column_config.TextColumn("To", disabled=True),
@@ -555,6 +550,8 @@ combined_cfg = {
     "Alt_to_ft": st.column_config.NumberColumn("Alt 'To' (ft)", step=50, min_value=0.0),
     "Hold_to": st.column_config.CheckboxColumn("HOLD no 'To'?"),
     "Hold_to_min": st.column_config.NumberColumn("Min no HOLD 'To'", step=1.0, min_value=0.0),
+    "Alt_dep_ft": st.column_config.NumberColumn("Alt DEP (só 1ª linha)", step=50, min_value=0.0),
+    "Alt_arr_ft": st.column_config.NumberColumn("Alt ARR (só última linha)", step=50, min_value=0.0),
 }
 with st.form("combined_form", clear_on_submit=False):
     combined_edited = st.data_editor(
@@ -574,17 +571,38 @@ with st.form("combined_form", clear_on_submit=False):
         if st.session_state.auto_fix_edits:
             crz=_round_alt(st.session_state.cruise_alt)
             for i,r in enumerate(st.session_state.alt_rows):
-                try:
-                    if i not in (0, len(st.session_state.alt_rows)-1):
+                if i not in (0, len(st.session_state.alt_rows)-1):
+                    try:
                         if abs(float(r.get("Alt_ft", crz)) - float(crz)) >= 1 and not bool(r.get("Fix", False)):
                             r["Fix"] = True
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
         st.session_state["__alts_applied_at__"] = dt.datetime.utcnow().isoformat()
         st.success("Plano aplicado (TC/Dist/Altitudes/HOLDs).")
 
+# ===== NAVAIDs (opcional) =====
+if st.session_state.use_navaids:
+    st.subheader("NAVAIDs opcionais (para o PDF)")
+    if "nav_rows" not in st.session_state or len(st.session_state.nav_rows) != len(st.session_state.points):
+        st.session_state.nav_rows = [{"Point":p,"IDENT":"","FREQ":""} for p in st.session_state.points]
+    if [r["Point"] for r in st.session_state.nav_rows] != st.session_state.points:
+        old = {i:r for i,r in enumerate(st.session_state.nav_rows)}
+        st.session_state.nav_rows = [{"Point":p,"IDENT":old.get(i,{}).get("IDENT",""),
+                                      "FREQ":old.get(i,{}).get("FREQ","")} for i,p in enumerate(st.session_state.points)]
+    nav_cfg = {"Point": st.column_config.TextColumn("Fix", disabled=True),
+               "IDENT": st.column_config.TextColumn("Ident"),
+               "FREQ":  st.column_config.TextColumn("Freq")}
+    with st.form("navaids_form", clear_on_submit=False):
+        edited_nav = st.data_editor(st.session_state.nav_rows, key="navaids_table",
+                                    hide_index=True, use_container_width=True, num_rows="fixed",
+                                    column_config=nav_cfg, column_order=list(nav_cfg.keys()))
+        nav_submit = st.form_submit_button("Aplicar NAVAIDs")
+        if nav_submit:
+            st.session_state.nav_rows = to_records(edited_nav)
+            st.success("NAVAIDs aplicados.")
+
 # =========================================================
-# Cálculo (perfil com TOC/TOD apenas para CRUISE) — sem duplicar fixes
+# Cálculo (perfil com TOC/TOD apenas para CRUISE; sem linha DEP)
 # =========================================================
 points = st.session_state.points
 legs   = st.session_state.plan_rows
@@ -596,14 +614,12 @@ dep_elev  = _round_alt(aero_elev(points[0]))
 arr_elev  = _round_alt(aero_elev(points[-1]))
 altn_elev = _round_alt(aero_elev(st.session_state.altn))
 
-start_alt = float(alts[0].get("Alt_ft") if alts else dep_elev)  # editável
 cruise_alt = float(st.session_state.cruise_alt)
-
-pa_start  = pressure_alt(start_alt, st.session_state.qnh)
+pa_start  = pressure_alt(float(alts[0]["Alt_ft"]), st.session_state.qnh) if alts else pressure_alt(dep_elev, st.session_state.qnh)
 vy_kt = vy_interp_enroute(pa_start)
 tas_climb, tas_cruise, tas_descent = vy_kt, float(st.session_state.cruise_ref_kt), float(st.session_state.descent_ref_kt)
 roc = roc_interp_enroute(pa_start, st.session_state.temp_c)
-_, ff_climb = cruise_lookup(start_alt + 0.5*max(0.0, cruise_alt-start_alt), int(st.session_state.rpm_climb), st.session_state.temp_c)
+_, ff_climb = cruise_lookup(float(alts[0]["Alt_ft"]) + 0.5*max(0.0, cruise_alt-float(alts[0]["Alt_ft"])), int(st.session_state.rpm_climb), st.session_state.temp_c)
 _, ff_cruise= cruise_lookup(pressure_alt(cruise_alt, st.session_state.qnh), int(st.session_state.rpm_cruise), st.session_state.temp_c)
 ff_descent  = float(st.session_state.descent_ff)
 
@@ -613,59 +629,110 @@ tcs  = [float(legs[i]["TC"]   or 0.0) for i in range(N)]
 def leg_wind(i:int) -> Tuple[float,float]:
     return (int(st.session_state.wind_from), int(st.session_state.wind_kt))
 
-def gs_for(i:int, phase:str) -> float:
-    wdir,wkt = leg_wind(i)
-    tas = vy_kt if phase=="CLIMB" else (tas_cruise if phase=="CRUISE" else tas_descent)
-    _,_,gs = wind_triangle(tcs[i], tas, wdir, wkt)
-    return max(gs,1e-6)
-
-# ---- Perfil alvo por índice ----
+# ---- Perfil alvo por índice (Fix => usa Alt_ft; senão CRZ) ----
 A_target=[]
 for i,p in enumerate(points):
     r = alts[i] if i < len(alts) else {"Fix":False,"Alt_ft":cruise_alt}
-    if bool(r.get("Fix", False)):
-        A_target.append(float(r.get("Alt_ft", cruise_alt)))
+    if i in (0, len(points)-1):
+        A_target.append(float(r.get("Alt_ft", cruise_alt)))  # DEP/ARR editáveis
     else:
-        A_target.append(float(cruise_alt))
+        A_target.append(float(r.get("Alt_ft", cruise_alt)) if bool(r.get("Fix", False)) else float(cruise_alt))
 
-# ======= Construção por perna (sem duplicar fixes); TOC/TOD só na transição CRZ =======
+# ======= Construção por perna (TOC/TOD só quando cruza CRZ) =======
 rows=[]; seq_points=[]
 efob=float(st.session_state.start_fuel)
 
 startup = parse_hhmm(st.session_state.startup)
 takeoff = add_seconds(startup, int(st.session_state.taxi_min*60)) if startup else None
 clock = takeoff
+EPS = 1e-3
 
-# NÃO criar linha "DEP" (o primeiro ponto entra só como destino do 1º leg)
-toc_list=[]; tod_list=[]
-CRZ = float(st.session_state.cruise_alt)
-cur_alt = float(A_target[0])
-
-def _advance_clock_and_burn(ete_sec_raw: float, ff_lph: float):
+def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
+    # sem linha DEP; só segmentos reais
+    nonlocal_rows = rows  # para clareza
     global clock, efob
+    if d_nm <= EPS: return alt_start_ft
+    wdir,wkt = leg_wind(i_leg)
+    tc=float(tcs[i_leg]); wca, th, gs = wind_triangle(tc, tas, wdir, wkt)
+    mc = apply_var(tc, st.session_state.var_deg, st.session_state.var_is_e)
+    mh = apply_var(th, st.session_state.var_deg, st.session_state.var_is_e)
+
+    ete_sec_raw = (60.0 * d_nm / max(gs,1e-6)) * 60.0
     ete_sec = round_to_10s(ete_sec_raw)
     burn_raw = ff_lph * (ete_sec_raw/3600.0)
+    alt_end = alt_start_ft + (rate_fpm*(ete_sec_raw/60.0) if phase=="CLIMB" else (-rate_fpm*(ete_sec_raw/60.0) if phase=="DESCENT" else 0.0))
+
     eto = ""
     if clock:
         clock = add_seconds(clock, int(ete_sec))
         eto = clock.strftime("%H:%M")
+
     efob = max(0.0, _round_tenth(efob - burn_raw))
-    return ete_sec, burn_raw, eto
 
-def _weighted_avg(*pairs):
-    # pairs: (value, duration_sec)
-    tot_t = sum(max(0.0, t) for v,t in pairs)
-    if tot_t <= 1e-9: return 0.0
-    return sum(v*max(0.0,t) for v,t in pairs) / tot_t
+    nonlocal_rows.append({
+        "Fase": {"CLIMB":"↑","CRUISE":"→","DESCENT":"↓","HOLD":"⟳"}[phase],
+        "Leg/Marker": f"{frm}→{to}",
+        "ALT (ft)": f"{fmt(alt_start_ft,'alt')}→{fmt(alt_end,'alt')}",
+        "TC (°T)": _round_angle(tc), "TH (°T)": _round_angle(th),
+        "MC (°M)": _round_angle(mc), "MH (°M)": _round_angle(mh),
+        "TAS (kt)": _round_unit(tas), "GS (kt)": _round_unit(gs),
+        "FF (L/h)": _round_unit(ff_lph),
+        "Dist (nm)": fmt(d_nm,'dist'), "ETE (mm:ss)": mmss_from_seconds(int(ete_sec)), "ETO": eto,
+        "Burn (L)": fmt(burn_raw,'fuel'), "EFOB (L)": fmt(efob,'fuel')
+    })
+    seq_points.append({
+        "name": to, "alt": _round_alt(alt_end),
+        "tc": _round_angle(tc), "th": _round_angle(th),
+        "mc": _round_angle(mc), "mh": _round_angle(mh),
+        "tas": _round_unit(tas), "gs": _round_unit(gs),
+        "wca": round(wca,1),
+        "dist": float(f"{d_nm:.3f}"),
+        "ete_sec": int(ete_sec), "ete_raw": float(ete_sec_raw),
+        "eto": eto, "burn": float(burn_raw),
+        "rate_fpm": float(rate_fpm if phase!="CRUISE" else 0.0),
+        "phase": phase,
+        "efob": float(efob), "leg_idx": int(i_leg)
+    })
+    return alt_end
 
-phase_secs = {"CLIMB":0, "CRUISE":0, "DESCENT":0}   # HOLD entra em CRUISE
-phase_burn = {"CLIMB":0.0, "CRUISE":0.0, "DESCENT":0.0}
+def add_hold(point_name, minutes, alt_now, i_leg):
+    global clock, efob
+    if minutes<=0: return alt_now
+    ete_sec = round_to_10s(minutes*60.0)
+    burn_raw = st.session_state.hold_ff_lph * (ete_sec/3600.0)
+    eto = ""
+    if clock:
+        clock = add_seconds(clock, int(ete_sec))
+        eto = clock.strftime("%H:%M")
+    efob_local = max(0.0, _round_tenth(efob - burn_raw))
+    # Mantemos a linha ⟳, mas na soma vamos contar como ENROUTE
+    rows.append({
+        "Fase":"⟳", "Leg/Marker": f"HOLD @{point_name}",
+        "ALT (ft)": f"{fmt(alt_now,'alt')}→{fmt(alt_now,'alt')}",
+        "TC (°T)":"", "TH (°T)":"", "MC (°M)":"", "MH (°M)":"",
+        "TAS (kt)": _round_unit(st.session_state.hold_ref_kt), "GS (kt)":"",
+        "FF (L/h)": _round_unit(st.session_state.hold_ff_lph),
+        "Dist (nm)":"", "ETE (mm:ss)": mmss_from_seconds(int(ete_sec)), "ETO": eto,
+        "Burn (L)": fmt(burn_raw,'fuel'), "EFOB (L)": fmt(efob_local,'fuel')
+    })
+    seq_points.append({
+        "name": point_name, "alt": _round_alt(alt_now),
+        "tc":"", "th":"", "mc":"", "mh":"",
+        "tas": _round_unit(st.session_state.hold_ref_kt), "gs":"",
+        "wca": 0.0, "dist":"", "ete_sec": int(ete_sec), "ete_raw": float(ete_sec),
+        "eto": eto, "burn": float(burn_raw), "rate_fpm": 0.0,
+        "phase":"HOLD", "efob": float(efob_local), "leg_idx": int(i_leg)
+    })
+    efob = efob_local
+    return alt_now
+
+toc_list=[]; tod_list=[]
+cur_alt = float(A_target[0])
+CRZ = float(st.session_state.cruise_alt)
 
 for i in range(N):
     frm, to = legs[i]["From"], legs[i]["To"]
     d_leg = float(dist[i]); tc_i = float(tcs[i])
-    if d_leg <= 1e-9:
-        continue
 
     # GS por fase
     wdir,wkt = leg_wind(i)
@@ -674,130 +741,78 @@ for i in range(N):
     _,_,gsD = wind_triangle(tc_i, float(st.session_state.descent_ref_kt), wdir, wkt)
     gsC = max(gsC,1e-6); gsR=max(gsR,1e-6); gsD=max(gsD,1e-6)
 
-    alt_from = float(cur_alt)
-    alt_to   = float(A_target[i+1])
-
-    # Decompõe internamente a perna em até 3 fases, mas SAÍDA será uma única linha (médias ponderadas)
-    t_climb=t_cruise=t_descent=0.0
-    bo_climb=bo_cruise=bo_descent=0.0
-    tas_w_pairs=[]; gs_w_pairs=[]
-    th_last = tc_i; mh_last = tc_i  # preenchidos após último segmento
-
+    alt_to = float(A_target[i+1])
     remain = d_leg
-    pos = 0.0
+    started_name = frm
 
-    # ---- Se vai subir ----
-    if alt_to > alt_from + 1e-6:
-        # Se atravessa o CRZ, TOC na posição do cruzamento
-        if alt_from < CRZ <= alt_to:
-            t_to_crz = (CRZ - alt_from) / max(roc,1e-6)  # minutos
+    # ---------- SUBIDA ----------
+    if alt_to > cur_alt + EPS:
+        # marca TOC apenas quando atravessas o CRZ
+        if cur_alt < CRZ - EPS and alt_to >= CRZ - EPS:
+            t_to_crz = (CRZ - cur_alt) / max(roc,1e-6)
             d_to_crz = clamp(gsC * (t_to_crz/60.0), 0.0, remain)
-            if d_to_crz > 1e-9:
-                ete_raw = (60.0 * d_to_crz / gsC) * 60.0
-                ete_sec, bo, eto = _advance_clock_and_burn(ete_raw, ff_climb)
-                t_climb += ete_sec; bo_climb += bo
-                # calcula headings do último segmento
-                wca, th, gs_tmp = wind_triangle(tc_i, vy_kt, wdir, wkt)
-                th_last = th
-                mh_last = apply_var(th, st.session_state.var_deg, st.session_state.var_is_e)
-                tas_w_pairs.append((vy_kt, ete_sec)); gs_w_pairs.append((_round_unit(gs_tmp), ete_sec))
-                # marca TOC (fixo visual) — zero distância/tempo, só marcador:
+            if d_to_crz > EPS:
                 name_toc = "TOC" if not toc_list else f"TOC-{len(toc_list)+1}"
-                toc_list.append((i, pos + d_to_crz, name_toc))
-                pos += d_to_crz; remain -= d_to_crz
+                cur_alt = add_seg("CLIMB", started_name, name_toc, i, d_to_crz, vy_kt, ff_climb, cur_alt, roc)
+                toc_list.append((i, d_to_crz, name_toc))
+                started_name = name_toc
+                remain -= d_to_crz
                 cur_alt = CRZ
-        # Sobe o restante até ao alvo
-        if remain > 1e-9 and alt_to > cur_alt + 1e-6:
-            t_up_min = (alt_to - cur_alt)/max(roc,1e-6)  # min
-            d_up = clamp(gsC * (t_up_min/60.0), 0.0, remain)
-            ete_raw = (60.0 * d_up / gsC) * 60.0
-            ete_sec, bo, eto = _advance_clock_and_burn(ete_raw, ff_climb)
-            t_climb += ete_sec; bo_climb += bo
-            wca, th, gs_tmp = wind_triangle(tc_i, vy_kt, wdir, wkt)
-            th_last = th; mh_last = apply_var(th, st.session_state.var_deg, st.session_state.var_is_e)
-            tas_w_pairs.append((vy_kt, ete_sec)); gs_w_pairs.append((_round_unit(gs_tmp), ete_sec))
-            pos += d_up; remain -= d_up
+        # continuar até ao alvo (sem novo TOC)
+        if alt_to > cur_alt + EPS and remain > EPS:
+            t_up = (alt_to - cur_alt)/max(roc,1e-6)
+            d_up = clamp(gsC * (t_up/60.0), 0.0, remain)
+            cur_alt = add_seg("CLIMB", started_name, to if abs(d_up-remain)<EPS else to, i, d_up, vy_kt, ff_climb, cur_alt, roc)
+            started_name = to if abs(d_up-remain)<EPS else started_name
+            remain -= d_up
             cur_alt = alt_to
 
-    # ---- Se vai descer ----
-    elif alt_to < alt_from - 1e-6:
-        # Se sai do CRZ, TOD na transição CRZ->descida (antes da descida efetiva)
-        if abs(alt_from - CRZ) < 1e-6 and alt_to < CRZ:
-            # TOD exatamente no início da descida; primeiro cruza-se o restante como cruise se houver
-            name_tod = "TOD" if not tod_list else f"TOD-{len(tod_list)+1}"
-            tod_list.append((i, pos, name_tod))
-        # descer
-        t_down_min = (alt_from - alt_to)/max(st.session_state.rod_fpm,1e-6)  # min
-        d_down = clamp(gsD * (t_down_min/60.0), 0.0, remain)
-        ete_raw = (60.0 * d_down / gsD) * 60.0
-        ete_sec, bo, eto = _advance_clock_and_burn(ete_raw, ff_descent)
-        t_descent += ete_sec; bo_descent += bo
-        wca, th, gs_tmp = wind_triangle(tc_i, float(st.session_state.descent_ref_kt), wdir, wkt)
-        th_last = th; mh_last = apply_var(th, st.session_state.var_deg, st.session_state.var_is_e)
-        tas_w_pairs.append((float(st.session_state.descent_ref_kt), ete_sec)); gs_w_pairs.append((_round_unit(gs_tmp), ete_sec))
-        pos += d_down; remain -= d_down
-        cur_alt = alt_to
+    # ---------- DESCIDA ----------
+    elif alt_to < cur_alt - EPS:
+        # TOD quando sais do CRZ (primeiro ponto de descida a partir de CRZ)
+        if abs(cur_alt - CRZ) <= 100 and alt_to < CRZ and remain > EPS:
+            delta_alt = (cur_alt - alt_to)
+            t_down = delta_alt / max(st.session_state.rod_fpm,1e-6)
+            d_down = gsD * (t_down/60.0)
+            if d_down < remain - EPS:
+                d_cruise = remain - d_down
+                name_tod = "TOD" if not tod_list else f"TOD-{len(tod_list)+1}"
+                cur_alt = add_seg("CRUISE", started_name, name_tod, i, d_cruise, float(st.session_state.cruise_ref_kt), ff_cruise, cur_alt, 0.0)
+                tod_list.append((i, d_cruise, name_tod))
+                started_name = name_tod
+                remain = d_down
+        if remain > EPS:
+            cur_alt = add_seg("DESCENT", started_name, to, i, remain, float(st.session_state.descent_ref_kt), ff_descent, cur_alt, float(st.session_state.rod_fpm))
+            started_name = to; remain = 0.0
+            cur_alt = alt_to
 
-    # ---- Cruise no resto da perna ----
-    if remain > 1e-9:
-        ete_raw = (60.0 * remain / gsR) * 60.0
-        ete_sec, bo, eto = _advance_clock_and_burn(ete_raw, ff_cruise)
-        t_cruise += ete_sec; bo_cruise += bo
-        wca, th, gs_tmp = wind_triangle(tc_i, float(st.session_state.cruise_ref_kt), wdir, wkt)
-        th_last = th; mh_last = apply_var(th, st.session_state.var_deg, st.session_state.var_is_e)
-        tas_w_pairs.append((float(st.session_state.cruise_ref_kt), ete_sec)); gs_w_pairs.append((_round_unit(gs_tmp), ete_sec))
-        pos += remain; remain = 0.0
+    # ---------- CRUISE ----------
+    if remain > EPS and started_name != to:
+        cur_alt = add_seg("CRUISE", started_name, to, i, remain, float(st.session_state.cruise_ref_kt), ff_cruise, cur_alt, 0.0)
+        remain = 0.0
 
-    # ----- Acumular fases -----
-    phase_secs["CLIMB"]   += int(t_climb)
-    phase_secs["CRUISE"]  += int(t_cruise)  # holds entram aqui mais abaixo
-    phase_secs["DESCENT"] += int(t_descent)
-    phase_burn["CLIMB"]   += bo_climb
-    phase_burn["CRUISE"]  += bo_cruise
-    phase_burn["DESCENT"] += bo_descent
-
-    # ----- Linha ÚNICA de saída para a perna (médias ponderadas) -----
-    tas_avg = _weighted_avg(*tas_w_pairs)
-    gs_avg  = _weighted_avg(*gs_w_pairs)
-    mc = apply_var(tc_i, st.session_state.var_deg, st.session_state.var_is_e)
-
-    ete_total = int(round(t_climb + t_cruise + t_descent))
-    rows.append({
-        "Fase": "→",  # linha agregada
-        "Leg/Marker": f"{frm}→{to}",
-        "ALT (ft)": f"{fmt(alt_from,'alt')}→{fmt(alt_to,'alt')}",
-        "TC (°T)": _round_angle(tc_i), "TH (°T)": _round_angle(th_last),
-        "MC (°M)": _round_angle(mc),   "MH (°M)": _round_angle(mh_last),
-        "TAS (kt)": _round_unit(tas_avg), "GS (kt)": _round_unit(gs_avg),
-        "FF (L/h)": _round_unit(_weighted_avg((ff_climb, t_climb),(ff_cruise, t_cruise),(ff_descent, t_descent))),
-        "Dist (nm)": fmt(d_leg,'dist'), "ETE (mm:ss)": mmss_from_seconds(ete_total), "ETO": (clock.strftime("%H:%M") if clock else ""),
-        "Burn (L)": fmt(bo_climb+bo_cruise+bo_descent,'fuel'), "EFOB (L)": fmt(efob,'fuel')
-    })
-
-    # ----- HOLD no destino -----
+    # ---------- HOLD no destino (índice i+1) ----------
     to_row = alts[i+1] if (i+1) < len(alts) else {}
     if bool(to_row.get("Hold")) and float(to_row.get("Hold_min", 0)) > 0:
-        hold_min = float(to_row["Hold_min"])
-        ete_sec = round_to_10s(hold_min*60.0)
-        burn_raw = st.session_state.hold_ff_lph * (ete_sec/3600.0)
-        # holds entram em CRUISE
-        phase_secs["CRUISE"]  += int(ete_sec)
-        phase_burn["CRUISE"]  += burn_raw
-        # avança tempo/combustível
-        _ = _advance_clock_and_burn(ete_sec, st.session_state.hold_ff_lph)
-        # linha de hold visível (opcional, sem totais próprios)
-        rows.append({
-            "Fase":"⟳", "Leg/Marker": f"HOLD @{to}",
-            "ALT (ft)": f"{fmt(alt_to,'alt')}→{fmt(alt_to,'alt')}",
-            "TC (°T)":"", "TH (°T)":"", "MC (°M)":"", "MH (°M)":"",
-            "TAS (kt)": _round_unit(st.session_state.hold_ref_kt), "GS (kt)":"",
-            "FF (L/h)": _round_unit(st.session_state.hold_ff_lph),
-            "Dist (nm)":"", "ETE (mm:ss)": mmss_from_seconds(int(ete_sec)), "ETO": (clock.strftime("%H:%M") if clock else ""),
-            "Burn (L)": fmt(burn_raw,'fuel'), "EFOB (L)": fmt(efob,'fuel')
-        })
+        cur_alt = add_hold(points[i+1], float(to_row["Hold_min"]), cur_alt, i)
 
 eta = clock
 shutdown = add_seconds(eta, 5*60) if eta else None
+
+# ==== Totais (HOLD soma em ENROUTE) ====
+secs = {"CLIMB":0, "CRUISE":0, "DESCENT":0, "HOLD":0}
+burn = {"CLIMB":0.0, "CRUISE":0.0, "DESCENT":0.0, "HOLD":0.0}
+for p in seq_points:
+    ph = p.get("phase")
+    if ph in secs:
+        secs[ph] += int(p.get("ete_sec",0))
+        burn[ph] += float(p.get("burn",0.0))
+# Enroute = CRUISE + HOLD
+enroute_sec  = secs["CRUISE"] + secs["HOLD"]
+enroute_burn = burn["CRUISE"] + burn["HOLD"]
+
+taxi_min = int(st.session_state.taxi_min)
+fuel_taxi = st.session_state.taxi_ff_lph * (taxi_min / 60.0)
 
 # =========================================================
 # Depuração: Perfil alvo aplicado
@@ -806,7 +821,7 @@ st.subheader("Perfil alvo aplicado (por índice)")
 _applied_rows = []
 for i,p in enumerate(points):
     r = alts[i] if i < len(alts) else {}
-    fixed = bool(r.get("Fix", False))
+    fixed = True if i in (0,len(points)-1) else bool(r.get("Fix", False))
     altv  = A_target[i]
     _applied_rows.append({"#": i, "Fix?": "✔" if fixed else "—", "Fix name": p, "Alt alvo (ft)": int(round(altv))})
 st.dataframe(_applied_rows, use_container_width=True)
@@ -821,48 +836,34 @@ with cA:
     st.metric("ROC @ DEP (ft/min)", _round_unit(roc))
     st.metric("ROD (ft/min)", _round_unit(st.session_state.rod_fpm))
 with cB:
-    st.metric("TAS climb/cruise/descent", f"{_round_unit(vy_kt)} / {_round_unit(tas_cruise)} / {_round_unit(tas_descent)} kt")
-    # FF médios (apenas info)
+    st.metric("TAS climb/cruise/descent", f"{_round_unit(tas_climb)} / {_round_unit(tas_cruise)} / {_round_unit(tas_descent)} kt")
     st.metric("FF climb/cruise/descent", f"{_round_unit(ff_climb)} / {_round_unit(ff_cruise)} / {_round_unit(ff_descent)} L/h")
 with cC:
-    isa_dev = st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))
+    isa_dev = st.session_state.temp_c - isa_temp(pressure_alt(float(alts[0]["Alt_ft"]), st.session_state.qnh))
     st.metric("ISA dev @ DEP (°C)", int(round(isa_dev)))
     if toc_list: st.write("**TOC**: " + ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')} nm" for (leg,pos,name) in toc_list]))
     if tod_list: st.write("**TOD**: " + ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')} nm" for (leg,pos,name) in tod_list]))
 
 st.dataframe(rows, use_container_width=True)
 
-# Totais e observações (tempos com 'min'/'h')
-tot_ete_sec = 0
-tot_nm = 0.0
-tot_burn = 0.0
-if rows:
-    # somar apenas linhas de pernas (seta); holds não têm dist
-    for r in rows:
-        if r.get("Dist (nm)"):
-            try: tot_nm += float(r["Dist (nm)"])
-            except: pass
-        # ETE total: somar todas as linhas (inclui holds)
-        try:
-            mm, ss = r["ETE (mm:ss)"].split(":")
-            tot_ete_sec += int(mm)*60 + int(ss)
-        except: pass
-        try:
-            tot_burn += float(r["Burn (L)"])
-        except: pass
-
-line = f"**Totais** — Dist {fmt(tot_nm,'dist')} nm • ETE {mm_or_h_from_seconds(tot_ete_sec)} • Burn {fmt(tot_burn,'fuel')} L • EFOB {fmt(efob,'fuel')} L"
+tot_ete_sec = sum(int(p.get('ete_sec',0)) for p in seq_points if isinstance(p.get('ete_sec'), (int,float)))
+tot_nm  = sum(float(p['dist']) for p in seq_points if isinstance(p.get('dist'), (int,float)))
+tot_bo  = _round_tenth(sum(float(p['burn']) for p in seq_points if isinstance(p.get('burn'), (int,float))))
+line = f"**Totais** — Dist {fmt(tot_nm,'dist')} nm • ETE {hhmmss_from_seconds(int(tot_ete_sec))} • Burn {fmt(tot_bo,'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"
 if eta: line += f" • **ETA {eta.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
 st.markdown(line)
 
-# Observações
-obs_lines = [
-    f"Start-up & Taxi: {st.session_state.taxi_min} min @ 20 L/h → {fmt(st.session_state.taxi_ff_lph * (st.session_state.taxi_min/60.0),'fuel')} L",
-    f"Climb: {mm_or_h_from_seconds(phase_secs['CLIMB'])} → {fmt(phase_burn['CLIMB'],'fuel')} L",
-    f"Enroute (Cruise incl. HOLD): {mm_or_h_from_seconds(phase_secs['CRUISE'])} → {fmt(phase_burn['CRUISE'],'fuel')} L",
-    f"Descent: {mm_or_h_from_seconds(phase_secs['DESCENT'])} → {fmt(phase_burn['DESCENT'],'fuel')} L",
-]
-st.markdown("**Observações**  \n" + "  \n".join(obs_lines))
+# =========================================================
+# Formatação “min” / “h” nas Observações
+# =========================================================
+def min_or_hour(sec:int) -> str:
+    m = int(round(sec/60.0))
+    if m < 60:
+        return f"{m} min"
+    h = m // 60; mm = m % 60
+    if mm==0:
+        return f"{h} h"
+    return f"{h} h {mm} min"
 
 # =========================================================
 # PDF NAVLOG
@@ -899,12 +900,10 @@ if fieldset:
     PAll(["INSTRUTOR","Instructor","INSTRUCTOR"], st.session_state.instrutor)
     PAll(["STUDENT","Student"], st.session_state.student)
 
-    # Totais para o campo FLIGHT_TIME (hh:mm)
-    flight_time_str = hhmmss_from_seconds(int(tot_ete_sec))[:5] if tot_ete_sec>0 else ""
-    PAll(["FLT TIME","FLT_TIME","FLIGHT_TIME"], flight_time_str)
+    PAll(["FLT TIME","FLT_TIME","FLIGHT_TIME"], f"{(tot_ete_sec//3600):02d}:{((tot_ete_sec%3600)//60):02d}")
     PAll(["FLIGHT_LEVEL_ALTITUDE","LEVEL_FF","LEVEL F/F","Level_FF"], fmt(cruise_alt,'alt'))
 
-    climb_time_hours = phase_secs["CLIMB"]/3600.0
+    climb_time_hours = secs["CLIMB"]/3600.0
     climb_fuel_raw = ff_climb * max(0.0, climb_time_hours)
     PAll(["CLIMB FUEL","CLIMB_FUEL"], fmt(climb_fuel_raw,'fuel'))
 
@@ -922,42 +921,47 @@ if fieldset:
     PAll(["TEMP_ISA_DEV","TEMP ISA DEV","TEMP/ISA_DEV"], f"{int(round(st.session_state.temp_c))} / {isa_dev_i}")
     PAll(["MAG_VAR","MAG VAR"], f"{int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}")
 
-    # Tabela do PDF — usa as mesmas linhas agregadas + marca TOC/TOD em Waypoint
+    # linhas (até 22)
     acc_dist = 0.0; acc_sec = 0
     max_lines = 22
-    for idx, r in enumerate(rows[:max_lines], start=1):
-        tag=f"Leg{idx:02d}_"
-        P(tag+"Waypoint", r["Leg/Marker"])
-        # altitude final do leg
-        try:
-            alt_to_txt = r["ALT (ft)"].split("→")[-1]
-            P(tag+"Altitude_FL", alt_to_txt.strip())
-        except: pass
+    nav_by_idx = {i:r for i,r in enumerate(st.session_state.get("nav_rows", []))} if st.session_state.use_navaids else {}
+    for idx, p in enumerate(seq_points[:max_lines], start=1):
+        tag=f"Leg{idx:02d}_"; is_seg = True  # já não existe linha DEP
+        P(tag+"Waypoint", p["name"])
+        if p["alt"]!="": P(tag+"Altitude_FL", fmt(p["alt"],'alt'))
 
-        # Colunas navegacionais
-        if r.get("TC (°T)")!="":       P(tag+"True_Course",      fmt(r["TC (°T)"], 'angle'))
-        if r.get("TH (°T)")!="":       P(tag+"True_Heading",     fmt(r["TH (°T)"], 'angle'))
-        if r.get("MH (°M)")!="":       P(tag+"Magnetic_Heading", fmt(r["MH (°M)"], 'angle'))
-        if r.get("TAS (kt)")!="":      P(tag+"True_Airspeed",    fmt(r["TAS (kt)"], 'speed'))
-        if r.get("GS (kt)")!="":       P(tag+"Ground_Speed",     fmt(r["GS (kt)"], 'speed'))
-        if r.get("Dist (nm)")!="":     P(tag+"Leg_Distance",     fmt(r["Dist (nm)"], 'dist'))
+        if st.session_state.use_navaids and is_seg and (p.get("leg_idx") is not None):
+            to_index = p["leg_idx"]+1
+            nv = nav_by_idx.get(to_index, {})
+            if nv.get("IDENT"): P(tag+"Navaid_Identifier", nv["IDENT"])
+            if nv.get("FREQ"):  P(tag+"Navaid_Frequency",  nv["FREQ"])
 
-        # tempos acumulados p/ PDF
-        try:
-            mm, ss = r["ETE (mm:ss)"].split(":")
-            acc_sec += int(mm)*60 + int(ss)
-        except: pass
-        P(tag+"Leg_ETE",          r["ETE (mm:ss)"])
-        P(tag+"ETO",              r["ETO"])
-        P(tag+"Planned_Burnoff",  r["Burn (L)"])
-        P(tag+"Estimated_FOB",    r["EFOB (L)"])
-        try:
-            if r.get("Dist (nm)"): acc_dist += float(r["Dist (nm)"])
-        except: pass
-        P(tag+"Cumulative_Distance", fmt(acc_dist,'dist'))
-        P(tag+"Cumulative_ETE",      mmss_from_seconds(acc_sec))
+        if is_seg and p.get("phase") in ("CLIMB","CRUISE","DESCENT"):
+            acc_dist += float(p.get("dist") or 0.0)
+            acc_sec  += int(p.get("ete_sec",0) or 0)
+            P(tag+"True_Course",      fmt(p["tc"], 'angle'))
+            P(tag+"True_Heading",     fmt(p["th"], 'angle'))
+            P(tag+"Magnetic_Heading", fmt(p["mh"], 'angle'))
+            P(tag+"True_Airspeed",    fmt(p["tas"], 'speed'))
+            P(tag+"Ground_Speed",     fmt(p["gs"], 'speed'))
+            P(tag+"Leg_Distance",     fmt(p["dist"], 'dist'))
+            P(tag+"Leg_ETE",          mmss_from_seconds(int(p.get("ete_sec",0))))
+            P(tag+"ETO",              p["eto"])
+            P(tag+"Planned_Burnoff",  fmt(p["burn"], 'fuel'))
+            P(tag+"Estimated_FOB",    fmt(p["efob"], 'fuel'))
+            P(tag+"Cumulative_Distance", fmt(acc_dist,'dist'))
+            P(tag+"Cumulative_ETE",      mmss_from_seconds(acc_sec))
+        else:
+            if p.get("eto") is not None:  P(tag+"ETO", p["eto"])
+            if p.get("efob") is not None: P(tag+"Estimated_FOB", fmt(p["efob"], 'fuel'))
 
-    # OBSERVAÇÕES — com 'min'/'h' e HOLD incluído no Enroute
+    # ===== OBSERVAÇÕES — tempos formatados (sem linha Total Holding; HOLD incluído em ENROUTE) =====
+    obs_lines = [
+        f"Start-up & Taxi: {st.session_state.taxi_min} min @ 20 L/h → {fmt(fuel_taxi,'fuel')} L",
+        f"Climb: {min_or_hour(secs['CLIMB'])} → {fmt(burn['CLIMB'],'fuel')} L",
+        f"Enroute (Cruise): {min_or_hour(enroute_sec)} → {fmt(enroute_burn,'fuel')} L",
+        f"Descent: {min_or_hour(secs['DESCENT'])} → {fmt(burn['DESCENT'],'fuel')} L",
+    ]
     P("OBSERVATIONS", "\n".join(obs_lines))
 
 if st.button("Gerar PDF NAVLOG", type="primary"):
@@ -974,7 +978,7 @@ if st.button("Gerar PDF NAVLOG", type="primary"):
         st.error(f"Erro ao gerar PDF: {e}")
 
 # =========================================================
-# Relatório (PDF legível) — mantém a mesma filosofia
+# Relatório (PDF legível) — inalterado exceto tempos
 # =========================================================
 st.subheader("Relatório (PDF legível)")
 def build_report_pdf():
@@ -991,10 +995,9 @@ def build_report_pdf():
     story.append(Paragraph("NAVLOG — Relatório do Planeamento", H1))
     story.append(Spacer(1,4))
 
-    # strings separadas
     toc_str = ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')}nm" for (leg,pos,name) in toc_list])
     tod_str = ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')}nm" for (leg,pos,name) in tod_list])
-    tt_line = (toc_str + ("; " if toc_str and tod_str else "") + tod_str) or "—"
+    tt_line = (toc_str + ("; " if toc_list and tod_list else "") + tod_str) or "—"
 
     resume = [
         ["DEP / ARR / ALTN", f"{points[0]} / {points[-1]} / {st.session_state.altn}"],
@@ -1003,11 +1006,11 @@ def build_report_pdf():
         ["Startup / Taxi / ETD", f"{st.session_state.startup} / {st.session_state.taxi_min} min / {(add_seconds(parse_hhmm(st.session_state.startup),st.session_state.taxi_min*60).strftime('%H:%M') if st.session_state.startup else '')}"],
         ["QNH / OAT / ISA dev", f"{int(st.session_state.qnh)} / {int(st.session_state.temp_c)} / {int(round(st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))))}"],
         ["Vento FROM / Var", f"{int(round(st.session_state.wind_from)):03d}/{int(round(st.session_state.wind_kt)):02d} / {int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}"],
-        ["TAS (cl/cru/des)", f"{_round_unit(vy_kt)}/{_round_unit(tas_cruise)}/{_round_unit(tas_descent)} kt"],
+        ["TAS (cl/cru/des)", f"{_round_unit(tas_climb)}/{_round_unit(tas_cruise)}/{_round_unit(tas_descent)} kt"],
         ["FF (cl/cru/des)", f"{_round_unit(ff_climb)}/{_round_unit(ff_cruise)}/{_round_unit(ff_descent)} L/h"],
         ["ROCs/ROD", f"{_round_unit(roc)} ft/min / {_round_unit(st.session_state.rod_fpm)} ft/min"],
-        ["Tempos por fase", f"Climb {mm_or_h_from_seconds(phase_secs['CLIMB'])} • Enroute {mm_or_h_from_seconds(phase_secs['CRUISE'])} • Descent {mm_or_h_from_seconds(phase_secs['DESCENT'])}"],
-        ["Totais", f"Dist {fmt(tot_nm,'dist')} nm • ETE {mm_or_h_from_seconds(tot_ete_sec)} • Burn {fmt(tot_burn,'fuel')} L • EFOB {fmt(efob,'fuel')} L"],
+        ["Tempos por fase", f"Climb {min_or_hour(secs['CLIMB'])} • Enroute {min_or_hour(enroute_sec)} • Descent {min_or_hour(secs['DESCENT'])}"],
+        ["Totais", f"Dist {fmt(sum(float(p['dist']) for p in seq_points if p.get('dist')), 'dist')} nm • ETE {hhmmss_from_seconds(int(sum(int(p.get('ete_sec',0)) for p in seq_points)))} • Burn {fmt(sum(float(p.get('burn',0)) for p in seq_points),'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"],
         ["TOC/TOD", tt_line],
     ]
     t1 = LongTable(resume, colWidths=[64*mm, None], hAlign="LEFT")
@@ -1020,19 +1023,35 @@ def build_report_pdf():
     story.append(t1)
     story.append(PageBreak())
 
-    story.append(Paragraph("Resumo por perna (média ponderada)", H2))
-    for r in rows:
-        steps = [
-            ["Leg", r["Leg/Marker"]],
-            ["Altitudes", r["ALT (ft)"]],
-            ["TC/TH/MH (°)", f"{r['TC (°T)']} / {r['TH (°T)']} / {r['MH (°M)']}"],
-            ["TAS/GS (kt)", f"{r['TAS (kt)']} / {r['GS (kt)']}"],
-            ["Dist / ETE", f"{r['Dist (nm)'] or '—'} nm / {r['ETE (mm:ss)']}"],
-            ["Burn / EFOB", f"{r['Burn (L)']} L / {r['EFOB (L)']} L"],
-        ]
-        t = LongTable(steps, colWidths=[56*mm, None], hAlign="LEFT")
+    story.append(Paragraph("Cálculos por segmento (explicado)", H2))
+    for i, seg in enumerate(seq_points):
+        prev_name = legs[seg['leg_idx']]["From"] if seg.get("leg_idx") is not None else "—"
+        steps = []
+        if seg.get("phase") == "HOLD":
+            steps = [
+                ["1) Duração", min_or_hour(seg['ete_sec'])],
+                ["2) Débito combustível (hold)", f"{_round_unit(st.session_state.hold_ff_lph)} L/h"],
+                ["3) Burn", f"{fmt(seg['burn'],'fuel')} L"],
+                ["4) Altitude", f"constante {seg['alt']} ft"],
+                ["5) ETO / EFOB", f"ETO={seg['eto'] or '—'} • EFOB={fmt(seg['efob'],'fuel')} L"]
+            ]
+            title = f"{prev_name} → HOLD @{seg['name']}"
+        else:
+            steps = [
+                ["1) Dados de entrada", f"TC={seg.get('tc','')}°T; TAS={seg.get('tas','')} kt; Vento FROM={int(st.session_state.wind_from):03d}/{int(st.session_state.wind_kt):02d} kt"],
+                ["2) Triângulo de vento", f"WCA={seg.get('wca',0)}°; TH={seg.get('th','')}°T; MH={seg.get('mh','')}°M; GS={seg.get('gs','')} kt"],
+                ["3) Distância", f"{fmt(seg.get('dist',0),'dist')} nm"],
+                ["4) ETE arred.", f"{mmss_from_seconds(seg.get('ete_sec',0))} (nearest 10s)"],
+                ["5) Débito combustível", f"{_round_unit(ff_climb if seg['phase']=='CLIMB' else ff_descent if seg['phase']=='DESCENT' else ff_cruise)} L/h"],
+                ["6) Burn", f"{fmt(seg['burn'],'fuel')} L"],
+                ["7) Perfil vertical", f"rate {int(abs(seg.get('rate_fpm',0)))} ft/min; Alt fim {seg['alt']} ft"],
+                ["8) ETO / EFOB", f"ETO={seg['eto'] or '—'} • EFOB={fmt(seg['efob'],'fuel')} L"]
+            ]
+            title = f"{prev_name} → {seg['name']}"
+        t = LongTable([[title, "" ]]+steps, colWidths=[56*mm, None], hAlign="LEFT")
         t.setStyle(TableStyle([
-            ("GRID",(0,0),(-1,-1),0.25,colors.lightgrey),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
+            ("SPAN",(0,0),(1,0)),("BACKGROUND",(0,0),(1,0),colors.whitesmoke),
+            ("GRID",(0,1),(-1,-1),0.25,colors.lightgrey),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
             ("FONTSIZE",(0,0),(-1,-1),9),("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),6),
             ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
         ]))
@@ -1053,6 +1072,7 @@ if st.button("Gerar Relatório (PDF)"):
         st.success("Relatório gerado.")
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
+
 
 
 
