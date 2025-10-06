@@ -11,12 +11,18 @@ from math import sin, asin, radians, degrees, fmod
 st.set_page_config(page_title="NAVLOG (PDF + Relatório)", layout="wide", initial_sidebar_state="collapsed")
 PDF_TEMPLATE_PATHS = ["NAVLOG_FORM.pdf", "/mnt/data/NAVLOG_FORM.pdf"]
 
-# ---- helper de re-run (compatível com várias versões de Streamlit) ----
+# ---------------- helpers ----------------
 def _rerun():
-    if hasattr(st, "rerun"):
-        st.rerun()
-    else:
-        st.experimental_rerun()
+    if hasattr(st, "rerun"): st.rerun()
+    else: st.experimental_rerun()
+
+def to_records(data):
+    """Converte DataFrame -> list[dict]; se já for list[dict], devolve intacto."""
+    try:
+        # pandas DataFrame ou similar
+        return data.to_dict("records")  # type: ignore[attr-defined]
+    except Exception:
+        return data
 
 # ===== Optional deps =====
 try:
@@ -56,7 +62,6 @@ def _round_angle(x: float) -> int:
     return int(round(float(x))) % 360
 
 def round_to_10s(sec: float) -> int:
-    """Arredonda ao múltiplo de 10 segundos mais próximo (mínimo 10s se >0)."""
     if sec <= 0: return 0
     s = int(round(sec/10.0)*10)
     return max(s, 10)
@@ -262,7 +267,7 @@ ensure("auto_fix_edits", True)
 
 # Taxi: campo só para minutos; FF fixo a 20 L/h
 ensure("taxi_min",15)
-ensure("taxi_ff_lph",20.0)  # sem campo; fixo
+ensure("taxi_ff_lph",20.0)
 
 # =========================================================
 # FORM único: Cabeçalho + Atmosfera/Performance/Opções
@@ -336,15 +341,15 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         st.session_state.cruise_ref_kt=f_spd_cr; st.session_state.descent_ref_kt=f_spd_ds
         st.session_state.use_navaids=f_use_nav
         st.session_state.taxi_min=f_taxi_min
-        st.session_state.taxi_ff_lph=20.0  # fixo
+        st.session_state.taxi_ff_lph=20.0
         st.session_state.hold_ref_kt = f_hold_spd
         st.session_state.hold_ff_lph = f_hold_ff
         st.session_state.auto_fix_edits = f_auto_fix
 
-        # Sincroniza tabela Altitudes com cruise/elevs (sem sobrescrever fixos do utilizador)
+        # Propagar cruise para altitudes não fixas e DEP/ARR = elevação
         def sync_alt_rows_to_cruise():
             pts = st.session_state.get("points") or [st.session_state.dept, st.session_state.arr]
-            rows = st.session_state.get("alt_rows")
+            rows = to_records(st.session_state.get("alt_rows") or [])
             if not rows:
                 rows = [{"Fix": (i in (0,len(pts)-1)),
                          "Point": p,
@@ -356,12 +361,13 @@ with st.form("hdr_perf_form", clear_on_submit=False):
                 if i==0: r["Fix"]=True; r["Alt_ft"]=float(dep_e)
                 elif i==len(rows)-1: r["Fix"]=True; r["Alt_ft"]=float(arr_e)
                 else:
-                    if not bool(r.get("Fix", False)): r["Alt_ft"]=float(crz)
+                    # Se não fixo e altitude vazia, assume cruzeiro (mas respeita se utilizador definiu Alt_ft)
+                    if not bool(r.get("Fix", False)) and (r.get("Alt_ft") in (None, "")):
+                        r["Alt_ft"]=float(crz)
                 r.setdefault("Hold", False); r.setdefault("Hold_min", 0.0)
             st.session_state.alt_rows = rows
         sync_alt_rows_to_cruise()
         st.success("Parâmetros aplicados.")
-        _rerun()
 
 # =========================================================
 # JSON v2 (ANTES da rota)
@@ -373,8 +379,8 @@ def current_points():
 
 def export_json_v2():
     pts   = current_points()
-    legs  = st.session_state.get("plan_rows") or []
-    alts  = st.session_state.get("alt_rows")  or []
+    legs  = to_records(st.session_state.get("plan_rows") or [])
+    alts  = to_records(st.session_state.get("alt_rows")  or [])
     alt_set  = [ (r.get("Alt_ft") if r.get("Fix") or i in (0, len(pts)-1) else None)
                  for i,r in enumerate(alts) ] if alts else [None]*len(pts)
     alt_fix  = [ bool(r.get("Fix", False)) for r in alts ] if alts else [False]*len(pts)
@@ -437,7 +443,6 @@ with cJ2:
                     ar[i]["Hold"] = bool(hOn[i]); ar[i]["Hold_min"] = float(hMin[i])
             st.session_state.alt_rows = ar
             st.success("Rota importada e aplicada.")
-            _rerun()
         except Exception as e:
             st.error(f"Falha a importar JSON: {e}")
 
@@ -500,10 +505,9 @@ if st.button("Aplicar rota"):
     if len(pts)>=2: pts[-1]=st.session_state.arr
     st.session_state.points = pts
     st.session_state.route_text = " ".join(pts)
-    st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
-    st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
+    st.session_state.plan_rows = rebuild_plan_rows(pts, to_records(st.session_state.get("plan_rows")))
+    st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, to_records(st.session_state.get("alt_rows")))
     st.success("Rota aplicada.")
-    _rerun()
 
 # init defaults
 if "points" not in st.session_state:
@@ -513,7 +517,6 @@ if "plan_rows" not in st.session_state:
 if "alt_rows" not in st.session_state:
     st.session_state.alt_rows = rebuild_alt_rows(st.session_state.points, st.session_state.cruise_alt, None)
 
-# --------- LEGS (em formulário) ---------
 st.subheader("Legs (TC/Dist)")
 leg_cfg = {
     "From": st.column_config.TextColumn("From", disabled=True),
@@ -521,20 +524,18 @@ leg_cfg = {
     "TC":   st.column_config.NumberColumn("TC (°T)", step=0.1, min_value=0.0, max_value=359.9),
     "Dist": st.column_config.NumberColumn("Dist (nm)", step=0.1, min_value=0.0),
 }
-with st.form("legs_form", clear_on_submit=False):
-    edited_legs = st.data_editor(
-        st.session_state.plan_rows, key="plan_table",
-        hide_index=True, use_container_width=True, num_rows="fixed",
-        column_config=leg_cfg, column_order=list(leg_cfg.keys())
-    )
-    if st.form_submit_button("Aplicar Legs (TC/Dist)"):
-        st.session_state.plan_rows = edited_legs
-        st.success("Legs aplicadas.")
-        _rerun()
+st.session_state.plan_rows = st.data_editor(
+    st.session_state.plan_rows, key="plan_table",
+    hide_index=True, use_container_width=True, num_rows="fixed",
+    column_config=leg_cfg, column_order=list(leg_cfg.keys())
+)
+if st.button("Aplicar Legs (TC/Dist)"):
+    st.session_state.plan_rows = to_records(st.session_state.plan_rows)
+    st.success("Legs aplicadas.")
+    _rerun()
 
-# --------- ALTITUDES/HOLDS (em formulário) ---------
 st.subheader("Altitudes por Fix")
-st.caption("Marcar **Fixar?** = altitude *obrigatória* nesse fix. Não marcado = segue o perfil (Cruise por defeito). DEP/ARR são sempre fixos às elevações.")
+st.caption("Se definir um Alt_ft diferente do cruzeiro, ele é usado mesmo sem marcar 'Fixar?'. DEP/ARR são sempre fixos às elevações.")
 
 alt_cfg = {
     "Fix":     st.column_config.CheckboxColumn("Fixar?"),
@@ -543,34 +544,41 @@ alt_cfg = {
     "Hold":    st.column_config.CheckboxColumn("Hold no fix?"),
     "Hold_min":st.column_config.NumberColumn("Min no hold", step=1.0, min_value=0.0),
 }
-with st.form("alt_form", clear_on_submit=False):
-    edited_alts = st.data_editor(
-        st.session_state.alt_rows, key="alt_table",
-        hide_index=True, use_container_width=True, num_rows="fixed",
-        column_config=alt_cfg, column_order=list(alt_cfg.keys())
-    )
-    if st.form_submit_button("Aplicar Altitudes / Holds"):
-        # aplica “auto fixar” no momento de submeter
-        if st.session_state.auto_fix_edits:
-            crz=_round_alt(st.session_state.cruise_alt)
-            for i,r in enumerate(edited_alts):
-                if i not in (0, len(edited_alts)-1):
-                    try:
-                        if abs(float(r.get("Alt_ft", crz)) - float(crz)) >= 1 and not bool(r.get("Fix", False)):
-                            r["Fix"] = True
-                    except Exception:
-                        pass
-        st.session_state.alt_rows = edited_alts
-        st.success("Altitudes / Holds aplicados.")
-        _rerun()
+st.session_state.alt_rows = st.data_editor(
+    st.session_state.alt_rows, key="alt_table",
+    hide_index=True, use_container_width=True, num_rows="fixed",
+    column_config=alt_cfg, column_order=list(alt_cfg.keys())
+)
+if st.button("Aplicar Altitudes / Holds"):
+    st.session_state.alt_rows = to_records(st.session_state.alt_rows)
+    st.success("Altitudes aplicadas.")
+    _rerun()
 
-# --------- NAVAIDs (em formulário) ---------
+# Auto-fixar se Alt_ft != cruise (robusto para DataFrame ou lista)
+if st.session_state.auto_fix_edits:
+    crz=_round_alt(st.session_state.cruise_alt)
+    rows = to_records(st.session_state.alt_rows)
+    changed=False
+    for i,r in enumerate(rows):
+        if i in (0, len(rows)-1):  # DEP/ARR já são fixos por desenho
+            continue
+        try:
+            if r.get("Alt_ft") is None: continue
+            if abs(float(r["Alt_ft"]) - float(crz)) >= 1 and not bool(r.get("Fix", False)):
+                r["Fix"] = True
+                changed=True
+        except Exception:
+            pass
+    if changed:
+        st.session_state.alt_rows = rows
+
+# NAVAIDs (mostra só se o toggle no formulário estiver ON)
 if st.session_state.use_navaids:
     st.subheader("NAVAIDs opcionais (preenche no PDF quando existir)")
-    if "nav_rows" not in st.session_state or len(st.session_state.nav_rows) != len(st.session_state.points):
+    if "nav_rows" not in st.session_state or len(to_records(st.session_state.nav_rows)) != len(st.session_state.points):
         st.session_state.nav_rows = [{"Point":p,"IDENT":"","FREQ":""} for p in st.session_state.points]
-    if [r["Point"] for r in st.session_state.nav_rows] != st.session_state.points:
-        old = {r["Point"]:r for r in st.session_state.nav_rows}
+    if [r["Point"] for r in to_records(st.session_state.nav_rows)] != st.session_state.points:
+        old = {r["Point"]:r for r in to_records(st.session_state.nav_rows)}
         st.session_state.nav_rows = [{"Point":p,"IDENT":old.get(p,{}).get("IDENT",""),
                                       "FREQ":old.get(p,{}).get("FREQ","")} for p in st.session_state.points]
     nav_cfg = {
@@ -578,24 +586,24 @@ if st.session_state.use_navaids:
         "IDENT": st.column_config.TextColumn("Ident"),
         "FREQ":  st.column_config.TextColumn("Freq"),
     }
-    with st.form("nav_form", clear_on_submit=False):
-        edited_navs = st.data_editor(
-            st.session_state.nav_rows, key="navaids_table",
-            hide_index=True, use_container_width=True, num_rows="fixed",
-            column_config=nav_cfg, column_order=list(nav_cfg.keys())
-        )
-        if st.form_submit_button("Aplicar NAVAIDs"):
-            st.session_state.nav_rows = edited_navs
-            st.success("NAVAIDs aplicados.")
-            _rerun()
+    st.session_state.nav_rows = st.data_editor(
+        st.session_state.nav_rows, key="navaids_table",
+        hide_index=True, use_container_width=True, num_rows="fixed",
+        column_config=nav_cfg, column_order=list(nav_cfg.keys())
+    )
+    if st.button("Aplicar NAVAIDs"):
+        st.session_state.nav_rows = to_records(st.session_state.nav_rows)
+        st.success("NAVAIDs aplicados.")
+        _rerun()
 
 # =========================================================
 # Cálculo (perfil com TOC/TOD dinâmicos + HOLDs)
 # =========================================================
 points = st.session_state.points
-legs   = st.session_state.plan_rows
-alts   = st.session_state.alt_rows
-N = len(legs)
+legs_rec = to_records(st.session_state.plan_rows)
+alts_rec = to_records(st.session_state.alt_rows)
+
+N = len(legs_rec)
 
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
 dep_elev  = _round_alt(aero_elev(points[0]))
@@ -613,8 +621,8 @@ _, ff_climb = cruise_lookup(start_alt + 0.5*max(0.0, cruise_alt-start_alt), int(
 _, ff_cruise= cruise_lookup(pressure_alt(cruise_alt, st.session_state.qnh), int(st.session_state.rpm_cruise), st.session_state.temp_c)
 ff_descent  = float(st.session_state.descent_ff)
 
-dist = [float(legs[i]["Dist"] or 0.0) for i in range(N)]
-tcs  = [float(legs[i]["TC"]   or 0.0) for i in range(N)]
+dist = [float(legs_rec[i].get("Dist",0.0)) for i in range(N)]
+tcs  = [float(legs_rec[i].get("TC",0.0))   for i in range(N)]
 
 def leg_wind(i:int) -> Tuple[float,float]:
     return (int(st.session_state.wind_from), int(st.session_state.wind_kt))
@@ -625,15 +633,19 @@ def gs_for(i:int, phase:str) -> float:
     _,_,gs = wind_triangle(tcs[i], tas, wdir, wkt)
     return max(gs,1e-6)
 
-# ===== Perfil vertical robusto (suporta vários TOC/TOD e step climbs/descents) =====
-# Alvos de altitude por fix: fixados -> o que o utilizador escreveu; não fixados -> cruzeiro
+# ===== Alvos de altitude por fix =====
 A_target = []
-for i,p in enumerate(points):
-    r = alts[i]
-    if i==0:                A_target.append(float(dep_elev))
-    elif i==len(points)-1:  A_target.append(float(arr_elev))
+for i, p in enumerate(points):
+    r = alts_rec[i]
+    if i==0:
+        A_target.append(float(dep_elev))
+    elif i==len(points)-1:
+        A_target.append(float(arr_elev))
     else:
-        A_target.append(float(r["Alt_ft"]) if bool(r.get("Fix", False)) else float(cruise_alt))
+        alt_ft = float(r.get("Alt_ft", cruise_alt))
+        # Usa Alt_ft se Fix==True OU se Alt_ft for diferente do Cruise
+        use_alt = bool(r.get("Fix", False)) or abs(alt_ft - float(cruise_alt)) >= 1.0
+        A_target.append(alt_ft if use_alt else float(cruise_alt))
 
 # Preparar arrays
 gsC = [gs_for(i,"CLIMB")   for i in range(N)]
@@ -641,7 +653,7 @@ gsD = [gs_for(i,"DESCENT") for i in range(N)]
 climb_d = [0.0]*N
 desc_d  = [0.0]*N
 
-# DESCIDAS: alocar de trás para a frente, o mais tarde possível
+# DESCIDAS (de trás para a frente)
 impossible_notes=[]
 for k in range(1, len(A_target)):
     drop = A_target[k-1] - A_target[k]
@@ -660,7 +672,7 @@ for k in range(1, len(A_target)):
         if rem > 1e-9:
             impossible_notes.append(f"Não há distância para descer {int(round(drop))} ft até {points[k]}.")
 
-# SUBIDAS: alocar da frente para trás, o mais cedo possível
+# SUBIDAS (da frente para trás)
 for k in range(1, len(A_target)):
     rise = A_target[k] - A_target[k-1]
     if rise > 0:
@@ -702,7 +714,7 @@ rows=[]; seq_points=[]
 efob=float(st.session_state.start_fuel)
 
 startup = parse_hhmm(st.session_state.startup)
-takeoff = add_seconds(startup, int(st.session_state.taxi_min*60)) if startup else None  # TAXI = input (min)
+takeoff = add_seconds(startup, int(st.session_state.taxi_min*60)) if startup else None
 clock = takeoff
 
 # DEP
@@ -787,10 +799,11 @@ def add_hold(point_name, minutes, alt_now):
     efob = efob_local
     return alt_now
 
+tcs = tcs  # silence linter
 cur_alt = A_target[0]
 toc_list=[]; tod_list=[]
 for i in range(N):
-    frm, to = legs[i]["From"], legs[i]["To"]
+    frm, to = legs_rec[i]["From"], legs_rec[i]["To"]
     d = dist[i]
     d_cl = min(climb_d[i], d)
     d_ds = min(desc_d[i],   d - d_cl)
@@ -812,16 +825,16 @@ for i in range(N):
         cur_alt = add_seg("DESCENT", frm, to, i, d_ds, float(st.session_state.descent_ref_kt), ff_descent, cur_alt, st.session_state.rod_fpm)
 
     # HOLD no ponto de chegada desta perna (se pedido)
-    to_row = alts[i+1]
+    to_row = alts_rec[i+1]
     if bool(to_row.get("Hold")) and float(to_row.get("Hold_min",0)) > 0:
         cur_alt = add_hold(points[i+1], float(to_row["Hold_min"]), cur_alt)
 
 eta = clock
 shutdown = add_seconds(eta, 5*60) if eta else None
 
-# ==== Totais por fase (para OBSERVATIONS do NAVLOG) ====
+# ==== Totais por fase ====
 taxi_min = int(st.session_state.taxi_min)
-taxi_ff_lph = 20.0  # fixo
+taxi_ff_lph = 20.0
 fuel_taxi = taxi_ff_lph * (taxi_min / 60.0)
 
 fuel_climb   = sum(float(p['burn']) for p in seq_points if p.get('phase') == 'CLIMB')
@@ -913,7 +926,6 @@ if fieldset:
     PAll(["DEPARTURE_AIRFIELD","Departure_Airfield"], points[0])
     PAll(["ARRIVAL_AIRFIELD","Arrival_Airfield"], points[-1])
 
-    # Leg_Number = nº de pontos "oficiais" (sem TOC/TOD)
     PAll(["Leg_Number","LEG_NUMBER"], str(len(points)))
 
     PAll(["ALTERNATE_AIRFIELD","Alternate_Airfield"], st.session_state.altn)
@@ -924,10 +936,10 @@ if fieldset:
     PAll(["TEMP_ISA_DEV","TEMP ISA DEV","TEMP/ISA_DEV"], f"{int(round(st.session_state.temp_c))} / {isa_dev_i}")
     PAll(["MAG_VAR","MAG VAR"], f"{int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}")
 
-    # linhas (até 22)
     acc_dist = 0.0; acc_sec = 0
     max_lines = 22
-    nav_by_point = {r["Point"]:r for r in st.session_state.get("nav_rows", [])} if st.session_state.use_navaids else {}
+    nav_list = to_records(st.session_state.get("nav_rows", [])) if st.session_state.use_navaids else []
+    nav_by_point = {r["Point"]:r for r in nav_list}
     for idx, p in enumerate(seq_points[:max_lines], start=1):
         tag=f"Leg{idx:02d}_"; is_seg = (idx>1)
         P(tag+"Waypoint", p["name"])
@@ -954,13 +966,9 @@ if fieldset:
             P(tag+"Cumulative_Distance", fmt(acc_dist,'dist'))
             P(tag+"Cumulative_ETE",      mmss_from_seconds(acc_sec))
         else:
-            # HOLD/DEP line
-            if p.get("eto") is not None:
-                P(tag+"ETO", p["eto"])
-            if p.get("efob") is not None:
-                P(tag+"Estimated_FOB", fmt(p["efob"], 'fuel'))
+            if p.get("eto") is not None: P(tag+"ETO", p["eto"])
+            if p.get("efob") is not None: P(tag+"Estimated_FOB", fmt(p["efob"], 'fuel'))
 
-    # ===== OBSERVATIONS (inclui HOLD) =====
     observations_text = "\n".join([
         f"Start-up & Taxi: {taxi_min} min @ 20 L/h → {fmt(fuel_taxi,'fuel')} L",
         f"Climb: {fmt(fuel_climb,'fuel')} L",
@@ -1001,7 +1009,7 @@ def build_report_pdf():
     story.append(Paragraph("NAVLOG — Relatório do Planeamento", H1))
     story.append(Spacer(1,4))
 
-    points_local = points  # para fechar sobre a lista
+    points_local = points
     dep_elev_l = dep_elev; arr_elev_l = arr_elev; altn_elev_l = altn_elev
 
     resume = [
@@ -1088,7 +1096,3 @@ if st.button("Gerar Relatório (PDF)"):
         st.success("Relatório gerado.")
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
-
-
-
-
