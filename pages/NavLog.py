@@ -1,4 +1,4 @@
-# app.py — NAVLOG (TOC/TOD dinâmicos, vento por fix opcional, auto-commit & sync com vento geral)
+# app.py — NAVLOG (TOC/TOD dinâmicos, vento por fix opcional, auto-commit de tabelas)
 # Reqs: streamlit, pypdf, reportlab, pytz
 
 import streamlit as st
@@ -254,9 +254,6 @@ ensure("taxi_ff_lph",20.0)  # fixo
 
 # Vento por fix (toggle + tabela)
 ensure("use_wind_by_fix", False)
-ensure("last_use_wind_by_fix", False)
-ensure("last_wind_from", float(st.session_state.wind_from))
-ensure("last_wind_kt",   float(st.session_state.wind_kt))
 if "wind_rows" not in st.session_state:
     st.session_state.wind_rows = []
 
@@ -284,8 +281,8 @@ def rebuild_plan_rows(points: List[str], prev: Optional[List[dict]]):
     return rows
 
 def rebuild_alt_rows(points: List[str], cruise:int, prev: Optional[List[dict]]):
-    dep_e=_round_alt(AEROS.get(points[0],{}).get("elev",0))
-    arr_e=_round_alt(AEROS.get(points[-1],{}).get("elev",0))
+    def aero_elev(icao): return int(AEROS.get(icao,{}).get("elev",0))
+    dep_e=_round_alt(aero_elev(points[0])); arr_e=_round_alt(aero_elev(points[-1]))
     prev_map={r["Point"]:r for r in (prev or [])}
     out=[]
     for i,p in enumerate(points):
@@ -306,6 +303,9 @@ if "alt_rows" not in st.session_state:
 if "wind_rows" not in st.session_state or len(st.session_state.wind_rows) != len(st.session_state.points):
     st.session_state.wind_rows = [{"Point":p, "FROM": float(st.session_state.wind_from), "KT": float(st.session_state.wind_kt)}
                                   for p in st.session_state.points]
+
+# Guardar pontos da última rota para detetar mudanças
+ensure("last_points", list(st.session_state.points))
 
 # =========================================================
 # UI — formulário de cabeçalho / parâmetros
@@ -367,11 +367,6 @@ with st.form("hdr_perf_form", clear_on_submit=False):
 
     submitted = st.form_submit_button("Aplicar cabeçalho + performance")
     if submitted:
-        prev_use = bool(st.session_state.use_wind_by_fix)
-        prev_wf  = float(st.session_state.wind_from)
-        prev_wk  = float(st.session_state.wind_kt)
-
-        # guardar novos valores
         st.session_state.aircraft=f_aircraft; st.session_state.registration=f_registration; st.session_state.callsign=f_callsign
         st.session_state.startup=f_startup; st.session_state.student=f_student; st.session_state.lesson=f_lesson; st.session_state.instrutor=f_instrut
         st.session_state.dept=f_dep; st.session_state.arr=f_arr; st.session_state.altn=f_altn
@@ -382,35 +377,9 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         st.session_state.cruise_ref_kt=f_spd_cr; st.session_state.descent_ref_kt=f_spd_ds
         st.session_state.use_navaids=f_use_nav
         st.session_state.taxi_min=f_taxi_min
+        st.session_state.taxi_ff_lph=20.0  # fixo
         st.session_state.use_wind_by_fix=f_use_wbf
-
-        # --- sincronizações desejadas ---
-        pts = st.session_state.get("points") or [st.session_state.dept, st.session_state.arr]
-
-        def fill_all_winds_from_general():
-            st.session_state.wind_rows = [
-                {"Point":p, "FROM": float(st.session_state.wind_from), "KT": float(st.session_state.wind_kt)}
-                for p in pts
-            ]
-
-        # 1) se ativou agora o toggle (OFF -> ON), preencher com vento geral atual
-        if f_use_wbf and not prev_use:
-            fill_all_winds_from_general()
-
-        # 2) se já estava ON e mudou o vento geral, propagar só se as linhas ainda estavam todas iguais ao vento geral anterior
-        def all_rows_equal_to(from_deg, kt):
-            wr = st.session_state.get("wind_rows") or []
-            return len(wr)==len(pts) and all(abs(float(r.get("FROM",from_deg))-from_deg)<1e-9 and
-                                             abs(float(r.get("KT",kt))-kt)<1e-9 for r in wr)
-        if f_use_wbf and prev_use and ((float(f_wdir)!=prev_wf) or (float(f_wkt)!=prev_wk)):
-            if all_rows_equal_to(prev_wf, prev_wk):
-                fill_all_winds_from_general()
-
-        st.session_state.last_use_wind_by_fix = f_use_wbf
-        st.session_state.last_wind_from = float(st.session_state.wind_from)
-        st.session_state.last_wind_kt   = float(st.session_state.wind_kt)
-
-        st.success("Parâmetros aplicados.")
+        st.success("Parâmetros aplicados. (Tabelas mantidas — só mudam quando aplicares a rota.)")
 
 # =========================================================
 # Export / Import JSON v2 (SEM vento por fix no ficheiro)
@@ -449,16 +418,18 @@ with cJ2:
             data = json.loads(upl.read().decode("utf-8"))
             pts = data.get("route_points") or current_points()
             st.session_state.dept, st.session_state.arr = pts[0], pts[-1]
+            # rebuild: só quando a rota muda
             st.session_state.points = pts
             st.session_state.route_text = " ".join(pts)
             st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
             st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
-            # vento por fix — reindexar preservando
+            # vento por fix: reindexar preservando (sem gravar em JSON)
             old_w = {r.get("Point"): r for r in (st.session_state.get("wind_rows") or [])}
             st.session_state.wind_rows = [{"Point":p,
                                            "FROM": float(old_w.get(p,{}).get("FROM", st.session_state.wind_from)),
                                            "KT":   float(old_w.get(p,{}).get("KT",   st.session_state.wind_kt))}
                                           for p in pts]
+            st.session_state.last_points = list(pts)
             st.success("Rota importada e aplicada.")
         except Exception as e:
             st.error(f"Falha a importar JSON: {e}")
@@ -474,6 +445,7 @@ if st.button("Aplicar rota"):
     if len(pts)>=2: pts[-1]=st.session_state.arr
     st.session_state.points = pts
     st.session_state.route_text = " ".join(pts)
+    # rebuild (apenas porque a rota mudou)
     st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
     st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
     # vento por fix — reindexar preservando
@@ -482,6 +454,7 @@ if st.button("Aplicar rota"):
                                    "FROM": float(old_w.get(p,{}).get("FROM", st.session_state.wind_from)),
                                    "KT":   float(old_w.get(p,{}).get("KT",   st.session_state.wind_kt))}
                                   for p in pts]
+    st.session_state.last_points = list(pts)
     st.success("Rota aplicada.")
 
 # Data editors
@@ -511,33 +484,29 @@ alt_df = st.data_editor(
     column_config=alt_cfg, column_order=list(alt_cfg.keys())
 )
 
-# VENTO POR FIX — editor + botão de sync quando ativo
+# VENTO POR FIX — editor aparece se o toggle estiver ativo
 if st.session_state.use_wind_by_fix:
     st.subheader("Vento por Fix")
-    cwb1, cwb2 = st.columns([3,1])
-    with cwb1:
-        wind_cfg = {
-            "Point": st.column_config.TextColumn("Fix", disabled=True),
-            "FROM":  st.column_config.NumberColumn("Wind FROM (°TRUE)", min_value=0.0, max_value=360.0, step=1.0),
-            "KT":    st.column_config.NumberColumn("Wind (kt)", min_value=0.0, max_value=200.0, step=1.0),
-        }
-        wind_df = st.data_editor(
-            st.session_state.wind_rows, key="wind_by_fix_table",
-            hide_index=True, use_container_width=True, num_rows="fixed",
-            column_config=wind_cfg, column_order=list(wind_cfg.keys())
-        )
-    with cwb2:
-        if st.button("🔁 Aplicar vento geral a todos os fixes"):
-            st.session_state.wind_rows = [{"Point":r["Point"], "FROM": float(st.session_state.wind_from), "KT": float(st.session_state.wind_kt)}
-                                          for r in st.session_state.wind_rows]
-            st.success("Vento geral aplicado a todos os fixes.")
+    wind_cfg = {
+        "Point": st.column_config.TextColumn("Fix", disabled=True),
+        "FROM":  st.column_config.NumberColumn("Wind FROM (°TRUE)", min_value=0.0, max_value=360.0, step=1.0),
+        "KT":    st.column_config.NumberColumn("Wind (kt)", min_value=0.0, max_value=200.0, step=1.0),
+    }
+    wind_df = st.data_editor(
+        st.session_state.wind_rows, key="wind_by_fix_table",
+        hide_index=True, use_container_width=True, num_rows="fixed",
+        column_config=wind_cfg, column_order=list(wind_cfg.keys())
+    )
 
 # ===== AUTO-COMMIT: puxar edições pendentes dos editores =====
 def apply_pending_edits():
+    # Legs
     if "plan_table" in st.session_state and isinstance(st.session_state.plan_table, list):
         st.session_state.plan_rows = st.session_state.plan_table
+    # Altitudes
     if "alt_table" in st.session_state and isinstance(st.session_state.alt_table, list):
         st.session_state.alt_rows = st.session_state.alt_table
+    # Vento por fix
     if st.session_state.use_wind_by_fix and "wind_by_fix_table" in st.session_state and isinstance(st.session_state.wind_by_fix_table, list):
         st.session_state.wind_rows = st.session_state.wind_by_fix_table
 
@@ -553,9 +522,9 @@ winds  = st.session_state.wind_rows
 N = len(legs)
 
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
-dep_elev  = _round_alt(AEROS.get(points[0],{}).get("elev",0))
-arr_elev  = _round_alt(AEROS.get(points[-1],{}).get("elev",0))
-altn_elev = _round_alt(AEROS.get(st.session_state.altn,{}).get("elev",0))
+dep_elev  = _round_alt(aero_elev(points[0]))
+arr_elev  = _round_alt(aero_elev(points[-1]))
+altn_elev = _round_alt(aero_elev(st.session_state.altn))
 
 start_alt = float(dep_elev)
 cruise_alt = float(st.session_state.cruise_alt)
@@ -757,6 +726,16 @@ for i in range(N):
 eta = clock
 shutdown = add_seconds(eta, 5*60) if eta else None
 
+# ==== Totais por fase (para OBSERVATIONS do NAVLOG) ====
+taxi_min = int(st.session_state.taxi_min)
+taxi_ff_lph = 20.0  # fixo
+fuel_taxi = taxi_ff_lph * (taxi_min / 60.0)
+
+fuel_climb = sum(float(p['burn']) for p in seq_points if p.get('phase') == 'CLIMB')
+fuel_enroute = sum(float(p['burn']) for p in seq_points if p.get('phase') == 'CRUISE')
+fuel_descent = sum(float(p['burn']) for p in seq_points if p.get('phase') == 'DESCENT')
+descent_min_total = int(round(sum(int(p.get('ete_sec',0)) for p in seq_points if p.get('phase') == 'DESCENT') / 60.0))
+
 # =========================================================
 # Resultados
 # =========================================================
@@ -824,10 +803,8 @@ if fieldset:
     PAll(["FLT TIME","FLT_TIME","FLIGHT_TIME"], f"{(tot_ete_sec//3600):02d}:{((tot_ete_sec%3600)//60):02d}")
     PAll(["FLIGHT_LEVEL_ALTITUDE","LEVEL_FF","LEVEL F/F","Level_FF"], fmt(cruise_alt,'alt'))
 
-    # Combustível de CLIMB (opcionalmente útil noutros campos do template)
-    climb_time_hours = sum((d / gs_for(i,"CLIMB")) for i,d in enumerate(front_climb) if d > 0.0)
-    _, ff_climb_tmp = cruise_lookup(start_alt + 0.5*max(0.0, cruise_alt-start_alt), int(st.session_state.rpm_climb), st.session_state.temp_c)
-    climb_fuel_raw = ff_climb_tmp * max(0.0, climb_time_hours)
+    climb_time_hours = sum((front_climb[i] / gs_for(i,"CLIMB")) for i in range(N) if front_climb[i] > 0.0)
+    climb_fuel_raw = ff_climb * max(0.0, climb_time_hours)
     PAll(["CLIMB FUEL","CLIMB_FUEL"], fmt(climb_fuel_raw,'fuel'))
 
     PAll(["QNH"], str(int(round(st.session_state.qnh))))
@@ -845,11 +822,52 @@ if fieldset:
     PAll(["ALTERNATE_ELEVATION","Alternate_Elevation","TextField_7"], fmt(altn_elev,'alt'))
 
     PAll(["WIND","WIND_FROM"], f"{int(round(st.session_state.wind_from)):03d}/{int(round(st.session_state.wind_kt)):02d}")
-    isa_dev_i = int(round(st.session_state.temp_c - isa_temp(pressure_alt(_round_alt(AEROS.get(points[0],{}).get("elev",0)), st.session_state.qnh))))
+    isa_dev_i = int(round(st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))))
     PAll(["TEMP_ISA_DEV","TEMP ISA DEV","TEMP/ISA_DEV"], f"{int(round(st.session_state.temp_c))} / {isa_dev_i}")
     PAll(["MAG_VAR","MAG VAR"], f"{int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}")
 
-    # (Sem OBSERVATIONS — removido por pedido)
+    # linhas (até 22)
+    acc_dist = 0.0; acc_sec = 0
+    max_lines = 22
+    nav_by_point = {r["Point"]:r for r in st.session_state.get("nav_rows", [])} if st.session_state.use_navaids else {}
+    for idx, p in enumerate(seq_points[:max_lines], start=1):
+        tag=f"Leg{idx:02d}_"; is_seg = (idx>1)
+        P(tag+"Waypoint", p["name"])
+        if p["alt"]!="": P(tag+"Altitude_FL", fmt(p["alt"],'alt'))
+
+        if st.session_state.use_navaids and p["name"] in nav_by_point and is_seg:
+            nv = nav_by_point[p["name"]]
+            if nv.get("IDENT"): P(tag+"Navaid_Identifier", nv["IDENT"])
+            if nv.get("FREQ"):  P(tag+"Navaid_Frequency",  nv["FREQ"])
+
+        if is_seg:
+            acc_dist += float(p["dist"] or 0.0)
+            acc_sec  += int(p.get("ete_sec",0) or 0)
+            P(tag+"True_Course",      fmt(p["tc"], 'angle'))
+            P(tag+"True_Heading",     fmt(p["th"], 'angle'))
+            P(tag+"Magnetic_Heading", fmt(p["mh"], 'angle'))
+            P(tag+"True_Airspeed",    fmt(p["tas"], 'speed'))
+            P(tag+"Ground_Speed",     fmt(p["gs"], 'speed'))
+            P(tag+"Leg_Distance",     fmt(p["dist"], 'dist'))
+            P(tag+"Leg_ETE",          mmss_from_seconds(int(p.get("ete_sec",0))))
+            P(tag+"ETO",              p["eto"])
+            P(tag+"Planned_Burnoff",  fmt(p["burn"], 'fuel'))
+            P(tag+"Estimated_FOB",    fmt(p["efob"], 'fuel'))
+            P(tag+"Cumulative_Distance", fmt(acc_dist,'dist'))
+            P(tag+"Cumulative_ETE",      mmss_from_seconds(acc_sec))
+        else:
+            P(tag+"ETO", p["eto"])
+            P(tag+"Estimated_FOB", fmt(p["efob"], 'fuel'))
+
+    # ===== OBSERVATIONS =====
+    observations_text = "\n".join([
+        f"Start-up & Taxi: {taxi_min} min @ 20 L/h → {fmt(fuel_taxi,'fuel')} L",
+        f"Climb: {fmt(fuel_climb,'fuel')} L",
+        f"Enroute: {fmt(fuel_enroute,'fuel')} L",
+        f"Descent (min): {descent_min_total} min → {fmt(fuel_descent,'fuel')} L"
+    ])
+    # O campo no template deve chamar-se OBSERVATIONS
+    put(named, fieldset, "OBSERVATIONS", observations_text, maxlens)
 
 if st.button("Gerar PDF NAVLOG", type="primary"):
     try:
@@ -884,10 +902,10 @@ def build_report_pdf():
 
     resume = [
         ["DEP / ARR / ALTN", f"{points[0]} / {points[-1]} / {st.session_state.altn}"],
-        ["Elev DEP/ARR/ALTN (ft)", f"{fmt(_round_alt(AEROS.get(points[0],{}).get('elev',0)),'alt')} / {fmt(_round_alt(AEROS.get(points[-1],{}).get('elev',0)),'alt')} / {fmt(_round_alt(AEROS.get(st.session_state.altn,{}).get('elev',0)),'alt')}"],
+        ["Elev DEP/ARR/ALTN (ft)", f"{fmt(dep_elev,'alt')} / {fmt(arr_elev,'alt')} / {fmt(altn_elev,'alt')}"],
         ["Cruise Alt (ft)", fmt(cruise_alt,'alt')],
         ["Startup / Taxi / ETD", f"{st.session_state.startup} / {st.session_state.taxi_min} min / {(add_seconds(parse_hhmm(st.session_state.startup),st.session_state.taxi_min*60).strftime('%H:%M') if st.session_state.startup else '')}"],
-        ["QNH / OAT / ISA dev", f"{int(st.session_state.qnh)} / {int(st.session_state.temp_c)} / {int(round(st.session_state.temp_c - isa_temp(pressure_alt(_round_alt(AEROS.get(points[0],{}).get('elev',0)), st.session_state.qnh))))}"],
+        ["QNH / OAT / ISA dev", f"{int(st.session_state.qnh)} / {int(st.session_state.temp_c)} / {int(round(st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))))}"],
         ["Vento FROM / Var", f"{int(round(st.session_state.wind_from)):03d}/{int(round(st.session_state.wind_kt)):02d} / {int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}"],
         ["TAS (cl/cru/des)", f"{_round_unit(tas_climb)}/{_round_unit(tas_cruise)}/{_round_unit(tas_descent)} kt"],
         ["FF (cl/cru/des)", f"{_round_unit(ff_climb)}/{_round_unit(ff_cruise)}/{_round_unit(ff_descent)} L/h"],
@@ -957,3 +975,4 @@ if st.button("Gerar Relatório (PDF)"):
         st.success("Relatório gerado.")
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
+
