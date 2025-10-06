@@ -1,3 +1,4 @@
+
 # app.py — NAVLOG (TOC/TOD dinâmicos, Altitudes por fix que APLICAM, HOLDs por ponto, PDF + Relatório)
 # Reqs: streamlit, pypdf, reportlab, pytz
 
@@ -1003,6 +1004,11 @@ def build_report_pdf():
     story.append(Paragraph("NAVLOG — Relatório do Planeamento", H1))
     story.append(Spacer(1,4))
 
+    # strings separadas para evitar SyntaxError
+    toc_str = ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')}nm" for (leg,pos,name) in toc_list])
+    tod_str = ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')}nm" for (leg,pos,name) in tod_list])
+    tt_line = (toc_str + ("; " if toc_list and tod_list else "") + tod_str) or "—"
+
     resume = [
         ["DEP / ARR / ALTN", f"{points[0]} / {points[-1]} / {st.session_state.altn}"],
         ["Elev DEP/ARR/ALTN (ft)", f"{fmt(dep_elev,'alt')} / {fmt(arr_elev,'alt')} / {fmt(altn_elev,'alt')}"],
@@ -1015,8 +1021,7 @@ def build_report_pdf():
         ["ROCs/ROD", f"{_round_unit(roc)} ft/min / {_round_unit(st.session_state.rod_fpm)} ft/min"],
         ["Tempos por fase", f"Climb {mmss_from_seconds(phase_secs['CLIMB'])} • Enroute {mmss_from_seconds(phase_secs['CRUISE'])} • Descent {mmss_from_seconds(phase_secs['DESCENT'])} • Holding {mmss_from_seconds(phase_secs['HOLD'])}"],
         ["Totais", f"Dist {fmt(sum(float(p['dist']) for p in seq_points if p.get('dist')), 'dist')} nm • ETE {hhmmss_from_seconds(int(sum(int(p.get('ete_sec',0)) for p in seq_points)))} • Burn {fmt(sum(float(p.get('burn',0)) for p in seq_points),'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"],
-        ["TOC/TOD", (", ".join([f'{name} L{leg+1}@{fmt(pos,\"dist\")}nm' for (leg,pos,name) in toc_list]) + ("; " if toc_list and tod_list else "") +
-                     ", ".join([f'{name} L{leg+1}@{fmt(pos,\"dist\")}nm' for (leg,pos,name) in tod_list])) or "—"],
+        ["TOC/TOD", tt_line],
     ]
     t1 = LongTable(resume, colWidths=[64*mm, None], hAlign="LEFT")
     t1.setStyle(TableStyle([
