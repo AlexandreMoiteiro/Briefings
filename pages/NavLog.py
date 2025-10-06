@@ -336,12 +336,12 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         st.session_state.cruise_ref_kt=f_spd_cr; st.session_state.descent_ref_kt=f_spd_ds
         st.session_state.use_navaids=f_use_nav
         st.session_state.taxi_min=f_taxi_min
-        st.session_state.taxi_ff_lph=20.0  # força para 20 L/h fixo
+        st.session_state.taxi_ff_lph=20.0  # fixo
         st.session_state.hold_ref_kt = f_hold_spd
         st.session_state.hold_ff_lph = f_hold_ff
         st.session_state.auto_fix_edits = f_auto_fix
 
-        # Propagar cruise para a tabela de altitudes (não fixados) e DEP/ARR = elevação
+        # Sincroniza tabela Altitudes com cruise/elevs (sem sobrescrever fixos do utilizador)
         def sync_alt_rows_to_cruise():
             pts = st.session_state.get("points") or [st.session_state.dept, st.session_state.arr]
             rows = st.session_state.get("alt_rows")
@@ -361,6 +361,7 @@ with st.form("hdr_perf_form", clear_on_submit=False):
             st.session_state.alt_rows = rows
         sync_alt_rows_to_cruise()
         st.success("Parâmetros aplicados.")
+        _rerun()
 
 # =========================================================
 # JSON v2 (ANTES da rota)
@@ -436,6 +437,7 @@ with cJ2:
                     ar[i]["Hold"] = bool(hOn[i]); ar[i]["Hold_min"] = float(hMin[i])
             st.session_state.alt_rows = ar
             st.success("Rota importada e aplicada.")
+            _rerun()
         except Exception as e:
             st.error(f"Falha a importar JSON: {e}")
 
@@ -501,6 +503,7 @@ if st.button("Aplicar rota"):
     st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
     st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
     st.success("Rota aplicada.")
+    _rerun()
 
 # init defaults
 if "points" not in st.session_state:
@@ -510,6 +513,7 @@ if "plan_rows" not in st.session_state:
 if "alt_rows" not in st.session_state:
     st.session_state.alt_rows = rebuild_alt_rows(st.session_state.points, st.session_state.cruise_alt, None)
 
+# --------- LEGS (em formulário) ---------
 st.subheader("Legs (TC/Dist)")
 leg_cfg = {
     "From": st.column_config.TextColumn("From", disabled=True),
@@ -517,17 +521,18 @@ leg_cfg = {
     "TC":   st.column_config.NumberColumn("TC (°T)", step=0.1, min_value=0.0, max_value=359.9),
     "Dist": st.column_config.NumberColumn("Dist (nm)", step=0.1, min_value=0.0),
 }
-st.session_state.plan_rows = st.data_editor(
-    st.session_state.plan_rows, key="plan_table",
-    hide_index=True, use_container_width=True, num_rows="fixed",
-    column_config=leg_cfg, column_order=list(leg_cfg.keys())
-)
-# ---- Botão para aplicar Legs ----
-if st.button("Aplicar Legs (TC/Dist)"):
-    # Os valores já estão em st.session_state.plan_rows; forçamos recálculo
-    st.success("Legs aplicadas.")
-    _rerun()
+with st.form("legs_form", clear_on_submit=False):
+    edited_legs = st.data_editor(
+        st.session_state.plan_rows, key="plan_table",
+        hide_index=True, use_container_width=True, num_rows="fixed",
+        column_config=leg_cfg, column_order=list(leg_cfg.keys())
+    )
+    if st.form_submit_button("Aplicar Legs (TC/Dist)"):
+        st.session_state.plan_rows = edited_legs
+        st.success("Legs aplicadas.")
+        _rerun()
 
+# --------- ALTITUDES/HOLDS (em formulário) ---------
 st.subheader("Altitudes por Fix")
 st.caption("Marcar **Fixar?** = altitude *obrigatória* nesse fix. Não marcado = segue o perfil (Cruise por defeito). DEP/ARR são sempre fixos às elevações.")
 
@@ -538,28 +543,28 @@ alt_cfg = {
     "Hold":    st.column_config.CheckboxColumn("Hold no fix?"),
     "Hold_min":st.column_config.NumberColumn("Min no hold", step=1.0, min_value=0.0),
 }
-st.session_state.alt_rows = st.data_editor(
-    st.session_state.alt_rows, key="alt_table",
-    hide_index=True, use_container_width=True, num_rows="fixed",
-    column_config=alt_cfg, column_order=list(alt_cfg.keys())
-)
-# ---- Botão para aplicar Altitudes/Holds ----
-if st.button("Aplicar Altitudes / Holds"):
-    st.success("Altitudes aplicadas.")
-    _rerun()
+with st.form("alt_form", clear_on_submit=False):
+    edited_alts = st.data_editor(
+        st.session_state.alt_rows, key="alt_table",
+        hide_index=True, use_container_width=True, num_rows="fixed",
+        column_config=alt_cfg, column_order=list(alt_cfg.keys())
+    )
+    if st.form_submit_button("Aplicar Altitudes / Holds"):
+        # aplica “auto fixar” no momento de submeter
+        if st.session_state.auto_fix_edits:
+            crz=_round_alt(st.session_state.cruise_alt)
+            for i,r in enumerate(edited_alts):
+                if i not in (0, len(edited_alts)-1):
+                    try:
+                        if abs(float(r.get("Alt_ft", crz)) - float(crz)) >= 1 and not bool(r.get("Fix", False)):
+                            r["Fix"] = True
+                    except Exception:
+                        pass
+        st.session_state.alt_rows = edited_alts
+        st.success("Altitudes / Holds aplicados.")
+        _rerun()
 
-# Opcional: se editar Alt_ft diferente do cruzeiro, marcar Fixar? automaticamente
-if st.session_state.auto_fix_edits:
-    crz=_round_alt(st.session_state.cruise_alt)
-    for i,r in enumerate(st.session_state.alt_rows):
-        if i not in (0, len(st.session_state.alt_rows)-1):
-            try:
-                if abs(float(r.get("Alt_ft", crz)) - float(crz)) >= 1 and not bool(r.get("Fix", False)):
-                    r["Fix"] = True
-            except Exception:
-                pass
-
-# NAVAIDs (mostra só se o toggle no formulário estiver ON)
+# --------- NAVAIDs (em formulário) ---------
 if st.session_state.use_navaids:
     st.subheader("NAVAIDs opcionais (preenche no PDF quando existir)")
     if "nav_rows" not in st.session_state or len(st.session_state.nav_rows) != len(st.session_state.points):
@@ -573,15 +578,16 @@ if st.session_state.use_navaids:
         "IDENT": st.column_config.TextColumn("Ident"),
         "FREQ":  st.column_config.TextColumn("Freq"),
     }
-    st.session_state.nav_rows = st.data_editor(
-        st.session_state.nav_rows, key="navaids_table",
-        hide_index=True, use_container_width=True, num_rows="fixed",
-        column_config=nav_cfg, column_order=list(nav_cfg.keys())
-    )
-    # ---- Botão para aplicar NAVAIDs ----
-    if st.button("Aplicar NAVAIDs"):
-        st.success("NAVAIDs aplicados.")
-        _rerun()
+    with st.form("nav_form", clear_on_submit=False):
+        edited_navs = st.data_editor(
+            st.session_state.nav_rows, key="navaids_table",
+            hide_index=True, use_container_width=True, num_rows="fixed",
+            column_config=nav_cfg, column_order=list(nav_cfg.keys())
+        )
+        if st.form_submit_button("Aplicar NAVAIDs"):
+            st.session_state.nav_rows = edited_navs
+            st.success("NAVAIDs aplicados.")
+            _rerun()
 
 # =========================================================
 # Cálculo (perfil com TOC/TOD dinâmicos + HOLDs)
@@ -1059,11 +1065,11 @@ def build_report_pdf():
             ("BACKGROUND",(0,0),(1,0),colors.whitesmoke),
             ("GRID",(0,1),(-1,-1),0.25,colors.lightgrey),
             ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-            ("FONTSIZE",(0,0),( -1,-1),9),
-            ("LEFTPADDING",(0,0),( -1,-1),4),
-            ("RIGHTPADDING",(0,0),( -1,-1),6),
-            ("TOPPADDING",(0,0),( -1,-1),3),
-            ("BOTTOMPADDING",(0,0),( -1,-1),3),
+            ("FONTSIZE",(0,0),(-1,-1),9),
+            ("LEFTPADDING",(0,0),(-1,-1),4),
+            ("RIGHTPADDING",(0,0),(-1,-1),6),
+            ("TOPPADDING",(0,0),(-1,-1),3),
+            ("BOTTOMPADDING",(0,0),(-1,-1),3),
         ]))
         story.append(KeepTogether([t, Spacer(1,6)]))
 
