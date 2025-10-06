@@ -1,5 +1,5 @@
-# app.py — NAVLOG (TOC/TOD dinâmicos, Altitudes por fix que APLICAM, HOLDs por ponto, PDF + Relatório)
-# Reqs: streamlit, pypdf, reportlab, pytz
+# app.py — NAVLOG com cortes dentro do leg (TOC/TOD) e PDF alinhado com a APP
+# Reqs: streamlit, pypdf, pytz
 
 import streamlit as st
 import datetime as dt
@@ -8,10 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from math import sin, asin, radians, degrees, fmod
 
-st.set_page_config(page_title="NAVLOG (PDF + Relatório)", layout="wide", initial_sidebar_state="collapsed")
-PDF_TEMPLATE_PATHS = ["NAVLOG_FORM.pdf", "/mnt/data/NAVLOG_FORM.pdf"]
-
-# ===== Optional deps =====
+# =============== PDF helpers ===============
 try:
     from pypdf import PdfReader, PdfWriter
     from pypdf.generic import NameObject, TextStringObject
@@ -19,81 +16,104 @@ try:
 except Exception:
     PYPDF_OK = False
 
-try:
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.lib import colors
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, LongTable, TableStyle, PageBreak, KeepTogether
-    REPORTLAB_OK = True
-except Exception:
-    REPORTLAB_OK = False
+def ascii_safe(x: str) -> str:
+    return unicodedata.normalize("NFKD", str(x or "")).encode("ascii","ignore").decode("ascii")
 
-# ===== Helpers =====
-def clean_point_name(s) -> str:
-    txt = unicodedata.normalize("NFKD", str(s or "")).encode("ascii","ignore").decode("ascii")
-    return txt.strip().upper()
+def read_pdf_bytes(paths: List[str]) -> bytes:
+    for p in paths:
+        if Path(p).exists():
+            return Path(p).read_bytes()
+    raise FileNotFoundError(paths)
 
-def _round_alt(x: float) -> int:
-    if x is None: return 0
-    v = abs(float(x)); base = 50 if v < 1000 else 100
-    return int(round(float(x)/base) * base)
+def get_fields_and_meta(template_bytes: bytes):
+    reader = PdfReader(io.BytesIO(template_bytes))
+    field_names, maxlens = set(), {}
+    try:
+        fd = reader.get_fields() or {}
+        field_names |= set(fd.keys())
+        for k,v in fd.items():
+            ml = v.get("/MaxLen")
+            if ml: maxlens[k] = int(ml)
+    except: pass
+    try:
+        for page in reader.pages:
+            if "/Annots" in page:
+                for a in page["/Annots"]:
+                    obj = a.get_object()
+                    if obj.get("/T"):
+                        nm = str(obj["/T"]); field_names.add(nm)
+                        ml = obj.get("/MaxLen")
+                        if ml: maxlens[nm] = int(ml)
+    except: pass
+    return field_names, maxlens
 
-def _round_unit(x: float) -> int:
-    if x is None: return 0
-    return int(round(float(x)))
+def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
+    if not PYPDF_OK: raise RuntimeError("pypdf missing")
+    reader = PdfReader(io.BytesIO(template_bytes))
+    writer = PdfWriter()
+    for p in reader.pages: writer.add_page(p)
+    root = reader.trailer["/Root"]
+    if "/AcroForm" not in root: raise RuntimeError("Template has no AcroForm")
+    writer._root_object.update({NameObject("/AcroForm"): root["/AcroForm"]})
+    try:
+        writer._root_object["/AcroForm"].update({
+            NameObject("/NeedAppearances"): True,
+            NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")
+        })
+    except: pass
+    str_fields = {k:(str(v) if v is not None else "") for k,v in fields.items()}
+    for page in writer.pages:
+        writer.update_page_form_field_values(page, str_fields)
+    bio = io.BytesIO(); writer.write(bio); return bio.getvalue()
 
-def _round_tenth(x: float) -> float:
-    if x is None: return 0.0
-    return round(float(x), 1)
+def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
+    if key in fieldset:
+        s = "" if value is None else str(value)
+        if key in maxlens and len(s) > maxlens[key]:
+            s = s[:maxlens[key]]
+        out[key] = s
 
-def _round_angle(x: float) -> int:
-    if x is None: return 0
-    return int(round(float(x))) % 360
+# =============== Wind & helpers ===============
+def wrap360(x): x=fmod(x,360.0); return x+360 if x<0 else x
+def angle_diff(a,b): return (a-b+180)%360-180
 
-def round_to_10s(sec: float) -> int:
-    if sec <= 0: return 0
-    s = int(round(sec/10.0)*10)
-    return max(s, 10)
+# Triângulo do vento (CORRIGIDO: usa vento-FROM diretamente)
+# Fórmulas padrão:
+#   WCA = asin( (W/TAS) * sin(θw_from - θc) )
+#   GS  = TAS*cos(WCA) - W*cos(θw_from - θc)    (sinal "−" porque é vento-FROM)
+#   TH  = TC + WCA
+def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: float):
+    if tas_kt <= 0:
+        return 0.0, wrap360(tc_deg), 0.0
+    delta = radians(angle_diff(wind_from_deg, tc_deg))
+    cross = wind_kt * sin(delta)           # + se vento pela esquerda
+    s = max(-1.0, min(1.0, cross/max(tas_kt,1e-9)))
+    wca = degrees(asin(s))
+    th  = wrap360(tc_deg + wca)
+    gs  = max(0.0, tas_kt*math.cos(radians(wca)) - wind_kt*math.cos(delta))
+    return wca, th, gs
 
-def mmss_from_seconds(tsec: int) -> str:
-    m = tsec // 60; s = tsec % 60
-    return f"{m:02d}:{s:02d}"
-
-def hhmmss_from_seconds(tsec: int) -> str:
-    h = tsec // 3600; m = (tsec % 3600)//60; s = tsec % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-def fmt(x: float, kind: str) -> str:
-    if kind == "dist":   return f"{round(float(x or 0),1):.1f}"
-    if kind == "fuel":   return f"{_round_tenth(x):.1f}"
-    if kind == "ff":     return str(_round_unit(x))
-    if kind == "speed":  return str(_round_unit(x))
-    if kind == "angle":  return str(_round_angle(x))
-    if kind == "alt":    return str(_round_alt(x))
-    return str(x)
+def apply_var(true_deg,var_deg,east_is_negative=False):
+    return wrap360(true_deg - var_deg if east_is_negative else true_deg + var_deg)
 
 def parse_hhmm(s:str):
     s=(s or "").strip()
-    for fmt in ("%H:%M:%S","%H:%M","%H%M"):
+    for fmt in ("%H:%M","%H%M"):
         try: return dt.datetime.strptime(s,fmt).time()
         except: pass
     return None
 
-def add_seconds(t:dt.time, s:int):
+def add_minutes(t:dt.time,m:int):
     if not t: return None
     today=dt.date.today(); base=dt.datetime.combine(today,t)
-    return (base+dt.timedelta(seconds=int(s))).time()
+    return (base+dt.timedelta(minutes=m)).time()
 
+# =============== AFM (650 kg) ===============
 def clamp(v,lo,hi): return max(lo,min(hi,v))
 def interp1(x,x0,x1,y0,y1):
     if x1==x0: return y0
     t=(x-x0)/(x1-x0); return y0+t*(y1-y0)
 
-def wrap360(x): x=fmod(x,360.0); return x+360 if x<0 else x
-def angle_diff(a,b): return (a-b+180)%360-180
-
-# ===== Perf (Tecnam P2008 – exemplo) =====
 ROC_ENROUTE = {
     0:{-25:981,0:835,25:704,50:586},  2000:{-25:870,0:726,25:597,50:481},
     4000:{-25:759,0:617,25:491,50:377},6000:{-25:648,0:509,25:385,50:273},
@@ -152,21 +172,7 @@ def vy_interp_enroute(pa):
     p0=max([p for p in pas if p<=pa_c]); p1=min([p for p in pas if p>=pa_c])
     return interp1(pa_c, p0, p1, VY_ENROUTE[p0], VY_ENROUTE[p1])
 
-# ===== Wind & Var =====
-def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: float):
-    if tas_kt <= 0: return 0.0, wrap360(tc_deg), 0.0
-    delta = radians(angle_diff(wind_from_deg, tc_deg))
-    cross = wind_kt * sin(delta)
-    s = max(-1.0, min(1.0, cross/max(tas_kt,1e-9)))
-    wca = degrees(asin(s))
-    th  = wrap360(tc_deg + wca)
-    gs  = max(0.0, tas_kt*math.cos(radians(wca)) - wind_kt*math.cos(delta))
-    return wca, th, gs
-
-def apply_var(true_deg,var_deg,east_is_negative=False):
-    return wrap360(true_deg - var_deg if east_is_negative else true_deg + var_deg)
-
-# ===== Aerodromes (ex.) =====
+# =============== Aerodromes ===============
 AEROS={
  "LPSO":{"elev":390,"freq":"119.805"},
  "LPEV":{"elev":807,"freq":"122.705"},
@@ -177,890 +183,440 @@ AEROS={
 def aero_elev(icao): return int(AEROS.get(icao,{}).get("elev",0))
 def aero_freq(icao): return AEROS.get(icao,{}).get("freq","")
 
-# ===== PDF helpers =====
-@st.cache_data(show_spinner=False)
-def read_pdf_bytes(paths: Tuple[str, ...]) -> bytes:
-    for p in paths:
-        if Path(p).exists():
-            return Path(p).read_bytes()
-    raise FileNotFoundError(paths)
-
-@st.cache_data(show_spinner=False)
-def get_form_fields(template_bytes: bytes):
-    reader = PdfReader(io.BytesIO(template_bytes))
-    fd = reader.get_fields() or {}
-    field_names = set(fd.keys())
-    maxlens = {}
-    for k,v in fd.items():
-        ml = v.get("/MaxLen")
-        if ml: maxlens[k] = int(ml)
-    return field_names, maxlens
-
-def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
-    if not PYPDF_OK: raise RuntimeError("pypdf missing")
-    reader = PdfReader(io.BytesIO(template_bytes))
-    writer = PdfWriter()
-    if hasattr(writer, "clone_document_from_reader"):
-        writer.clone_document_from_reader(reader)
-    else:
-        for p in reader.pages: writer.add_page(p)
-        acro = reader.trailer["/Root"].get("/AcroForm")
-        if acro is not None:
-            writer._root_object.update({NameObject("/AcroForm"): acro})
-    try:
-        acroform = writer._root_object.get("/AcroForm")
-        if acroform:
-            acroform.update({
-                NameObject("/NeedAppearances"): True,
-                NameObject("/DA"): TextStringObject("/Helv 10 Tf 0 g")
-            })
-    except Exception:
-        pass
-    str_fields = {k:(str(v) if v is not None else "") for k,v in fields.items()}
-    for page in writer.pages:
-        writer.update_page_form_field_values(page, str_fields)
-    bio = io.BytesIO(); writer.write(bio); return bio.getvalue()
-
-def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
-    if key in fieldset:
-        s = "" if value is None else str(value)
-        if key in maxlens and len(s) > maxlens[key]:
-            s = s[:maxlens[key]]
-        out[key] = s
-
-# =========================================================
-# Estado inicial
-# =========================================================
-def ensure(k, v):
-    if k not in st.session_state: st.session_state[k] = v
-
-ensure("aircraft","P208"); ensure("registration","CS-ECC"); ensure("callsign","RVP")
-ensure("student","AMOIT"); ensure("lesson",""); ensure("instrutor","")
-ensure("dept","LPSO"); ensure("arr","LPEV"); ensure("altn","LPCB")
-ensure("startup","")
-ensure("qnh",1013); ensure("cruise_alt",4000)
-ensure("temp_c",15); ensure("var_deg",1); ensure("var_is_e",False)
-ensure("wind_from",0); ensure("wind_kt",17)
-ensure("rpm_climb",2250); ensure("rpm_cruise",2000)
-ensure("descent_ff",15.0); ensure("rod_fpm",700); ensure("start_fuel",85.0)
-ensure("cruise_ref_kt",90); ensure("descent_ref_kt",65)
-ensure("use_navaids",False)
-
-# Holding params
-ensure("hold_ref_kt", 80)
-ensure("hold_ff_lph", 18.0)
-ensure("auto_fix_edits", True)
-
-# Taxi
-ensure("taxi_min",15)
-ensure("taxi_ff_lph",20.0)
-
-# =========================================================
-# Cabeçalho / Atmosfera / Perf
-# =========================================================
+# =============== App UI ===============
+st.set_page_config(page_title="NAVLOG", layout="wide", initial_sidebar_state="collapsed")
 st.title("Navigation Plan & Inflight Log — Tecnam P2008")
-with st.form("hdr_perf_form", clear_on_submit=False):
-    st.subheader("Identificação e Parâmetros")
-    c1,c2,c3 = st.columns(3)
-    with c1:
-        f_aircraft = st.text_input("Aircraft", st.session_state.aircraft)
-        f_registration = st.selectbox("Registration",
-                                      ["CS-ECC","CS-ECD","CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW"],
-                                      index=["CS-ECC","CS-ECD","CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW"].index(st.session_state.registration))
-        f_callsign = st.text_input("Callsign", st.session_state.callsign)
-        f_startup  = st.text_input("Startup (HH:MM ou HH:MM:SS)", st.session_state.startup)
-    with c2:
-        f_student = st.text_input("Student", st.session_state.student)
-        f_lesson  = st.text_input("Lesson (ex: 12)", st.session_state.lesson)
-        f_instrut = st.text_input("Instrutor", st.session_state.instrutor)
-    with c3:
-        f_dep = st.selectbox("Departure", list(AEROS.keys()), index=list(AEROS.keys()).index(st.session_state.dept))
-        f_arr = st.selectbox("Arrival",  list(AEROS.keys()), index=list(AEROS.keys()).index(st.session_state.arr))
-        f_altn= st.selectbox("Alternate",list(AEROS.keys()), index=list(AEROS.keys()).index(st.session_state.altn))
 
-    st.markdown("---")
-    c4,c5,c6 = st.columns(3)
-    with c4:
-        f_qnh  = st.number_input("QNH (hPa)", 900, 1050, int(st.session_state.qnh), step=1)
-        f_crz  = st.number_input("Cruise Altitude (ft)", 0, 14000, int(st.session_state.cruise_alt), step=50)
-    with c5:
-        f_oat  = st.number_input("OAT (°C)", -40, 50, int(st.session_state.temp_c), step=1)
-        f_var  = st.number_input("Mag Variation (°)", 0, 30, int(st.session_state.var_deg), step=1)
-        f_varE = (st.selectbox("Variação E/W", ["W","E"], index=(1 if st.session_state.var_is_e else 0))=="E")
-    with c6:
-        f_wdir = st.number_input("Wind FROM (°TRUE)", 0, 360, int(st.session_state.wind_from), step=1)
-        f_wkt  = st.number_input("Wind (kt)", 0, 120, int(st.session_state.wind_kt), step=1)
+DEFAULT_STUDENT="AMOIT"; DEFAULT_AIRCRAFT="P208"; DEFAULT_CALLSIGN="RVP"
+REGS=["CS-ECC","CS-ECD","CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW"]
+PDF_TEMPLATE_PATHS=["NAVLOG - FORM.pdf"]
 
-    c7,c8,c9 = st.columns(3)
-    with c7:
-        f_rpm_cl = st.number_input("Climb RPM (AFM)", 1800, 2388, int(st.session_state.rpm_climb), step=10)
-        f_rpm_cr = st.number_input("Cruise RPM (AFM)", 1800, 2388, int(st.session_state.rpm_cruise), step=10)
-    with c8:
-        f_ff_ds  = st.number_input("Descent FF (L/h)", 0.0, 30.0, float(st.session_state.descent_ff), step=0.1)
-    with c9:
-        f_rod    = st.number_input("ROD (ft/min)", 200, 1500, int(st.session_state.rod_fpm), step=10)
-        f_fuel0  = st.number_input("Fuel inicial (EFOB_START) [L]", 0.0, 1000.0, float(st.session_state.start_fuel), step=0.1)
+# Header
+c1,c2,c3=st.columns(3)
+with c1:
+    aircraft=st.text_input("Aircraft",DEFAULT_AIRCRAFT)
+    registration=st.selectbox("Registration",REGS,index=0)
+    callsign=st.text_input("Callsign",DEFAULT_CALLSIGN)
+with c2:
+    student=st.text_input("Student",DEFAULT_STUDENT)
+    lesson = st.text_input("Lesson","")
+    instrutor = st.text_input("Instrutor","")
+with c3:
+    dept=st.selectbox("Departure",list(AEROS.keys()),index=0)
+    arr =st.selectbox("Arrival", list(AEROS.keys()),index=1)
+    altn=st.selectbox("Alternate",list(AEROS.keys()),index=2)
+startup_str=st.text_input("Startup (HH:MM)","")
 
-    st.markdown("---")
-    c10,c11,c12 = st.columns(3)
-    with c10:
-        f_use_nav = st.checkbox("Mostrar/usar NAVAIDs no PDF", value=bool(st.session_state.use_navaids))
-        f_taxi_min = st.number_input("Taxi (min)", 0, 60, int(st.session_state.taxi_min), step=1)
-        st.write("Taxi FF (L/h): **20** (fixo)")
-    with c11:
-        f_spd_cr  = st.number_input("Cruise speed (kt)", 40, 140, int(st.session_state.cruise_ref_kt), step=1)
-        f_spd_ds  = st.number_input("Descent speed (kt)", 40, 120, int(st.session_state.descent_ref_kt), step=1)
-        f_auto_fix = st.checkbox("Auto-fixar ao editar Alt_ft", value=bool(st.session_state.auto_fix_edits))
-    with c12:
-        f_hold_spd = st.number_input("Holding speed (kt)", 40, 140, int(st.session_state.hold_ref_kt), step=1)
-        f_hold_ff  = st.number_input("Holding FF (L/h)",   0.0, 30.0, float(st.session_state.hold_ff_lph), step=0.1)
+# Atmosfera / navegação
+c4,c5,c6=st.columns(3)
+with c4:
+    qnh=st.number_input("QNH (hPa)",900,1050,1013,step=1)
+    cruise_alt=st.number_input("Cruise Altitude (ft)",0,14000,4000,step=100)
+with c5:
+    temp_c=st.number_input("OAT (°C)",-40,50,15,step=1)
+    var_deg=st.number_input("Mag Variation (°)",0,30,1,step=1)
+    var_is_e=(st.selectbox("E/W",["W","E"],index=0)=="E")
+with c6:
+    wind_from=st.number_input("Wind FROM (°TRUE)",0,360,0,step=1)
+    wind_kt=st.number_input("Wind (kt)",0,120,17,step=1)
 
-    submitted = st.form_submit_button("Aplicar cabeçalho + performance")
-    if submitted:
-        st.session_state.aircraft=f_aircraft; st.session_state.registration=f_registration; st.session_state.callsign=f_callsign
-        st.session_state.startup=f_startup; st.session_state.student=f_student; st.session_state.lesson=f_lesson; st.session_state.instrutor=f_instrut
-        st.session_state.dept=f_dep; st.session_state.arr=f_arr; st.session_state.altn=f_altn
-        st.session_state.qnh=f_qnh; st.session_state.cruise_alt=f_crz; st.session_state.temp_c=f_oat
-        st.session_state.var_deg=f_var; st.session_state.var_is_e=f_varE; st.session_state.wind_from=f_wdir; st.session_state.wind_kt=f_wkt
-        st.session_state.rpm_climb=f_rpm_cl; st.session_state.rpm_cruise=f_rpm_cr
-        st.session_state.descent_ff=f_ff_ds; st.session_state.rod_fpm=f_rod; st.session_state.start_fuel=f_fuel0
-        st.session_state.cruise_ref_kt=f_spd_cr; st.session_state.descent_ref_kt=f_spd_ds
-        st.session_state.use_navaids=f_use_nav
-        st.session_state.taxi_min=f_taxi_min
-        st.session_state.taxi_ff_lph=20.0
-        st.session_state.hold_ref_kt = f_hold_spd
-        st.session_state.hold_ff_lph = f_hold_ff
-        st.session_state.auto_fix_edits = f_auto_fix
-        st.success("Parâmetros aplicados.")
+# Perf / consumos
+c7,c8,c9=st.columns(3)
+with c7:
+    rpm_climb  = st.number_input("Climb RPM (AFM)",1800,2388,2250,step=10)
+    rpm_cruise = st.number_input("Cruise RPM (AFM)",1800,2388,2000,step=10)
+with c8:
+    # NOVO: por defeito NÃO idle e consumo de 15 L/h
+    idle_mode  = st.checkbox("Descent at idle", value=False)
+    descent_ff = st.number_input("Descent FF (L/h)", 0.0, 30.0, 15.0, step=0.1)
+with c9:
+    rod_fpm=st.number_input("ROD (ft/min)",200,1500,700,step=10)
+    idle_ff=st.number_input("Idle FF (L/h)", 0.0, 20.0, 5.0, step=0.1)
+    start_fuel=st.number_input("Fuel inicial (EFOB_START) [L]",0.0,1000.0,85.0,step=0.1)
 
-# =========================================================
-# JSON v2
-# =========================================================
-st.subheader("Export / Import JSON v2 (rota, TCs/Dist, Altitudes por fix, HOLDs)")
-def current_points(): return st.session_state.get("points") or [st.session_state.dept, st.session_state.arr]
+# Velocidades ref
+cruise_ref_kt = st.number_input("Cruise speed (kt)", 40, 140, 90, step=1)   # DEFAULT 90
+descent_ref_kt= st.number_input("Descent speed (kt)", 40, 120, 65, step=1)
 
-def export_json_v2():
-    pts   = current_points()
-    legs  = st.session_state.get("plan_rows") or []
-    alts  = st.session_state.get("alt_rows")  or []
-    alt_set  = [ (r.get("Alt_ft") if r.get("Fix") or i in (0, len(pts)-1) else None)
-                 for i,r in enumerate(alts) ] if alts else [None]*len(pts)
-    alt_fix  = [ bool(r.get("Fix", False)) for r in alts ] if alts else [False]*len(pts)
-    hold_on  = [ bool(r.get("Hold", False)) for r in alts ] if alts else [False]*len(pts)
-    hold_min = [ float(r.get("Hold_min", 0.0)) for r in alts ] if alts else [0.0]*len(pts)
-    data = {
-        "version": 2,
-        "route_points": pts,
-        "legs": [{"TC": float(legs[i].get("TC",0.0)), "Dist": float(legs[i].get("Dist",0.0))} for i in range(len(legs))],
-        "alt_set_ft": alt_set, "alt_fixed": alt_fix, "alt_hold_on": hold_on, "alt_hold_min": hold_min,
-    }
-    dep_code = clean_point_name(pts[0]); arr_code = clean_point_name(pts[-1])
-    return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"), f"route_{dep_code}_{arr_code}.json"
-
-cJ1,cJ2 = st.columns([1,1])
-with cJ1:
-    jb, jname = export_json_v2()
-    st.download_button("💾 Download rota (JSON v2)", data=jb, file_name=jname, mime="application/json")
-with cJ2:
-    upl = st.file_uploader("📤 Import JSON v2", type=["json"], key="route_json_v2")
-    if upl is not None:
-        try:
-            data = json.loads(upl.read().decode("utf-8"))
-            pts = [clean_point_name(p) for p in (data.get("route_points") or current_points())]
-            st.session_state.dept, st.session_state.arr = pts[0], pts[-1]
-            st.session_state.points = pts
-            st.session_state.route_text = " ".join(pts)
-            # legs
-            rows = [{"From":pts[i-1],"To":pts[i],"TC":0.0,"Dist":0.0} for i in range(1,len(pts))]
-            legs_in = data.get("legs") or []
-            for i in range(min(len(rows), len(legs_in))):
-                rows[i]["TC"]=float(legs_in[i].get("TC",0.0))
-                rows[i]["Dist"]=float(legs_in[i].get("Dist",0.0))
-            st.session_state.plan_rows = rows
-            # alts
-            dep_e=_round_alt(aero_elev(pts[0])); arr_e=_round_alt(aero_elev(pts[-1]))
-            ar=[]
-            aset = data.get("alt_set_ft") or []; afix = data.get("alt_fixed") or []
-            hOn  = data.get("alt_hold_on") or []; hMin = data.get("alt_hold_min") or []
-            for i,p in enumerate(pts):
-                row={"Fix":False,"Point":p,"Alt_ft":float(_round_alt(st.session_state.cruise_alt)),"Hold":False,"Hold_min":0.0}
-                if i==0: row["Fix"]=True; row["Alt_ft"]=float(dep_e)
-                elif i==len(pts)-1: row["Fix"]=True; row["Alt_ft"]=float(arr_e)
-                if i<len(aset) and i<len(afix) and afix[i] and aset[i] is not None: row["Fix"]=True; row["Alt_ft"]=float(aset[i])
-                if i<len(hOn) and i<len(hMin): row["Hold"]=bool(hOn[i]); row["Hold_min"]=float(hMin[i])
-                ar.append(row)
-            st.session_state.alt_rows = ar
-            st.success("Rota importada e aplicada.")
-        except Exception as e:
-            st.error(f"Falha a importar JSON: {e}")
-
-# =========================================================
-# Rota
-# =========================================================
+# ===== ROUTE (textarea) + JSON =====
 def parse_route_text(txt:str) -> List[str]:
     tokens = re.split(r"[,\s→\-]+", (txt or "").strip())
-    return [clean_point_name(t) for t in tokens if t]
+    return [t for t in tokens if t]
 
-def rebuild_plan_rows(points: List[str], prev: Optional[List[dict]]):
-    prev_map = {(clean_point_name(r["From"]),clean_point_name(r["To"])):r for r in (prev or [])}
-    rows=[]
-    for i in range(1,len(points)):
-        frm,to=points[i-1],points[i]
-        base={"From":frm,"To":to,"TC":0.0,"Dist":0.0}
-        if (frm,to) in prev_map:
-            base["TC"]=float(prev_map[(frm,to)].get("TC",0.0))
-            base["Dist"]=float(prev_map[(frm,to)].get("Dist",0.0))
-        rows.append(base)
-    return rows
+st.markdown("### Route (DEP … ARR)")
+default_route = f"{dept} {arr}"
+route_text = st.text_area("Pontos (separados por espaço, vírgulas ou '->')",
+                          value=st.session_state.get("route_text", default_route))
+c_ra, c_rb = st.columns([1,1])
+with c_ra:
+    apply_route = st.button("Aplicar rota")
+with c_rb:
+    def snapshot_route() -> dict:
+        return {
+            "route_points": st.session_state.get("points", [dept, arr]),
+            "legs": [{"TC":l["TC"], "Dist":l["Dist"]} for l in st.session_state.get("legs", [])]
+        }
+    st.download_button("💾 Download rota (JSON)",
+                       data=json.dumps(snapshot_route(), ensure_ascii=False, indent=2).encode("utf-8"),
+                       file_name=f"route_{ascii_safe(registration)}.json",
+                       mime="application/json")
 
-def rebuild_alt_rows(points: List[str], cruise:int, prev: Optional[List[dict]]):
-    dep_e=_round_alt(aero_elev(points[0])); arr_e=_round_alt(aero_elev(points[-1]))
-    prev_map={clean_point_name(r["Point"]):r for r in (prev or [])}
-    out=[]
-    for i,p in enumerate(points):
-        base = prev_map.get(p, {"Fix": False, "Alt_ft": float(_round_alt(cruise)), "Hold": False, "Hold_min": 0.0})
-        row = {"Fix": bool(base.get("Fix", False)),
-               "Point": p,
-               "Alt_ft": float(base.get("Alt_ft", _round_alt(cruise))),
-               "Hold": bool(base.get("Hold", False)),
-               "Hold_min": float(base.get("Hold_min", 0.0))}
-        if i==0: row["Fix"]=True;  row["Alt_ft"]=float(dep_e)
-        elif i==len(points)-1: row["Fix"]=True;  row["Alt_ft"]=float(arr_e)
-        out.append(row)
-    return out
+uploaded = st.file_uploader("📤 Seleciona rota (JSON)", type=["json"])
+use_uploaded = st.button("Usar rota do ficheiro")
+if use_uploaded and uploaded is not None:
+    try:
+        data = json.loads(uploaded.read().decode("utf-8"))
+        st.session_state.points = list(data.get("route_points") or [dept, arr])
+        tgt = max(0,len(st.session_state.points)-1)
+        src_legs = data.get("legs") or []
+        st.session_state.legs = []
+        for i in range(tgt):
+            tc = float(src_legs[i]["TC"]) if i < len(src_legs) and "TC" in src_legs[i] else 0.0
+            di = float(src_legs[i]["Dist"]) if i < len(src_legs) and "Dist" in src_legs[i] else 0.0
+            st.session_state.legs.append({"From":st.session_state.points[i],
+                                          "To":st.session_state.points[i+1],
+                                          "TC":tc,"Dist":di})
+        st.session_state["route_text"] = " ".join(st.session_state.points)
+        st.success("Rota carregada do JSON.")
+    except Exception as e:
+        st.error(f"Falha a carregar JSON: {e}")
 
-default_route = f"{st.session_state.dept} {st.session_state.arr}"
-route_text = st.text_area("Rota (DEP … ARR)", value=st.session_state.get("route_text", default_route))
-
-if st.button("Aplicar rota"):
-    pts = parse_route_text(route_text) or [clean_point_name(st.session_state.dept), clean_point_name(st.session_state.arr)]
-    pts[0]=clean_point_name(st.session_state.dept)
-    if len(pts)>=2: pts[-1]=clean_point_name(st.session_state.arr)
+if "points" not in st.session_state:
+    st.session_state.points = [dept, arr]
+if apply_route:
+    pts = parse_route_text(route_text)
+    if len(pts) < 2: pts = [dept, arr]
     st.session_state.points = pts
     st.session_state.route_text = " ".join(pts)
-    st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
-    st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
-    st.success("Rota aplicada.")
+points = st.session_state.points
+if points: points[0]=dept
+if len(points)>=2: points[-1]=arr
 
-# init defaults
-if "points" not in st.session_state:
-    st.session_state.points = parse_route_text(st.session_state.get("route_text", default_route)) or [st.session_state.dept, st.session_state.arr]
-if "plan_rows" not in st.session_state:
-    st.session_state.plan_rows = rebuild_plan_rows(st.session_state.points, None)
-if "alt_rows" not in st.session_state:
-    st.session_state.alt_rows = rebuild_alt_rows(st.session_state.points, st.session_state.cruise_alt, None)
+# LEGS
+def blank_leg(): return {"From":"","To":"","TC":0.0,"Dist":0.0}
+if "legs" not in st.session_state: st.session_state.legs = []
+target_legs = max(0, len(points)-1)
+legs = st.session_state.legs
+if len(legs) < target_legs: legs += [blank_leg() for _ in range(target_legs - len(legs))]
+elif len(legs) > target_legs: legs = legs[:target_legs]
+for i in range(target_legs):
+    legs[i]["From"]=points[i]; legs[i]["To"]=points[i+1]
+st.session_state.legs = legs
 
-# ===== Helpers para o editor -> records =====
-def to_records(obj) -> List[dict]:
-    try:
-        import pandas as pd
-        if isinstance(obj, pd.DataFrame):
-            obj = obj.fillna(0)
-            return [{k: (clean_point_name(v) if k=="Point" else (float(v) if k in ("Alt_ft","Hold_min") else bool(v) if k in ("Fix","Hold") else v))
-                     for k,v in row.items()} for _, row in obj.iterrows()]
-    except Exception:
-        pass
-    if isinstance(obj, list):
-        rec=[]
-        for r in obj:
-            d=dict(r)
-            d["Point"]=clean_point_name(d.get("Point"))
-            if "Alt_ft" in d: d["Alt_ft"]=float(d["Alt_ft"])
-            if "Hold_min" in d: d["Hold_min"]=float(d["Hold_min"])
-            if "Fix" in d: d["Fix"]=bool(d["Fix"])
-            if "Hold" in d: d["Hold"]=bool(d["Hold"])
-            rec.append(d)
-        return rec
-    return []
-
-def normalize_legs(points: List[str], edited_rows: List[dict]) -> List[dict]:
-    edited_map = {(clean_point_name(r["From"]), clean_point_name(r["To"])): r for r in edited_rows}
-    rows = []
-    for i in range(1, len(points)):
-        frm, to = points[i-1], points[i]
-        base = {"From": frm, "To": to, "TC": 0.0, "Dist": 0.0}
-        if (frm, to) in edited_map:
-            r = edited_map[(frm, to)]
-            base["TC"] = float(r.get("TC", 0.0))
-            base["Dist"] = float(r.get("Dist", 0.0))
-        rows.append(base)
-    return rows
-
-def normalize_alt_rows(points: List[str], edited_rows: List[dict]) -> List[dict]:
-    dep_e=_round_alt(aero_elev(points[0])); arr_e=_round_alt(aero_elev(points[-1]))
-    edited_map = {clean_point_name(r.get("Point")): r for r in edited_rows}
-    out=[]
-    for i,p in enumerate(points):
-        r = edited_map.get(p, {})
-        row = {
-            "Fix": bool(r.get("Fix", False)),
-            "Point": p,
-            "Alt_ft": float(r.get("Alt_ft", _round_alt(st.session_state.cruise_alt))),
-            "Hold": bool(r.get("Hold", False)),
-            "Hold_min": float(r.get("Hold_min", 0.0)),
-        }
-        if i==0:
-            row["Fix"]=True; row["Alt_ft"]=float(dep_e)
-        elif i==len(points)-1:
-            row["Fix"]=True; row["Alt_ft"]=float(arr_e)
-        out.append(row)
-    return out
-
-# ===== Legs (TC/Dist) =====
-st.subheader("Legs (TC/Dist)")
-leg_cfg = {
+st.markdown("### Legs (distância do ponto anterior)")
+legs_cfg = {
     "From": st.column_config.TextColumn("From", disabled=True),
     "To":   st.column_config.TextColumn("To", disabled=True),
     "TC":   st.column_config.NumberColumn("TC (°T)", step=0.1, min_value=0.0, max_value=359.9),
     "Dist": st.column_config.NumberColumn("Dist (nm)", step=0.1, min_value=0.0),
 }
-with st.form("legs_form", clear_on_submit=False):
-    edited_legs = st.data_editor(
-        st.session_state.plan_rows, key="plan_table",
-        hide_index=True, use_container_width=True, num_rows="fixed",
-        column_config=leg_cfg, column_order=list(leg_cfg.keys())
-    )
-    legs_submit = st.form_submit_button("Aplicar Legs (TC/Dist)")
-    if legs_submit:
-        st.session_state.plan_rows = normalize_legs(st.session_state.points, to_records(edited_legs))
-        st.success("Legs aplicados.")
+legs_view = st.data_editor(legs, hide_index=True, use_container_width=True,
+                           column_config=legs_cfg, num_rows="fixed", key="legs_table")
+for i,row in enumerate(legs_view):
+    legs[i]["TC"]  = float(row.get("TC") or 0.0)
+    legs[i]["Dist"]= float(row.get("Dist") or 0.0)
 
-# ===== Altitudes/Holds =====
-st.subheader("Altitudes por Fix")
-st.caption("Marcar **Fixar?** = altitude obrigatória nesse fix. Não marcado = segue o Cruise. DEP/ARR são sempre as elevações.")
-alt_cfg = {
-    "Fix":     st.column_config.CheckboxColumn("Fixar?"),
-    "Point":   st.column_config.TextColumn("Fix", disabled=True),
-    "Alt_ft":  st.column_config.NumberColumn("Altitude alvo (ft)", step=50, min_value=0.0),
-    "Hold":    st.column_config.CheckboxColumn("Hold no fix?"),
-    "Hold_min":st.column_config.NumberColumn("Min no hold", step=1.0, min_value=0.0),
-}
-with st.form("alt_form", clear_on_submit=False):
-    edited_alts = st.data_editor(
-        st.session_state.alt_rows, key="alt_table",
-        hide_index=True, use_container_width=True, num_rows="fixed",
-        column_config=alt_cfg, column_order=list(alt_cfg.keys())
-    )
-    alt_submit = st.form_submit_button("Aplicar Altitudes & Holds")
-    if alt_submit:
-        recs = to_records(edited_alts)
-        st.session_state.alt_rows = normalize_alt_rows(st.session_state.points, recs)
-        if st.session_state.auto_fix_edits:
-            crz=_round_alt(st.session_state.cruise_alt)
-            for i,r in enumerate(st.session_state.alt_rows):
-                if i not in (0, len(st.session_state.alt_rows)-1):
-                    try:
-                        if abs(float(r.get("Alt_ft", crz)) - float(crz)) >= 1 and not bool(r.get("Fix", False)):
-                            r["Fix"] = True
-                    except Exception:
-                        pass
-        st.session_state["__alts_applied_at__"] = dt.datetime.utcnow().isoformat()
-        st.success("Altitudes & Holds APLICADOS.")
-
-# =========================================================
-# Cálculo (perfil + holds)
-# =========================================================
-points = st.session_state.points
-legs   = st.session_state.plan_rows
-alts   = st.session_state.alt_rows
 N = len(legs)
 
+# ===== Cálculo (perfil vertical, cortes dentro do leg) =====
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
-dep_elev  = _round_alt(aero_elev(points[0]))
-arr_elev  = _round_alt(aero_elev(points[-1]))
-altn_elev = _round_alt(aero_elev(st.session_state.altn))
 
+dep_elev = aero_elev(dept); arr_elev = aero_elev(arr)
 start_alt = float(dep_elev)
-cruise_alt = float(st.session_state.cruise_alt)
+end_alt   = float(arr_elev)
 
-pa_start  = pressure_alt(start_alt, st.session_state.qnh)
+pa_start  = pressure_alt(start_alt, qnh)
+pa_cruise = pressure_alt(cruise_alt, qnh)
 vy_kt = vy_interp_enroute(pa_start)
-tas_climb, tas_cruise, tas_descent = vy_kt, float(st.session_state.cruise_ref_kt), float(st.session_state.descent_ref_kt)
-roc = roc_interp_enroute(pa_start, st.session_state.temp_c)
-_, ff_climb = cruise_lookup(start_alt + 0.5*max(0.0, cruise_alt-start_alt), int(st.session_state.rpm_climb), st.session_state.temp_c)
-_, ff_cruise= cruise_lookup(pressure_alt(cruise_alt, st.session_state.qnh), int(st.session_state.rpm_cruise), st.session_state.temp_c)
-ff_descent  = float(st.session_state.descent_ff)
+tas_climb, tas_cruise, tas_descent = vy_kt, float(cruise_ref_kt), float(descent_ref_kt)
 
-dist = [float(legs[i]["Dist"] or 0.0) for i in range(N)]
-tcs  = [float(legs[i]["TC"]   or 0.0) for i in range(N)]
+roc = roc_interp_enroute(pa_start, temp_c)                 # ft/min
+delta_climb = max(0.0, cruise_alt - start_alt)
+delta_desc  = max(0.0, cruise_alt - end_alt)
+t_climb_total = delta_climb / max(roc,1e-6)
+t_desc_total  = delta_desc  / max(rod_fpm,1e-6)
 
-def leg_wind(i:int) -> Tuple[float,float]:
-    return (int(st.session_state.wind_from), int(st.session_state.wind_kt))
+# FFs (AFM/constantes)
+pa_mid_climb = start_alt + 0.5*delta_climb
+pa_mid_desc  = end_alt   + 0.5*delta_desc
+_, ff_climb  = cruise_lookup(pa_mid_climb, int(rpm_climb),  temp_c)
+_, ff_cruise = cruise_lookup(pa_cruise,   int(rpm_cruise),  temp_c)
+# Descida: se "idle", usa idle_ff; caso contrário, usa valor fixo de descida_ff
+ff_descent   = float(idle_ff) if idle_mode else float(descent_ff)
 
-def gs_for(i:int, phase:str) -> float:
-    wdir,wkt = leg_wind(i)
-    tas = vy_kt if phase=="CLIMB" else (tas_cruise if phase=="CRUISE" else tas_descent)
-    _,_,gs = wind_triangle(tcs[i], tas, wdir, wkt)
-    return max(gs,1e-6)
+def gs_for(tc, tas): return wind_triangle(float(tc), float(tas), wind_from, wind_kt)[2]
 
-# ---- Perfil alvo a partir das ALTITUDES APLICADAS (INDEX-BASED, Fix = hard stop) ----
-A_target=[]
-for i in range(len(points)):
-    if i == 0:
-        A_target.append(float(dep_elev))
-    elif i == len(points)-1:
-        A_target.append(float(arr_elev))
-    else:
-        row = alts[i] if i < len(alts) else {}
-        if bool(row.get("Fix", False)):
-            A_target.append(float(row.get("Alt_ft", cruise_alt)))
-        else:
-            A_target.append(float(cruise_alt))
+dist = [float(l["Dist"] or 0.0) for l in legs]
+gs_climb   = [gs_for(legs[i]["TC"], tas_climb)   for i in range(N)]
+gs_cruise  = [gs_for(legs[i]["TC"], tas_cruise)  for i in range(N)]
+gs_descent = [gs_for(legs[i]["TC"], tas_descent) for i in range(N)]
 
-# ---- Alocação climbs/descents — por perna, respeitando o alvo do fix seguinte ----
-gsC = [gs_for(i,"CLIMB")   for i in range(N)]
-gsD = [gs_for(i,"DESCENT") for i in range(N)]
-climb_d = [0.0]*N
-desc_d  = [0.0]*N
-
-impossible_notes=[]
-
+# ---- Distribuir CLIMB para a frente
+climb_nm   = [0.0]*N
+idx_toc = None
+rem_t = float(t_climb_total)
 for i in range(N):
-    alt_start_i = A_target[i]
-    alt_end_i   = A_target[i+1]
+    if rem_t <= 1e-9: break
+    gs = max(gs_climb[i], 1e-6)
+    t_full = 60.0 * dist[i] / gs
+    use_t = min(rem_t, t_full)
+    climb_nm[i] = min(dist[i], gs * use_t / 60.0)
+    rem_t -= use_t
+    if rem_t <= 1e-9:
+        idx_toc = i
+        break
 
-    if alt_end_i > alt_start_i:
-        need_ft  = alt_end_i - alt_start_i
-        need_min = need_ft / max(roc, 1e-6)
-        need_nm  = gsC[i] * need_min / 60.0
-        if need_nm > dist[i] + 1e-9:
-            impossible_notes.append(
-                f"Perna {points[i]}→{points[i+1]} curta para subir {int(round(need_ft))} ft "
-                f"(precisa de {fmt(need_nm,'dist')} nm, só há {fmt(dist[i],'dist')} nm)."
-            )
-            climb_d[i] = dist[i]
-        else:
-            climb_d[i] = need_nm
+# ---- Distribuir DESCENT para trás
+descent_nm = [0.0]*N
+idx_tod = None
+rem_t = float(t_desc_total)
+for j in range(N-1, -1, -1):
+    if rem_t <= 1e-9: break
+    gs = max(gs_descent[j], 1e-6)
+    t_full = 60.0 * dist[j] / gs
+    use_t = min(rem_t, t_full)
+    descent_nm[j] = min(dist[j], gs * use_t / 60.0)
+    rem_t -= use_t
+    if rem_t <= 1e-9:
+        idx_tod = j
+        break
 
-    elif alt_end_i < alt_start_i:
-        need_ft  = alt_start_i - alt_end_i
-        need_min = need_ft / max(st.session_state.rod_fpm, 1e-6)
-        need_nm  = gsD[i] * need_min / 60.0
-        if need_nm > dist[i] + 1e-9:
-            impossible_notes.append(
-                f"Perna {points[i]}→{points[i+1]} curta para descer {int(round(need_ft))} ft "
-                f"(precisa de {fmt(need_nm,'dist')} nm, só há {fmt(dist[i],'dist')} nm)."
-            )
-            desc_d[i] = dist[i]
-        else:
-            desc_d[i] = need_nm
-
-# TOC/TOD
-toc_positions=[]; tod_positions=[]
-for i in range(N):
-    d_cl = min(climb_d[i], dist[i])
-    d_ds = min(desc_d[i],  dist[i]-d_cl)
-    d_cr = max(0.0, dist[i]-d_cl-d_ds)
-    if d_cl>1e-9 and (d_cr>0 or d_ds>0): toc_positions.append((i, d_cl))
-    if d_ds>1e-9: tod_positions.append((i, d_cl+d_cr))
-
-toc_labels={}
-if len(toc_positions)==1: toc_labels[toc_positions[0]]="TOC"
-else:
-    for n,key in enumerate(toc_positions, start=1): toc_labels[key]=f"TOC-{n}"
-
-tod_labels={}
-if len(tod_positions)==1: tod_labels[tod_positions[0]]="TOD"
-else:
-    for n,key in enumerate(tod_positions, start=1): tod_labels[key]=f"TOD-{n}"
-
-# ---- Construção de segmentos + HOLDs ----
-rows=[]; seq_points=[]
-efob=float(st.session_state.start_fuel)
-
-startup = parse_hhmm(st.session_state.startup)
-takeoff = add_seconds(startup, int(st.session_state.taxi_min*60)) if startup else None
+# ===== APP: linhas por SEGMENTO =====
+startup = parse_hhmm(startup_str)
+takeoff = add_minutes(startup,15) if startup else None
 clock = takeoff
 
-seq_points.append({"name": points[0], "alt": _round_alt(A_target[0]),
-                   "tc":"", "th":"", "mc":"", "mh":"", "tas":"", "gs":"", "dist":"",
-                   "ete_sec":0, "eto": (takeoff.strftime("%H:%M") if takeoff else ""),
-                   "burn":"", "efob": efob, "leg_idx": None, "phase":"DEP"})
+def ceil_pos_minutes(x):  # arredonda ↑ e garante 1 min quando >0
+    return max(1, int(math.ceil(x - 1e-9))) if x > 0 else 0
 
-def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
-    global clock, efob
-    if d_nm <= 1e-9: return alt_start_ft
-    wdir,wkt = leg_wind(i_leg)
-    tc=float(tcs[i_leg]); wca, th, gs = wind_triangle(tc, tas, wdir, wkt)
-    mc = apply_var(tc, st.session_state.var_deg, st.session_state.var_is_e)
-    mh = apply_var(th, st.session_state.var_deg, st.session_state.var_is_e)
+rows=[]; seq_points=[]  # para o PDF (nome-a-nome, na ordem dos cortes)
 
-    ete_sec_raw = (60.0 * d_nm / max(gs,1e-6)) * 60.0
-    ete_sec = round_to_10s(ete_sec_raw)
-    burn_raw = ff_lph * (ete_sec_raw/3600.0)
-    alt_end = alt_start_ft + (rate_fpm*(ete_sec_raw/60.0) if phase=="CLIMB" else (-rate_fpm*(ete_sec_raw/60.0) if phase=="DESCENT" else 0.0))
+PH_ICON = {"CLIMB":"↑","CRUISE":"→","DESCENT":"↓"}
+
+alt_cursor = float(start_alt)
+total_ete = total_burn = 0.0
+efob=float(start_fuel)  # EFOB planeado (vai cair segmento a segmento)
+
+def add_segment(phase:str, from_nm:str, to_nm:str, i_leg:int, d_nm:float, tas:float, ff_lph:float):
+    """Acrescenta um segmento; atualiza relógio, ALT, EFOB; regista o ponto 'to_nm' para o PDF na ORDEM CORRETA."""
+    global clock, total_ete, total_burn, efob, alt_cursor
+    if d_nm <= 1e-9: return
+
+    tc = float(legs[i_leg]["TC"])
+    _, th, gs = wind_triangle(tc, tas, wind_from, wind_kt)
+
+    ete_raw = 60.0 * d_nm / max(gs,1e-6)  # minutos reais
+    ete = ceil_pos_minutes(ete_raw)
+    burn = ff_lph * (ete_raw/60.0)
+
+    alt_start = alt_cursor
+    if phase == "CLIMB":
+        alt_end = min(cruise_alt, alt_start + roc * ete_raw)
+    elif phase == "DESCENT":
+        alt_end = max(end_alt,   alt_start - rod_fpm * ete_raw)
+    else:
+        alt_end = alt_start
 
     eto = ""
     if clock:
-        clock = add_seconds(clock, int(ete_sec))
-        eto = clock.strftime("%H:%M")
-
-    efob = max(0.0, _round_tenth(efob - burn_raw))
+        clock = add_minutes(clock, ete); eto = clock.strftime("%H:%M")
+    total_ete += ete
+    total_burn += burn
+    efob = max(0.0, efob - burn)
+    alt_cursor = alt_end
 
     rows.append({
-        "Fase": {"CLIMB":"↑","CRUISE":"→","DESCENT":"↓"}[phase],
-        "Leg/Marker": f"{frm}→{to}",
-        "ALT (ft)": f"{fmt(alt_start_ft,'alt')}→{fmt(alt_end,'alt')}",
-        "TC (°T)": _round_angle(tc), "TH (°T)": _round_angle(th),
-        "MC (°M)": _round_angle(mc), "MH (°M)": _round_angle(mh),
-        "TAS (kt)": _round_unit(tas), "GS (kt)": _round_unit(gs),
-        "FF (L/h)": _round_unit(ff_lph),
-        "Dist (nm)": fmt(d_nm,'dist'), "ETE (mm:ss)": mmss_from_seconds(int(ete_sec)), "ETO": eto,
-        "Burn (L)": fmt(burn_raw,'fuel'), "EFOB (L)": fmt(efob,'fuel')
+        "Fase": PH_ICON[phase],
+        "Leg/Marker": f"{from_nm}→{to_nm}",
+        "To (Name)": to_nm,
+        "ALT (ft)": f"{int(round(alt_start))}→{int(round(alt_end))}",
+        "Detalhe": f"{phase.capitalize()} {d_nm:.1f} nm",
+        "TC (°T)": round(tc,0),
+        "TH (°T)": round(th,0),
+        "MH (°M)": round(apply_var(th, var_deg, var_is_e),0),
+        "TAS (kt)": round(tas,0), "GS (kt)": round(gs,0),
+        "FF (L/h)": round(ff_lph,1),
+        "Dist (nm)": round(d_nm,1), "ETE (min)": ete, "ETO": eto,
+        "Burn (L)": round(burn,1), "EFOB (L)": round(efob,1)
     })
-    seq_points.append({
-        "name": to, "alt": _round_alt(alt_end),
-        "tc": _round_angle(tc), "th": _round_angle(th),
-        "mc": _round_angle(mc), "mh": _round_angle(mh),
-        "tas": _round_unit(tas), "gs": _round_unit(gs),
-        "wca": round(wca,1),
-        "dist": float(f"{d_nm:.3f}"),
-        "ete_sec": int(ete_sec), "ete_raw": float(ete_sec_raw),
-        "eto": eto, "burn": float(burn_raw),
-        "rate_fpm": float(rate_fpm if phase!="CRUISE" else 0.0),
-        "phase": phase,
-        "efob": float(efob), "leg_idx": int(i_leg)
-    })
-    return alt_end
 
-def add_hold(point_name, minutes, alt_now):
-    global clock, efob
-    if minutes<=0: return alt_now
-    ete_sec = round_to_10s(minutes*60.0)
-    burn_raw = st.session_state.hold_ff_lph * (ete_sec/3600.0)
-    eto = ""
-    if clock:
-        clock = add_seconds(clock, int(ete_sec))
-        eto = clock.strftime("%H:%M")
-    efob_local = max(0.0, _round_tenth(efob - burn_raw))
-    rows.append({
-        "Fase":"⟳", "Leg/Marker": f"HOLD @{point_name}",
-        "ALT (ft)": f"{fmt(alt_now,'alt')}→{fmt(alt_now,'alt')}",
-        "TC (°T)":"", "TH (°T)":"", "MC (°M)":"", "MH (°M)":"",
-        "TAS (kt)": _round_unit(st.session_state.hold_ref_kt), "GS (kt)":"",
-        "FF (L/h)": _round_unit(st.session_state.hold_ff_lph),
-        "Dist (nm)":"", "ETE (mm:ss)": mmss_from_seconds(int(ete_sec)), "ETO": eto,
-        "Burn (L)": fmt(burn_raw,'fuel'), "EFOB (L)": fmt(efob_local,'fuel')
-    })
+    # ponto de chegada (to_nm) para o PDF — ORDEM EXATA dos cortes
     seq_points.append({
-        "name": point_name, "alt": _round_alt(alt_now),
-        "tc":"", "th":"", "mc":"", "mh":"",
-        "tas": _round_unit(st.session_state.hold_ref_kt), "gs":"",
-        "wca": 0.0, "dist":"", "ete_sec": int(ete_sec), "ete_raw": float(ete_sec),
-        "eto": eto, "burn": float(burn_raw), "rate_fpm": 0.0,
-        "phase":"HOLD", "efob": float(efob_local), "leg_idx": None
+        "name": to_nm, "alt": int(round(alt_end)),
+        "tc": int(round(tc)), "th": int(round(th)),
+        "mh": int(round(apply_var(th, var_deg, var_is_e))),
+        "tas": int(round(tas)), "gs": int(round(gs)),
+        "dist": d_nm, "ete": ete, "eto": eto, "burn": burn, "efob": efob
     })
-    efob = efob_local
-    return alt_now
 
-cur_alt = A_target[0]
-toc_list=[]; tod_list=[]
+# Ponto inicial (DEP) para o PDF
+seq_points.append({"name": dept, "alt": int(round(start_alt)),
+                   "tc":"", "th":"", "mh":"", "tas":"", "gs":"", "dist":"", "ete":"", "eto": (takeoff.strftime("%H:%M") if takeoff else ""), "burn":"", "efob": efob})
+
 for i in range(N):
-    frm, to = legs[i]["From"], legs[i]["To"]
-    d = dist[i]
-    d_cl = min(climb_d[i], d)
-    d_ds = min(desc_d[i],   d - d_cl)
-    d_cr = max(0.0, d - d_cl - d_ds)
+    leg_from, leg_to = legs[i]["From"], legs[i]["To"]
+    d_total  = dist[i]
+    d_cl = min(climb_nm[i], d_total)
+    d_ds = min(descent_nm[i], d_total - d_cl)
+    d_cr = max(0.0, d_total - d_cl - d_ds)
 
-    if d_cl > 1e-9:
-        name_toc = toc_labels.get((i,d_cl), to)
-        if name_toc != to: toc_list.append((i, d_cl, name_toc))
-        cur_alt = add_seg("CLIMB", frm, name_toc, i, d_cl, vy_kt, ff_climb, cur_alt, roc)
-        frm = name_toc
+    cur_from = leg_from
 
-    if d_cr > 1e-9:
-        name_tod = tod_labels.get((i, d_cl+d_cr), to)
-        if name_tod != to: tod_list.append((i, d_cl+d_cr, name_tod))
-        cur_alt = add_seg("CRUISE", frm, name_tod, i, d_cr, float(st.session_state.cruise_ref_kt), ff_cruise, cur_alt, 0.0)
-        frm = name_tod
+    if d_cl > 0:
+        to_name = "TOC" if (idx_toc == i and d_cl < d_total) else leg_to
+        add_segment("CLIMB", cur_from, to_name, i, d_cl, vy_kt, ff_climb)
+        cur_from = to_name
 
-    if d_ds > 1e-9:
-        cur_alt = add_seg("DESCENT", frm, to, i, d_ds, float(st.session_state.descent_ref_kt), ff_descent, cur_alt, st.session_state.rod_fpm)
+    if d_cr > 0:
+        to_name = "TOD" if (idx_tod == i and d_ds > 0) else leg_to
+        add_segment("CRUISE", cur_from, to_name, i, d_cr, float(cruise_ref_kt), ff_cruise)
+        cur_from = to_name
 
-    # HOLD no destino da perna (ler por índice para evitar mismatch de nomes)
-    to_row = (st.session_state.alt_rows[i+1] if (i+1) < len(st.session_state.alt_rows) else {})
-    if bool(to_row.get("Hold")) and float(to_row.get("Hold_min",0)) > 0:
-        cur_alt = add_hold(points[i+1], float(to_row["Hold_min"]), cur_alt)
+    if d_ds > 0:
+        add_segment("DESCENT", cur_from, leg_to, i, d_ds, float(descent_ref_kt), ff_descent)
 
 eta = clock
-shutdown = add_seconds(eta, 5*60) if eta else None
+landing = eta
+shutdown = add_minutes(eta,5) if eta else None
 
-# ==== Totais (tempo e burn por fase) ====
-phase_secs = {"CLIMB":0, "CRUISE":0, "DESCENT":0, "HOLD":0}
-phase_burn = {"CLIMB":0.0, "CRUISE":0.0, "DESCENT":0.0, "HOLD":0.0}
-for p in seq_points:
-    ph = p.get("phase")
-    if ph in phase_secs:
-        phase_secs[ph] += int(p.get("ete_sec",0))
-        phase_burn[ph] += float(p.get("burn",0.0))
+# ===== Tabela da APP =====
+st.markdown("### Flight plan — cortes dentro do leg (App)")
+cfg={
+    "Fase":      st.column_config.TextColumn("Fase"),
+    "Leg/Marker": st.column_config.TextColumn("Leg / Marker"),
+    "To (Name)":  st.column_config.TextColumn("To (Name)", disabled=True),
+    "ALT (ft)":   st.column_config.TextColumn("ALT (ft)"),
+    "Detalhe":    st.column_config.TextColumn("Detalhe"),
+    "TC (°T)":    st.column_config.NumberColumn("TC (°T)", disabled=True),
+    "TH (°T)":    st.column_config.NumberColumn("TH (°T)", disabled=True),
+    "MH (°M)":    st.column_config.NumberColumn("MH (°M)", disabled=True),
+    "TAS (kt)":   st.column_config.NumberColumn("TAS (kt)", disabled=True),
+    "GS (kt)":    st.column_config.NumberColumn("GS (kt)", disabled=True),
+    "FF (L/h)":   st.column_config.NumberColumn("FF (L/h)", disabled=True),
+    "Dist (nm)":  st.column_config.NumberColumn("Dist (nm)", disabled=True),
+    "ETE (min)":  st.column_config.NumberColumn("ETE (min)", disabled=True),
+    "ETO":        st.column_config.TextColumn("ETO", disabled=True),
+    "Burn (L)":   st.column_config.NumberColumn("Burn (L)", disabled=True),
+    "EFOB (L)":   st.column_config.NumberColumn("EFOB (L)", disabled=True),
+}
+st.data_editor(rows, hide_index=True, use_container_width=True, num_rows="fixed", column_config=cfg, key="fp_table")
 
-taxi_min = int(st.session_state.taxi_min)
-fuel_taxi = st.session_state.taxi_ff_lph * (taxi_min / 60.0)
+tot_ete_m = int(sum(int(r['ETE (min)']) for r in rows))
+tot_line = f"**Totais** — Dist {sum(float(r['Dist (nm)']) for r in rows):.1f} nm • ETE {tot_ete_m//60:02d}:{tot_ete_m%60:02d} • Burn {sum(float(r['Burn (L)']) for r in rows):.1f} L • EFOB {efob:.1f} L"
+if eta:
+    tot_line += f" • **ETA {eta.strftime('%H:%M')}** • **Landing {landing.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
+st.markdown(tot_line)
 
-# Para Observações: holds por ponto
-holds_by_point = {}
-for p in seq_points:
-    if p.get("phase")=="HOLD":
-        nm = p.get("name","")
-        holds_by_point.setdefault(nm, {"sec":0,"burn":0.0})
-        holds_by_point[nm]["sec"]  += int(p.get("ete_sec",0))
-        holds_by_point[nm]["burn"] += float(p.get("burn",0.0))
+# ===== PDF export (nome a nome; inclui TH e EFOB por linha) =====
+st.markdown("### PDF export")
+show_fields = st.checkbox("Mostrar nomes de campos do PDF (debug)")
 
-# =========================================================
-# Depuração: Perfil alvo aplicado
-# =========================================================
-st.subheader("Perfil alvo aplicado (ponto / Fixar? / Altitude alvo)")
-_applied_rows = []
-for i,p in enumerate(points):
-    r = alts[i] if i < len(alts) else {}
-    fixed = True if i in (0,len(points)-1) else bool(r.get("Fix", False))
-    altv  = A_target[i]
-    _applied_rows.append({"Fix": "✔" if fixed else "—", "Fix name": p, "Alt alvo (ft)": int(round(altv))})
-st.dataframe(_applied_rows, use_container_width=True)
+def build_pdf_items_from_points(points):
+    """Cada item é o ponto de chegada; idx=1 é o DEP (sem métricas do segmento)."""
+    items = []
+    for idx, p in enumerate(points, start=1):
+        it = {
+            "Name": p["name"],
+            "Alt": str(int(round(p["alt"]))),
+            "TC":  (str(p["tc"]) if idx>1 else ""),
+            "TH":  (str(p["th"]) if idx>1 else ""),
+            "MH":  (str(p["mh"]) if idx>1 else ""),
+            "TAS": (str(p["tas"]) if idx>1 else ""),
+            "GS":  (str(p["gs"])  if idx>1 else ""),
+            "Dist": (f"{p['dist']:.1f}" if idx>1 and isinstance(p["dist"], (int,float)) else ""),
+            "ETE":  (str(p["ete"]) if idx>1 else ""),
+            "ETO":  (p["eto"] if idx>1 else (p["eto"] or "")),
+            "Burn": (f"{p['burn']:.1f}" if idx>1 and isinstance(p["burn"], (int,float)) else ""),
+            "EFOB": (f"{p['efob']:.1f}" if idx>1 and isinstance(p["efob"], (int,float)) else f"{p['efob']:.1f}" if idx==1 else "")
+        }
+        items.append(it)
+    return items
 
-# =========================================================
-# Resultados
-# =========================================================
-st.subheader("Resultados")
-cA,cB,cC = st.columns(3)
-with cA:
-    st.metric("Vy (kt)", _round_unit(vy_kt))
-    st.metric("ROC @ DEP (ft/min)", _round_unit(roc))
-    st.metric("ROD (ft/min)", _round_unit(st.session_state.rod_fpm))
-with cB:
-    st.metric("TAS climb/cruise/descent", f"{_round_unit(tas_climb)} / {_round_unit(tas_cruise)} / {_round_unit(tas_descent)} kt")
-    st.metric("FF climb/cruise/descent", f"{_round_unit(ff_climb)} / {_round_unit(ff_cruise)} / {_round_unit(ff_descent)} L/h")
-with cC:
-    isa_dev = st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))
-    st.metric("ISA dev @ DEP (°C)", int(round(isa_dev)))
-    if toc_list: st.write("**TOC**: " + ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')} nm" for (leg,pos,name) in toc_list]))
-    if tod_list: st.write("**TOD**: " + ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')} nm" for (leg,pos,name) in tod_list]))
-    if impossible_notes:
-        for note in impossible_notes: st.warning(note)
-
-st.dataframe(rows, use_container_width=True)
-
-tot_ete_sec = sum(int(p.get('ete_sec',0)) for p in seq_points if isinstance(p.get('ete_sec'), (int,float)))
-tot_nm  = sum(float(p['dist']) for p in seq_points if isinstance(p.get('dist'), (int,float)))
-tot_bo  = _round_tenth(sum(float(p['burn']) for p in seq_points if isinstance(p.get('burn'), (int,float))))
-line = f"**Totais** — Dist {fmt(tot_nm,'dist')} nm • ETE {hhmmss_from_seconds(int(tot_ete_sec))} • Burn {fmt(tot_bo,'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"
-if eta: line += f" • **ETA {eta.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
-st.markdown(line)
-
-# =========================================================
-# PDF NAVLOG
-# =========================================================
-st.subheader("Gerar PDF NAVLOG")
 try:
-    template_bytes = read_pdf_bytes(tuple(PDF_TEMPLATE_PATHS))
-    if not PYPDF_OK: raise RuntimeError("pypdf não disponível")
-    fieldset, maxlens = get_form_fields(template_bytes)
+    template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
 except Exception as e:
-    template_bytes=None; fieldset=set(); maxlens={}
+    template_bytes = None
     st.error(f"Não foi possível ler o PDF: {e}")
 
-named: Dict[str,str] = {}
-def P(key: str, value: str): put(named, fieldset, key, value, maxlens)
-def PAll(keys: List[str], value: str):
-    for k in keys:
-        if k in fieldset: put(named, fieldset, k, value, maxlens)
-
-if fieldset:
-    etd = (add_seconds(parse_hhmm(st.session_state.startup), st.session_state.taxi_min*60).strftime("%H:%M") if st.session_state.startup else "")
-    eta_txt = (eta.strftime("%H:%M") if eta else "")
-    shutdown_txt = (shutdown.strftime("%H:%M") if shutdown else "")
-
-    PAll(["AIRCRAFT","Aircraft"], st.session_state.aircraft)
-    PAll(["REGISTRATION","Registration"], st.session_state.registration)
-    PAll(["CALLSIGN","Callsign"], st.session_state.callsign)
-    PAll(["ETD/ETA","ETD_ETA"], f"{etd} / {eta_txt}")
-    PAll(["STARTUP","Startup"], st.session_state.startup)
-    PAll(["TAKEOFF","Takeoff"], etd)
-    PAll(["LANDING","Landing"], eta_txt)
-    PAll(["SHUTDOWN","Shutdown"], shutdown_txt)
-    PAll(["LESSON","Lesson"], st.session_state.lesson)
-    PAll(["INSTRUTOR","Instructor","INSTRUCTOR"], st.session_state.instrutor)
-    PAll(["STUDENT","Student"], st.session_state.student)
-
-    PAll(["FLT TIME","FLT_TIME","FLIGHT_TIME"], f"{(tot_ete_sec//3600):02d}:{((tot_ete_sec%3600)//60):02d}")
-    PAll(["FLIGHT_LEVEL_ALTITUDE","LEVEL_FF","LEVEL F/F","Level_FF"], fmt(cruise_alt,'alt'))
-
-    climb_time_hours = phase_secs["CLIMB"]/3600.0
-    climb_fuel_raw = ff_climb * max(0.0, climb_time_hours)
-    PAll(["CLIMB FUEL","CLIMB_FUEL"], fmt(climb_fuel_raw,'fuel'))
-
-    PAll(["QNH"], str(int(round(st.session_state.qnh))))
-    PAll(["DEPT","DEPARTURE_FREQ","DEPT_FREQ"], aero_freq(points[0]))
-    PAll(["ENROUTE","ENROUTE_FREQ"], "123.755")
-    PAll(["ARRIVAL","ARRIVAL_FREQ","ARR_FREQ"], aero_freq(points[-1]))
-    PAll(["DEPARTURE_AIRFIELD","Departure_Airfield"], points[0])
-    PAll(["ARRIVAL_AIRFIELD","Arrival_Airfield"], points[-1])
-    PAll(["Leg_Number","LEG_NUMBER"], str(len(points)))
-    PAll(["ALTERNATE_AIRFIELD","Alternate_Airfield"], st.session_state.altn)
-    PAll(["ALTERNATE_ELEVATION","Alternate_Elevation","TextField_7"], fmt(altn_elev,'alt'))
-    PAll(["WIND","WIND_FROM"], f"{int(round(st.session_state.wind_from)):03d}/{int(round(st.session_state.wind_kt)):02d}")
-    isa_dev_i = int(round(st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))))
-    PAll(["TEMP_ISA_DEV","TEMP ISA DEV","TEMP/ISA_DEV"], f"{int(round(st.session_state.temp_c))} / {isa_dev_i}")
-    PAll(["MAG_VAR","MAG VAR"], f"{int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}")
-
-    # linhas (até 22)
-    acc_dist = 0.0; acc_sec = 0
-    max_lines = 22
-    nav_by_point = {clean_point_name(r["Point"]):r for r in st.session_state.get("nav_rows", [])} if st.session_state.use_navaids else {}
-    for idx, p in enumerate(seq_points[:max_lines], start=1):
-        tag=f"Leg{idx:02d}_"; is_seg = (idx>1)
-        P(tag+"Waypoint", p["name"])
-        if p["alt"]!="": P(tag+"Altitude_FL", fmt(p["alt"],'alt'))
-
-        if st.session_state.use_navaids and clean_point_name(p["name"]) in nav_by_point and is_seg:
-            nv = nav_by_point[clean_point_name(p["name"])]
-            if nv.get("IDENT"): P(tag+"Navaid_Identifier", nv["IDENT"])
-            if nv.get("FREQ"):  P(tag+"Navaid_Frequency",  nv["FREQ"])
-
-        if is_seg and p.get("phase") in ("CLIMB","CRUISE","DESCENT"):
-            acc_dist += float(p.get("dist") or 0.0)
-            acc_sec  += int(p.get("ete_sec",0) or 0)
-            P(tag+"True_Course",      fmt(p["tc"], 'angle'))
-            P(tag+"True_Heading",     fmt(p["th"], 'angle'))
-            P(tag+"Magnetic_Heading", fmt(p["mh"], 'angle'))
-            P(tag+"True_Airspeed",    fmt(p["tas"], 'speed'))
-            P(tag+"Ground_Speed",     fmt(p["gs"], 'speed'))
-            P(tag+"Leg_Distance",     fmt(p["dist"], 'dist'))
-            P(tag+"Leg_ETE",          mmss_from_seconds(int(p.get("ete_sec",0))))
-            P(tag+"ETO",              p["eto"])
-            P(tag+"Planned_Burnoff",  fmt(p["burn"], 'fuel'))
-            P(tag+"Estimated_FOB",    fmt(p["efob"], 'fuel'))
-            P(tag+"Cumulative_Distance", fmt(acc_dist,'dist'))
-            P(tag+"Cumulative_ETE",      mmss_from_seconds(acc_sec))
-        else:
-            if p.get("eto") is not None:  P(tag+"ETO", p["eto"])
-            if p.get("efob") is not None: P(tag+"Estimated_FOB", fmt(p["efob"], 'fuel'))
-
-    # ===== OBSERVAÇÕES — tempos + holds por ponto =====
-    def mmss(sec): return mmss_from_seconds(int(round(sec)))
-    obs_lines = [
-        f"Start-up & Taxi: {st.session_state.taxi_min} min @ 20 L/h → {fmt(fuel_taxi,'fuel')} L",
-        f"Climb: {mmss(phase_secs['CLIMB'])} → {fmt(phase_burn['CLIMB'],'fuel')} L",
-        f"Enroute (Cruise): {mmss(phase_secs['CRUISE'])} → {fmt(phase_burn['CRUISE'],'fuel')} L",
-        f"Descent: {mmss(phase_secs['DESCENT'])} → {fmt(phase_burn['DESCENT'],'fuel')} L",
-    ]
-    if holds_by_point:
-        for fix, agg in holds_by_point.items():
-            obs_lines.append(f"HOLD @{fix}: {int(round(agg['sec']/60))} min → {fmt(agg['burn'],'fuel')} L")
-        obs_lines.append(f"TOTAL Holding: {mmss(phase_secs['HOLD'])} → {fmt(phase_burn['HOLD'],'fuel')} L")
-    P("OBSERVATIONS", "\n".join(obs_lines))
-
-if st.button("Gerar PDF NAVLOG", type="primary"):
+if template_bytes:
+    fieldset, maxlens = get_fields_and_meta(template_bytes)
+    if show_fields:
+        st.code("\n".join(sorted(fieldset)))
     try:
-        if not template_bytes: raise RuntimeError("Template PDF não carregado")
-        out = fill_pdf(template_bytes, named)
-        m = re.search(r'(\d+)', st.session_state.lesson or "")
-        lesson_num = m.group(1) if m else "00"
-        safe_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%Y-%m-%d")
-        filename = f"{safe_date}_LESSON-{lesson_num}_NAVLOG.pdf"
-        st.download_button("📄 Download PDF", data=out, file_name=filename, mime="application/pdf")
-        st.success("PDF gerado.")
+        named: Dict[str,str] = {}
+
+        # Cabeçalho
+        for k,v in {
+            "Aircraft": aircraft,
+            "Registration": registration,
+            "Callsign": callsign,
+            "Student": student, "Lesson": lesson, "Instrutor": instrutor,
+            "Dept_Airfield": dept, "Arrival_Airfield": arr,
+            "Alternate": altn, "Alt_Alternate": str(aero_elev(altn)),
+            "Dept_Comm": aero_freq(dept), "Arrival_comm": aero_freq(arr),
+            "Enroute_comm": "123.755",
+            "QNH": f"{int(round(qnh))}",
+            "temp_isa_dev": f"{int(round(temp_c))} / {round(temp_c - isa_temp(pressure_alt(aero_elev(dept), qnh)))}",
+            "wind": f"{int(round(wind_from)):03d}/{int(round(wind_kt)):02d}",
+            "mag_var": f"{var_deg:.1f}{'E' if var_is_e else 'W'}",
+            "flt_lvl_altitude": f"{int(round(cruise_alt))}",
+            "Startup": startup_str,
+            "Takeoff": add_minutes(parse_hhmm(startup_str),15).strftime("%H:%M") if startup_str else "",
+        }.items():
+            put(named, fieldset, k, v, maxlens)
+
+        pdf_items = build_pdf_items_from_points(seq_points)
+
+        # ETA/Shutdown
+        last_eto = pdf_items[-1]["ETO"] if pdf_items else ""
+        put(named, fieldset, "Landing", last_eto, maxlens)
+        put(named, fieldset, "Shutdown", (add_minutes(parse_hhmm(last_eto),5).strftime("%H:%M") if last_eto else ""), maxlens)
+        put(named, fieldset, "ETD/ETA", f"{(add_minutes(parse_hhmm(startup_str),15).strftime('%H:%M') if startup_str else '')} / {last_eto}", maxlens)
+
+        # Totais
+        tot_min = sum(int(it["ETE"] or "0") for it in pdf_items)
+        tot_nm  = sum(float(it["Dist"] or 0.0) for it in pdf_items)
+        tot_bo  = sum(float(it["Burn"] or 0.0) for it in pdf_items)
+        last_efob = pdf_items[-1]["EFOB"] if pdf_items else ""
+        put(named, fieldset, "FLT TIME", f"{tot_min//60:02d}:{tot_min%60:02d}", maxlens)
+        # LEVEL F/F -> apenas altitude
+        for key in ("LEVEL F/F","LEVEL_FF","Level_FF","Level F/F"):
+            put(named, fieldset, key, f"{int(round(cruise_alt))}", maxlens)
+        put(named, fieldset, "CLIMB FUEL", f"{ff_climb*(t_climb_total/60.0):.1f}", maxlens)
+        put(named, fieldset, "ETE_Total", f"{tot_min}", maxlens)
+        put(named, fieldset, "Dist_Total", f"{tot_nm:.1f}", maxlens)
+        put(named, fieldset, "PL_BO_TOTAL", f"{tot_bo:.1f}", maxlens)
+        put(named, fieldset, "EFOB_TOTAL", last_efob, maxlens)
+
+        # Linhas (até 11)
+        for i, r in enumerate(pdf_items[:11], start=1):
+            s=str(i)
+            put(named, fieldset, f"Name{s}", r["Name"], maxlens)
+            put(named, fieldset, f"Alt{s}",  r["Alt"], maxlens)
+            put(named, fieldset, f"FREQ{s}", "", maxlens)
+            if r["TC"]!="":   put(named, fieldset, f"TCRS{s}", r["TC"], maxlens)
+            if r["TH"]!="":   put(named, fieldset, f"THDG{s}", r["TH"], maxlens)
+            if r["MH"]!="":   put(named, fieldset, f"MHDG{s}", r["MH"], maxlens)
+            if r["TAS"]!="":  put(named, fieldset, f"TAS{s}",  r["TAS"], maxlens)
+            if r["GS"]!="":   put(named, fieldset, f"GS{s}",   r["GS"], maxlens)
+            if r["Dist"]!="": put(named, fieldset, f"Dist{s}", r["Dist"], maxlens)
+            if r["ETE"]!="":  put(named, fieldset, f"ETE{s}",  r["ETE"], maxlens)
+            if r["ETO"]!="":  put(named, fieldset, f"ETO{s}",  r["ETO"], maxlens)
+            if r["Burn"]!="": put(named, fieldset, f"PL_BO{s}", r["Burn"], maxlens)
+            # EFOB por linha (o teu template pode usar EFOBn ou AFOBn)
+            if r["EFOB"]!="":
+                put(named, fieldset, f"EFOB{s}", r["EFOB"], maxlens)
+                put(named, fieldset, f"AFOB{s}", r["EFOB"], maxlens)
+
+        if st.button("Gerar PDF preenchido", type="primary"):
+            out = fill_pdf(template_bytes, named)
+            safe_reg = ascii_safe(registration)
+            safe_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%Y-%m-%d")
+            filename = f"{safe_date}_{safe_reg}_NAVLOG.pdf"
+            st.download_button("Download PDF", data=out, file_name=filename, mime="application/pdf")
+            st.success("PDF gerado. Revê antes do voo.")
     except Exception as e:
-        st.error(f"Erro ao gerar PDF: {e}")
-
-# =========================================================
-# Relatório (PDF legível)
-# =========================================================
-st.subheader("Relatório (PDF legível)")
-def build_report_pdf():
-    if not REPORTLAB_OK: raise RuntimeError("reportlab missing")
-    bio = io.BytesIO()
-    doc = SimpleDocTemplate(bio, pagesize=landscape(A4),
-                            leftMargin=16*mm, rightMargin=16*mm,
-                            topMargin=12*mm, bottomMargin=12*mm)
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontSize=9.2, leading=12))
-    H1=styles["Heading1"]; H2=styles["Heading2"]; Psty=styles["Small"]
-
-    story=[]
-    story.append(Paragraph("NAVLOG — Relatório do Planeamento", H1))
-    story.append(Spacer(1,4))
-
-    # strings separadas para evitar SyntaxError
-    toc_str = ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')}nm" for (leg,pos,name) in toc_list])
-    tod_str = ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')}nm" for (leg,pos,name) in tod_list])
-    tt_line = (toc_str + ("; " if toc_list and tod_list else "") + tod_str) or "—"
-
-    resume = [
-        ["DEP / ARR / ALTN", f"{points[0]} / {points[-1]} / {st.session_state.altn}"],
-        ["Elev DEP/ARR/ALTN (ft)", f"{fmt(dep_elev,'alt')} / {fmt(arr_elev,'alt')} / {fmt(altn_elev,'alt')}"],
-        ["Cruise Alt (ft)", fmt(cruise_alt,'alt')],
-        ["Startup / Taxi / ETD", f"{st.session_state.startup} / {st.session_state.taxi_min} min / {(add_seconds(parse_hhmm(st.session_state.startup),st.session_state.taxi_min*60).strftime('%H:%M') if st.session_state.startup else '')}"],
-        ["QNH / OAT / ISA dev", f"{int(st.session_state.qnh)} / {int(st.session_state.temp_c)} / {int(round(st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))))}"],
-        ["Vento FROM / Var", f"{int(round(st.session_state.wind_from)):03d}/{int(round(st.session_state.wind_kt)):02d} / {int(round(st.session_state.var_deg))}{'E' if st.session_state.var_is_e else 'W'}"],
-        ["TAS (cl/cru/des)", f"{_round_unit(tas_climb)}/{_round_unit(tas_cruise)}/{_round_unit(tas_descent)} kt"],
-        ["FF (cl/cru/des)", f"{_round_unit(ff_climb)}/{_round_unit(ff_cruise)}/{_round_unit(ff_descent)} L/h"],
-        ["ROCs/ROD", f"{_round_unit(roc)} ft/min / {_round_unit(st.session_state.rod_fpm)} ft/min"],
-        ["Tempos por fase", f"Climb {mmss_from_seconds(phase_secs['CLIMB'])} • Enroute {mmss_from_seconds(phase_secs['CRUISE'])} • Descent {mmss_from_seconds(phase_secs['DESCENT'])} • Holding {mmss_from_seconds(phase_secs['HOLD'])}"],
-        ["Totais", f"Dist {fmt(sum(float(p['dist']) for p in seq_points if p.get('dist')), 'dist')} nm • ETE {hhmmss_from_seconds(int(sum(int(p.get('ete_sec',0)) for p in seq_points)))} • Burn {fmt(sum(float(p.get('burn',0)) for p in seq_points),'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"],
-        ["TOC/TOD", tt_line],
-    ]
-    t1 = LongTable(resume, colWidths=[64*mm, None], hAlign="LEFT")
-    t1.setStyle(TableStyle([
-        ("GRID",(0,0),(-1,-1),0.25,colors.lightgrey),
-        ("BACKGROUND",(0,0),(0,-1),colors.whitesmoke),
-        ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-        ("FONTSIZE",(0,0),(-1,-1),9),
-    ]))
-    story.append(t1)
-    story.append(PageBreak())
-
-    story.append(Paragraph("Cálculos por segmento (explicado)", H2))
-    for i, p in enumerate(seq_points):
-        if i==0:  # DEP line
-            continue
-        prev = seq_points[i-1]
-        seg = p
-        leg_no = (seg.get("leg_idx")+1) if seg.get("leg_idx") is not None else i
-
-        if seg.get("phase") == "HOLD":
-            steps = [
-                ["1) Duração", mmss_from_seconds(int(seg['ete_sec']))],
-                ["2) Débito combustível (hold)", f"{_round_unit(st.session_state.hold_ff_lph)} L/h"],
-                ["3) Burn", f"{fmt(seg['burn'],'fuel')} L"],
-                ["4) Altitude", f"{prev['alt']}→{seg['alt']} ft (constante)"],
-                ["5) ETO / EFOB", f"ETO={seg['eto'] or '—'}; EFOB={fmt(seg['efob'],'fuel')} L"]
-            ]
-        else:
-            steps = [
-                ["1) Dados de entrada", f"TC={seg.get('tc','')}°T; TAS={seg.get('tas','')} kt; Vento FROM={int(st.session_state.wind_from):03d}/{int(st.session_state.wind_kt):02d} kt"],
-                ["2) Triângulo de vento", f"WCA={seg.get('wca',0)}°; TH={seg.get('th','')}°T; MH={seg.get('mh','')}°M; GS={seg.get('gs','')} kt"],
-                ["3) Distância", f"{fmt(seg.get('dist',0),'dist')} nm"],
-                ["4) ETE arred.", f"{mmss_from_seconds(seg.get('ete_sec',0))} (nearest 10s)"],
-                ["5) Débito combustível", f"{_round_unit(ff_climb if p['phase']=='CLIMB' else ff_descent if p['phase']=='DESCENT' else ff_cruise)} L/h"],
-                ["6) Burn", f"{fmt(seg['burn'],'fuel')} L"],
-                ["7) Perfil vertical", f"{prev['alt']}→{seg['alt']} ft @ {'+' if p['phase']=='CLIMB' else '-' if p['phase']=='DESCENT' else '±0'}{int(abs(seg.get('rate_fpm',0)))} ft/min"],
-                ["8) ETO / EFOB", f"ETO={seg['eto'] or '—'}; EFOB={fmt(seg['efob'],'fuel')} L"]
-            ]
-        t = LongTable([[f"Leg {leg_no}: {prev['name']} → {seg['name']}", "" ]]+steps, colWidths=[56*mm, None], hAlign="LEFT")
-        t.setStyle(TableStyle([
-            ("SPAN",(0,0),(1,0)),("BACKGROUND",(0,0),(1,0),colors.whitesmoke),
-            ("GRID",(0,1),(-1,-1),0.25,colors.lightgrey),("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-            ("FONTSIZE",(0,0),(-1,-1),9),("LEFTPADDING",(0,0),(-1,-1),4),("RIGHTPADDING",(0,0),(-1,-1),6),
-            ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
-        ]))
-        story.append(KeepTogether([t, Spacer(1,6)]))
-
-    doc.build(story)
-    return bio.getvalue()
-
-if st.button("Gerar Relatório (PDF)"):
-    try:
-        rep = build_report_pdf()
-        m = re.search(r'(\d+)', st.session_state.lesson or "")
-        lesson_num = m.group(1) if m else "00"
-        safe_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).strftime("%Y-%m-%d")
-        st.download_button("📑 Download Relatório", data=rep,
-                           file_name=f"{safe_date}_LESSON-{lesson_num}_NAVLOG_RELATORIO.pdf",
-                           mime="application/pdf")
-        st.success("Relatório gerado.")
-    except Exception as e:
-        st.error(f"Erro ao gerar relatório: {e}")
+        st.error(f"Erro ao preparar/gerar PDF: {e}")
 
 
 
