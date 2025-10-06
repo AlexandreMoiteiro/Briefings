@@ -1,4 +1,4 @@
-# app.py — NAVLOG (TOC/TOD dinâmicos, vento por fix opcional, auto-commit de tabelas)
+# app.py — NAVLOG (TOC/TOD dinâmicos, altitudes por fix, PDF + Relatório legível)
 # Reqs: streamlit, pypdf, reportlab, pytz
 
 import streamlit as st
@@ -6,7 +6,7 @@ import datetime as dt
 import pytz, io, json, unicodedata, re, math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from math import sin, asin, radians, degrees, fmod, cos
+from math import sin, asin, radians, degrees, fmod
 
 st.set_page_config(page_title="NAVLOG (PDF + Relatório)", layout="wide", initial_sidebar_state="collapsed")
 PDF_TEMPLATE_PATHS = ["NAVLOG_FORM.pdf", "/mnt/data/NAVLOG_FORM.pdf"]
@@ -49,7 +49,7 @@ def _round_angle(x: float) -> int:
     return int(round(float(x))) % 360
 
 def round_to_10s(sec: float) -> int:
-    """Múltiplo de 10 s mais próximo (mínimo 10 s se >0)."""
+    """Arredonda ao múltiplo de 10 segundos mais próximo (mínimo 10s se >0)."""
     if sec <= 0: return 0
     s = int(round(sec/10.0)*10)
     return max(s, 10)
@@ -231,7 +231,7 @@ def put(out: dict, fieldset: set, key: str, value: str, maxlens: Dict[str,int]):
         out[key] = s
 
 # =========================================================
-# Estado inicial + defaults
+# Estado inicial
 # =========================================================
 def ensure(k, v):
     if k not in st.session_state: st.session_state[k] = v
@@ -248,67 +248,12 @@ ensure("descent_ff",15.0); ensure("rod_fpm",700); ensure("start_fuel",85.0)
 ensure("cruise_ref_kt",90); ensure("descent_ref_kt",65)
 ensure("use_navaids",False)
 
-# Taxi
+# Taxi: campo só para minutos; FF fixo a 20 L/h
 ensure("taxi_min",15)
-ensure("taxi_ff_lph",20.0)  # fixo
-
-# Vento por fix (toggle + tabela)
-ensure("use_wind_by_fix", False)
-if "wind_rows" not in st.session_state:
-    st.session_state.wind_rows = []
-
-# Rota / tabelas base
-def parse_route_text(txt:str) -> List[str]:
-    tokens = re.split(r"[,\s→\-]+", (txt or "").strip())
-    return [t for t in tokens if t]
-
-default_route = f"{st.session_state.dept} {st.session_state.arr}"
-ensure("route_text", default_route)
-
-if "points" not in st.session_state:
-    st.session_state.points = parse_route_text(st.session_state.route_text) or [st.session_state.dept, st.session_state.arr]
-
-def rebuild_plan_rows(points: List[str], prev: Optional[List[dict]]):
-    prev_map = {(r["From"],r["To"]):r for r in (prev or [])}
-    rows=[]
-    for i in range(1,len(points)):
-        frm,to=points[i-1],points[i]
-        base={"From":frm,"To":to,"TC":0.0,"Dist":0.0}
-        if (frm,to) in prev_map:
-            base["TC"]=float(prev_map[(frm,to)].get("TC",0.0))
-            base["Dist"]=float(prev_map[(frm,to)].get("Dist",0.0))
-        rows.append(base)
-    return rows
-
-def rebuild_alt_rows(points: List[str], cruise:int, prev: Optional[List[dict]]):
-    def aero_elev(icao): return int(AEROS.get(icao,{}).get("elev",0))
-    dep_e=_round_alt(aero_elev(points[0])); arr_e=_round_alt(aero_elev(points[-1]))
-    prev_map={r["Point"]:r for r in (prev or [])}
-    out=[]
-    for i,p in enumerate(points):
-        if p in prev_map:
-            r=prev_map[p].copy()
-            if i==0: r["Fix"]=True;  r["Alt_ft"]=float(dep_e)
-            elif i==len(points)-1: r["Fix"]=True; r["Alt_ft"]=float(arr_e)
-            out.append(r); continue
-        if i==0: out.append({"Fix":True,"Point":p,"Alt_ft":float(dep_e)})
-        elif i==len(points)-1: out.append({"Fix":True,"Point":p,"Alt_ft":float(arr_e)})
-        else: out.append({"Fix":False,"Point":p,"Alt_ft":float(_round_alt(cruise))})
-    return out
-
-if "plan_rows" not in st.session_state:
-    st.session_state.plan_rows = rebuild_plan_rows(st.session_state.points, None)
-if "alt_rows" not in st.session_state:
-    st.session_state.alt_rows = rebuild_alt_rows(st.session_state.points, st.session_state.cruise_alt, None)
-if "wind_rows" not in st.session_state or len(st.session_state.wind_rows) != len(st.session_state.points):
-    st.session_state.wind_rows = [{"Point":p, "FROM": float(st.session_state.wind_from), "KT": float(st.session_state.wind_kt)}
-                                  for p in st.session_state.points]
-
-# Guardar pontos da última rota para detetar mudanças
-ensure("last_points", list(st.session_state.points))
+ensure("taxi_ff_lph",20.0)  # sem campo; fixo
 
 # =========================================================
-# UI — formulário de cabeçalho / parâmetros
+# FORM único: Cabeçalho + Atmosfera/Performance/Opções
 # =========================================================
 st.title("Navigation Plan & Inflight Log — Tecnam P2008")
 with st.form("hdr_perf_form", clear_on_submit=False):
@@ -362,8 +307,7 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         f_spd_cr  = st.number_input("Cruise speed (kt)", 40, 140, int(st.session_state.cruise_ref_kt), step=1)
         f_spd_ds  = st.number_input("Descent speed (kt)", 40, 120, int(st.session_state.descent_ref_kt), step=1)
     with c12:
-        f_use_wbf = st.checkbox("Vento por fix?", value=bool(st.session_state.use_wind_by_fix))
-        st.caption("Quando ativo, define Wind FROM/kt por fix; cálculo usa média vetorial por leg.")
+        st.write("Taxi FF (L/h): **20** (fixo)")
 
     submitted = st.form_submit_button("Aplicar cabeçalho + performance")
     if submitted:
@@ -377,12 +321,29 @@ with st.form("hdr_perf_form", clear_on_submit=False):
         st.session_state.cruise_ref_kt=f_spd_cr; st.session_state.descent_ref_kt=f_spd_ds
         st.session_state.use_navaids=f_use_nav
         st.session_state.taxi_min=f_taxi_min
-        st.session_state.taxi_ff_lph=20.0  # fixo
-        st.session_state.use_wind_by_fix=f_use_wbf
-        st.success("Parâmetros aplicados. (Tabelas mantidas — só mudam quando aplicares a rota.)")
+        st.session_state.taxi_ff_lph=20.0  # força para 20 L/h fixo
+
+        # Propagar cruise para a tabela de altitudes (não fixados) e DEP/ARR = elevação
+        def sync_alt_rows_to_cruise():
+            pts = st.session_state.get("points") or [st.session_state.dept, st.session_state.arr]
+            rows = st.session_state.get("alt_rows")
+            if not rows:
+                rows = [{"Fix": (i in (0,len(pts)-1)),
+                         "Point": p,
+                         "Alt_ft": float(_round_alt(aero_elev(p) if i in (0,len(pts)-1) else st.session_state.cruise_alt))}
+                        for i,p in enumerate(pts)]
+            dep_e = _round_alt(aero_elev(pts[0])); arr_e = _round_alt(aero_elev(pts[-1])); crz=_round_alt(st.session_state.cruise_alt)
+            for i,r in enumerate(rows):
+                if i==0: r["Fix"]=True; r["Alt_ft"]=float(dep_e)
+                elif i==len(rows)-1: r["Fix"]=True; r["Alt_ft"]=float(arr_e)
+                else:
+                    if not bool(r.get("Fix", False)): r["Alt_ft"]=float(crz)
+            st.session_state.alt_rows = rows
+        sync_alt_rows_to_cruise()
+        st.success("Parâmetros aplicados.")
 
 # =========================================================
-# Export / Import JSON v2 (SEM vento por fix no ficheiro)
+# JSON v2 (ANTES da rota)
 # =========================================================
 st.subheader("Export / Import JSON v2 (rota, TCs/Dist, Altitudes por fix)")
 
@@ -418,26 +379,73 @@ with cJ2:
             data = json.loads(upl.read().decode("utf-8"))
             pts = data.get("route_points") or current_points()
             st.session_state.dept, st.session_state.arr = pts[0], pts[-1]
-            # rebuild: só quando a rota muda
             st.session_state.points = pts
             st.session_state.route_text = " ".join(pts)
-            st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
-            st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
-            # vento por fix: reindexar preservando (sem gravar em JSON)
-            old_w = {r.get("Point"): r for r in (st.session_state.get("wind_rows") or [])}
-            st.session_state.wind_rows = [{"Point":p,
-                                           "FROM": float(old_w.get(p,{}).get("FROM", st.session_state.wind_from)),
-                                           "KT":   float(old_w.get(p,{}).get("KT",   st.session_state.wind_kt))}
-                                          for p in pts]
-            st.session_state.last_points = list(pts)
+            # legs
+            def default_plan_rows(points: List[str]) -> List[dict]:
+                return [{"From":points[i-1],"To":points[i],"TC":0.0,"Dist":0.0} for i in range(1,len(points))]
+            rows = default_plan_rows(pts)
+            legs_in = data.get("legs") or []
+            for i in range(min(len(rows), len(legs_in))):
+                rows[i]["TC"]=float(legs_in[i].get("TC",0.0))
+                rows[i]["Dist"]=float(legs_in[i].get("Dist",0.0))
+            st.session_state.plan_rows = rows
+            # alts
+            def default_alt_rows(points: List[str], cruise:int) -> List[dict]:
+                dep_e=_round_alt(aero_elev(points[0])); arr_e=_round_alt(aero_elev(points[-1]))
+                out=[]
+                for i,p in enumerate(points):
+                    if i==0: out.append({"Fix":True,"Point":p,"Alt_ft":float(dep_e)})
+                    elif i==len(points)-1: out.append({"Fix":True,"Point":p,"Alt_ft":float(arr_e)})
+                    else: out.append({"Fix":False,"Point":p,"Alt_ft":float(_round_alt(cruise))})
+                return out
+            ar = default_alt_rows(pts, st.session_state.cruise_alt)
+            aset = data.get("alt_set_ft"); afix = data.get("alt_fixed")
+            if aset and len(aset)==len(ar) and afix and len(afix)==len(ar):
+                for i in range(len(ar)):
+                    ar[i]["Fix"]   = bool(afix[i])
+                    if aset[i] is not None: ar[i]["Alt_ft"] = float(aset[i])
+            st.session_state.alt_rows = ar
             st.success("Rota importada e aplicada.")
         except Exception as e:
             st.error(f"Falha a importar JSON: {e}")
 
 # =========================================================
-# Rota + Tabelas (com auto-commit)
+# Rota + Tabelas
 # =========================================================
-route_text = st.text_area("Rota (DEP … ARR)", value=st.session_state.get("route_text"))
+def parse_route_text(txt:str) -> List[str]:
+    tokens = re.split(r"[,\s→\-]+", (txt or "").strip())
+    return [t for t in tokens if t]
+
+def rebuild_plan_rows(points: List[str], prev: Optional[List[dict]]):
+    prev_map = {(r["From"],r["To"]):r for r in (prev or [])}
+    rows=[]
+    for i in range(1,len(points)):
+        frm,to=points[i-1],points[i]
+        base={"From":frm,"To":to,"TC":0.0,"Dist":0.0}
+        if (frm,to) in prev_map:
+            base["TC"]=float(prev_map[(frm,to)].get("TC",0.0))
+            base["Dist"]=float(prev_map[(frm,to)].get("Dist",0.0))
+        rows.append(base)
+    return rows
+
+def rebuild_alt_rows(points: List[str], cruise:int, prev: Optional[List[dict]]):
+    dep_e=_round_alt(aero_elev(points[0])); arr_e=_round_alt(aero_elev(points[-1]))
+    prev_map={r["Point"]:r for r in (prev or [])}
+    out=[]
+    for i,p in enumerate(points):
+        if p in prev_map:
+            r=prev_map[p].copy()
+            if i==0: r["Fix"]=True;  r["Alt_ft"]=float(dep_e)
+            elif i==len(points)-1: r["Fix"]=True; r["Alt_ft"]=float(arr_e)
+            out.append(r); continue
+        if i==0: out.append({"Fix":True,"Point":p,"Alt_ft":float(dep_e)})
+        elif i==len(points)-1: out.append({"Fix":True,"Point":p,"Alt_ft":float(arr_e)})
+        else: out.append({"Fix":False,"Point":p,"Alt_ft":float(_round_alt(cruise))})
+    return out
+
+default_route = f"{st.session_state.dept} {st.session_state.arr}"
+route_text = st.text_area("Rota (DEP … ARR)", value=st.session_state.get("route_text", default_route))
 
 if st.button("Aplicar rota"):
     pts = parse_route_text(route_text) or [st.session_state.dept, st.session_state.arr]
@@ -445,19 +453,18 @@ if st.button("Aplicar rota"):
     if len(pts)>=2: pts[-1]=st.session_state.arr
     st.session_state.points = pts
     st.session_state.route_text = " ".join(pts)
-    # rebuild (apenas porque a rota mudou)
     st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
     st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
-    # vento por fix — reindexar preservando
-    old_w = {r.get("Point"): r for r in (st.session_state.get("wind_rows") or [])}
-    st.session_state.wind_rows = [{"Point":p,
-                                   "FROM": float(old_w.get(p,{}).get("FROM", st.session_state.wind_from)),
-                                   "KT":   float(old_w.get(p,{}).get("KT",   st.session_state.wind_kt))}
-                                  for p in pts]
-    st.session_state.last_points = list(pts)
     st.success("Rota aplicada.")
 
-# Data editors
+# init defaults
+if "points" not in st.session_state:
+    st.session_state.points = parse_route_text(st.session_state.get("route_text", default_route)) or [st.session_state.dept, st.session_state.arr]
+if "plan_rows" not in st.session_state:
+    st.session_state.plan_rows = rebuild_plan_rows(st.session_state.points, None)
+if "alt_rows" not in st.session_state:
+    st.session_state.alt_rows = rebuild_alt_rows(st.session_state.points, st.session_state.cruise_alt, None)
+
 st.subheader("Legs (TC/Dist)")
 leg_cfg = {
     "From": st.column_config.TextColumn("From", disabled=True),
@@ -465,52 +472,44 @@ leg_cfg = {
     "TC":   st.column_config.NumberColumn("TC (°T)", step=0.1, min_value=0.0, max_value=359.9),
     "Dist": st.column_config.NumberColumn("Dist (nm)", step=0.1, min_value=0.0),
 }
-plan_df = st.data_editor(
+st.session_state.plan_rows = st.data_editor(
     st.session_state.plan_rows, key="plan_table",
     hide_index=True, use_container_width=True, num_rows="fixed",
     column_config=leg_cfg, column_order=list(leg_cfg.keys())
 )
 
 st.subheader("Altitudes por Fix")
-st.caption("Marcar **Fixar?** = altitude *obrigatória*. Não marcado = segue o perfil (Cruise por defeito). DEP/ARR fixos às elevações.")
+st.caption("Marcar **Fixar?** = altitude *obrigatória* nesse fix. Não marcado = segue o perfil (Cruise por defeito). DEP/ARR são sempre fixos às elevações.")
 alt_cfg = {
     "Fix":   st.column_config.CheckboxColumn("Fixar?"),
     "Point": st.column_config.TextColumn("Fix", disabled=True),
     "Alt_ft": st.column_config.NumberColumn("Altitude alvo (ft)", step=50, min_value=0.0),
 }
-alt_df = st.data_editor(
+st.session_state.alt_rows = st.data_editor(
     st.session_state.alt_rows, key="alt_table",
     hide_index=True, use_container_width=True, num_rows="fixed",
     column_config=alt_cfg, column_order=list(alt_cfg.keys())
 )
 
-# VENTO POR FIX — editor aparece se o toggle estiver ativo
-if st.session_state.use_wind_by_fix:
-    st.subheader("Vento por Fix")
-    wind_cfg = {
+# NAVAIDs (mostra só se o toggle no formulário estiver ON)
+if st.session_state.use_navaids:
+    st.subheader("NAVAIDs opcionais (preenche no PDF quando existir)")
+    if "nav_rows" not in st.session_state or len(st.session_state.nav_rows) != len(st.session_state.points):
+        st.session_state.nav_rows = [{"Point":p,"IDENT":"","FREQ":""} for p in st.session_state.points]
+    if [r["Point"] for r in st.session_state.nav_rows] != st.session_state.points:
+        old = {r["Point"]:r for r in st.session_state.nav_rows}
+        st.session_state.nav_rows = [{"Point":p,"IDENT":old.get(p,{}).get("IDENT",""),
+                                      "FREQ":old.get(p,{}).get("FREQ","")} for p in st.session_state.points]
+    nav_cfg = {
         "Point": st.column_config.TextColumn("Fix", disabled=True),
-        "FROM":  st.column_config.NumberColumn("Wind FROM (°TRUE)", min_value=0.0, max_value=360.0, step=1.0),
-        "KT":    st.column_config.NumberColumn("Wind (kt)", min_value=0.0, max_value=200.0, step=1.0),
+        "IDENT": st.column_config.TextColumn("Ident"),
+        "FREQ":  st.column_config.TextColumn("Freq"),
     }
-    wind_df = st.data_editor(
-        st.session_state.wind_rows, key="wind_by_fix_table",
+    st.session_state.nav_rows = st.data_editor(
+        st.session_state.nav_rows, key="navaids_table",
         hide_index=True, use_container_width=True, num_rows="fixed",
-        column_config=wind_cfg, column_order=list(wind_cfg.keys())
+        column_config=nav_cfg, column_order=list(nav_cfg.keys())
     )
-
-# ===== AUTO-COMMIT: puxar edições pendentes dos editores =====
-def apply_pending_edits():
-    # Legs
-    if "plan_table" in st.session_state and isinstance(st.session_state.plan_table, list):
-        st.session_state.plan_rows = st.session_state.plan_table
-    # Altitudes
-    if "alt_table" in st.session_state and isinstance(st.session_state.alt_table, list):
-        st.session_state.alt_rows = st.session_state.alt_table
-    # Vento por fix
-    if st.session_state.use_wind_by_fix and "wind_by_fix_table" in st.session_state and isinstance(st.session_state.wind_by_fix_table, list):
-        st.session_state.wind_rows = st.session_state.wind_by_fix_table
-
-apply_pending_edits()
 
 # =========================================================
 # Cálculo (perfil com TOC/TOD dinâmicos)
@@ -518,7 +517,6 @@ apply_pending_edits()
 points = st.session_state.points
 legs   = st.session_state.plan_rows
 alts   = st.session_state.alt_rows
-winds  = st.session_state.wind_rows
 N = len(legs)
 
 def pressure_alt(alt_ft, qnh_hpa): return float(alt_ft) + (1013.0 - float(qnh_hpa))*30.0
@@ -540,31 +538,8 @@ ff_descent  = float(st.session_state.descent_ff)
 dist = [float(legs[i]["Dist"] or 0.0) for i in range(N)]
 tcs  = [float(legs[i]["TC"]   or 0.0) for i in range(N)]
 
-def wind_vec_from(dir_deg: float, spd: float) -> Tuple[float,float]:
-    th = radians(dir_deg % 360.0)
-    u = -spd * sin(th)  # negativo porque é "from"
-    v = -spd * cos(th)
-    return u, v
-
-def vec_to_from(u: float, v: float) -> Tuple[float,float]:
-    spd = math.hypot(u, v)
-    if spd < 1e-9:
-        return 0.0, 0.0
-    th_to = math.atan2(v, u)
-    th_from = (th_to + math.pi) % (2*math.pi)
-    return (degrees(th_from) % 360.0), spd
-
 def leg_wind(i:int) -> Tuple[float,float]:
-    """Se 'vento por fix' ON: média vetorial entre fix de saída e chegada; senão: vento geral."""
-    if not st.session_state.use_wind_by_fix or not winds or len(winds) != len(points):
-        return (float(st.session_state.wind_from), float(st.session_state.wind_kt))
-    frm = legs[i]["From"]; to = legs[i]["To"]
-    idx_from = points.index(frm); idx_to = points.index(to)
-    wf = winds[idx_from]; wt = winds[idx_to]
-    u1,v1 = wind_vec_from(float(wf.get("FROM", st.session_state.wind_from)), float(wf.get("KT", st.session_state.wind_kt)))
-    u2,v2 = wind_vec_from(float(wt.get("FROM",   st.session_state.wind_from)), float(wt.get("KT",   st.session_state.wind_kt)))
-    u = 0.5*(u1+u2); v = 0.5*(v1+v2)
-    return vec_to_from(u, v)
+    return (int(st.session_state.wind_from), int(st.session_state.wind_kt))
 
 def gs_for(i:int, phase:str) -> float:
     wdir,wkt = leg_wind(i)
@@ -583,7 +558,7 @@ for i in range(N):
     front_climb[i] = gs_for(i,"CLIMB") * use / 60.0
     rem -= use
 
-# 2) descidas obrigatórias (atrás)
+# 2) descidas obrigatórias para *hard* (atrás)
 back_desc = [0.0]*N
 hard_map = {idx: float(r["Alt_ft"]) for idx,r in enumerate(alts) if bool(r.get("Fix"))}
 hard_map[0] = start_alt
@@ -620,7 +595,7 @@ for i in range(N-1, -1, -1):
             can = min(overlap, front_climb[k])
             front_climb[k]-=can; overlap-=can; k-=1
 
-# 4) TOC/TOD
+# 4) detectar posições de TOC/TOD e rótulos (só numerar se >1)
 toc_positions=[]; tod_positions=[]
 for i in range(N):
     d = dist[i]; d_cl = min(front_climb[i], d)
@@ -815,7 +790,7 @@ if fieldset:
     PAll(["DEPARTURE_AIRFIELD","Departure_Airfield"], points[0])
     PAll(["ARRIVAL_AIRFIELD","Arrival_Airfield"], points[-1])
 
-    # Leg_Number = nº de pontos oficiais (sem TOC/TOD)
+    # Leg_Number = nº de pontos "oficiais" (sem TOC/TOD)
     PAll(["Leg_Number","LEG_NUMBER"], str(len(points)))
 
     PAll(["ALTERNATE_AIRFIELD","Alternate_Airfield"], st.session_state.altn)
@@ -859,15 +834,14 @@ if fieldset:
             P(tag+"ETO", p["eto"])
             P(tag+"Estimated_FOB", fmt(p["efob"], 'fuel'))
 
-    # ===== OBSERVATIONS =====
+    # ===== OBSERVATIONS (pedido) =====
     observations_text = "\n".join([
         f"Start-up & Taxi: {taxi_min} min @ 20 L/h → {fmt(fuel_taxi,'fuel')} L",
         f"Climb: {fmt(fuel_climb,'fuel')} L",
         f"Enroute: {fmt(fuel_enroute,'fuel')} L",
         f"Descent (min): {descent_min_total} min → {fmt(fuel_descent,'fuel')} L"
     ])
-    # O campo no template deve chamar-se OBSERVATIONS
-    put(named, fieldset, "OBSERVATIONS", observations_text, maxlens)
+    P("OBSERVATIONS", observations_text)
 
 if st.button("Gerar PDF NAVLOG", type="primary"):
     try:
@@ -913,7 +887,7 @@ def build_report_pdf():
         ["Totais", f"Dist {fmt(tot_nm,'dist')} nm • ETE {hhmmss_from_seconds(int(tot_ete_sec))} • Burn {fmt(tot_bo,'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"],
         ["TOC/TOD", (", ".join([f'{name} L{leg+1}@{fmt(pos,"dist")}nm' for (leg,pos,name) in toc_list]) + ("; " if toc_list and tod_list else "") +
                      ", ".join([f'{name} L{leg+1}@{fmt(pos,"dist")}nm' for (leg,pos,name) in tod_list])) or "—"],
-        ["Regras de arredondamento", "Tempo: múltiplo de 10 s (mais próximo, mín. 10 s) • Dist: 0.1 nm • Fuel: 0.1 L • Alt: <1000→50 / ≥1000→100 • Ângulos & velocidades: unidade."],
+        ["Regras de arredondamento", "Tempo: múltiplo de 10 s (mais próximo) • Dist: 0.1 nm • Fuel: 0.1 L • Alt: <1000→50 / ≥1000→100 • Ângulos & velocidades: unidade."],
     ]
     t1 = LongTable(resume, colWidths=[64*mm, None], hAlign="LEFT")
     t1.setStyle(TableStyle([
@@ -925,7 +899,7 @@ def build_report_pdf():
     story.append(t1)
     story.append(PageBreak())
 
-    story.append(Paragraph("Cálculos por segmento (passo a passo)", H2))
+    story.append(Paragraph("Cálculos por segmento (explicado)", H2))
     for i, p in enumerate(seq_points):
         if i==0:  # DEP line
             continue
@@ -934,12 +908,11 @@ def build_report_pdf():
         leg_no = seg["leg_idx"]+1 if seg["leg_idx"] is not None else i
 
         steps = [
-            ["1) Entrada", f"TC={seg['tc']}°T; TAS={seg['tas']} kt; Vento base={int(st.session_state.wind_from):03d}/{int(st.session_state.wind_kt):02d} kt" +
-                           (" • (vento por fix ativo: média vetorial)" if st.session_state.use_wind_by_fix else "")],
+            ["1) Dados de entrada", f"TC={seg['tc']}°T; TAS={seg['tas']} kt; Vento FROM={int(st.session_state.wind_from):03d}/{int(st.session_state.wind_kt):02d} kt"],
             ["2) Triângulo de vento", f"WCA={seg['wca']}°; TH={seg['th']}°T; MH={seg['mh']}°M; GS={seg['gs']} kt"],
             ["3) Distância", f"{fmt(seg['dist'],'dist')} nm"],
             ["4) ETE bruto", f"{hhmmss_from_seconds(int(seg['ete_raw']))}"],
-            ["5) ETE arredondado", f"nearest 10 s → {mmss_from_seconds(seg['ete_sec'])}"],
+            ["5) ETE arred.", f"nearest 10 s → {mmss_from_seconds(seg['ete_sec'])}"],
             ["6) Débito combustível", f"{_round_unit(ff_climb if p['phase']=='CLIMB' else ff_descent if p['phase']=='DESCENT' else ff_cruise)} L/h"],
             ["7) Burn", f"bruto={seg['burn']:.2f} L → arred={fmt(seg['burn'],'fuel')} L"],
             ["8) Perfil vertical", f"{prev['alt']}→{seg['alt']} ft @ {'+' if p['phase']=='CLIMB' else '-' if p['phase']=='DESCENT' else '±0'}{int(abs(seg['rate_fpm']))} ft/min"],
@@ -975,4 +948,5 @@ if st.button("Gerar Relatório (PDF)"):
         st.success("Relatório gerado.")
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
+
 
