@@ -1,4 +1,4 @@
-# app.py — NAVLOG (TOC/TOD dinâmicos, Altitudes por fix que APLICAM, HOLDs por ponto, PDF + Relatório)
+# app.py — NAVLOG (TOC/TOD só para CRUISE, Altitudes por fix aplicadas por índice, HOLDs, PDF + Relatório)
 # Reqs: streamlit, pypdf, reportlab, pytz
 
 import streamlit as st
@@ -390,8 +390,7 @@ with cJ2:
                 if i<len(hOn) and i<len(hMin): row["Hold"]=bool(hOn[i]); row["Hold_min"]=float(hMin[i])
                 ar.append(row)
             st.session_state.alt_rows = ar
-            # rebuild combined
-            st.session_state.combined_rows = None  # será reconstruído mais abaixo
+            st.session_state.combined_rows = None
             st.success("Rota importada e aplicada.")
         except Exception as e:
             st.error(f"Falha a importar JSON: {e}")
@@ -417,10 +416,10 @@ def rebuild_plan_rows(points: List[str], prev: Optional[List[dict]]):
 
 def rebuild_alt_rows(points: List[str], cruise:int, prev: Optional[List[dict]]):
     dep_e=_round_alt(aero_elev(points[0])); arr_e=_round_alt(aero_elev(points[-1]))
-    prev_map={clean_point_name(r["Point"]):r for r in (prev or [])}
     out=[]
+    prev = prev or []
     for i,p in enumerate(points):
-        base = prev_map.get(p, {"Fix": False, "Alt_ft": float(_round_alt(cruise)), "Hold": False, "Hold_min": 0.0})
+        base = prev[i] if i < len(prev) else {"Fix": False, "Alt_ft": float(_round_alt(cruise)), "Hold": False, "Hold_min": 0.0, "Point": p}
         row = {"Fix": bool(base.get("Fix", False)),
                "Point": p,
                "Alt_ft": float(base.get("Alt_ft", _round_alt(cruise))),
@@ -436,7 +435,9 @@ def to_records(obj) -> List[dict]:
         import pandas as pd
         if isinstance(obj, pd.DataFrame):
             obj = obj.fillna(0)
-            return [{k: (clean_point_name(v) if k=="Point" else (float(v) if k in ("Alt_to_ft","Alt_ft","Hold_to_min","Hold_min","Dist","TC") else bool(v) if k in ("Fix","Hold","Fix_to","Hold_to") else v))
+            return [{k: (clean_point_name(v) if k=="Point" else
+                         (float(v) if k in ("Alt_to_ft","Alt_ft","Hold_to_min","Hold_min","Dist","TC") else
+                          bool(v) if k in ("Fix","Hold","Fix_to","Hold_to") else v))
                      for k,v in row.items()} for _, row in obj.iterrows()]
     except Exception:
         pass
@@ -453,65 +454,27 @@ def to_records(obj) -> List[dict]:
         return rec
     return []
 
-def normalize_legs(points: List[str], edited_rows: List[dict]) -> List[dict]:
-    edited_map = {(clean_point_name(r["From"]), clean_point_name(r["To"])): r for r in edited_rows}
-    rows = []
-    for i in range(1, len(points)):
-        frm, to = points[i-1], points[i]
-        base = {"From": frm, "To": to, "TC": 0.0, "Dist": 0.0}
-        if (frm, to) in edited_map:
-            r = edited_map[(frm, to)]
-            base["TC"] = float(r.get("TC", 0.0))
-            base["Dist"] = float(r.get("Dist", 0.0))
-        rows.append(base)
-    return rows
-
-def normalize_alt_rows(points: List[str], edited_rows: List[dict]) -> List[dict]:
-    dep_e=_round_alt(aero_elev(points[0])); arr_e=_round_alt(aero_elev(points[-1]))
-    edited_map = {clean_point_name(r.get("Point")): r for r in edited_rows}
-    out=[]
-    for i,p in enumerate(points):
-        r = edited_map.get(p, {})
-        row = {
-            "Fix": bool(r.get("Fix", False)),
-            "Point": p,
-            "Alt_ft": float(r.get("Alt_ft", _round_alt(st.session_state.cruise_alt))),
-            "Hold": bool(r.get("Hold", False)),
-            "Hold_min": float(r.get("Hold_min", 0.0)),
-        }
-        if i==0:
-            row["Fix"]=True; row["Alt_ft"]=float(dep_e)
-        elif i==len(points)-1:
-            row["Fix"]=True; row["Alt_ft"]=float(arr_e)
-        out.append(row)
-    return out
-
-# ===== Combined editor (legs + altitude/hold do destino) =====
-def build_combined_rows(points: List[str],
-                        legs: List[dict],
-                        alts: List[dict]) -> List[dict]:
-    """Cada linha representa uma perna i: From=points[i], To=points[i+1].
-       A altitude/HOLD editam-se para o 'To' dessa perna (i+1)."""
-    alt_map = {clean_point_name(r["Point"]): r for r in (alts or [])}
+# ===== Combined editor (legs + altitude/hold do destino por ÍNDICE) =====
+def build_combined_rows(points: List[str], legs: List[dict], alts: List[dict]) -> List[dict]:
     rows=[]
     for i in range(1, len(points)):
         frm, to = points[i-1], points[i]
         leg = (legs[i-1] if i-1 < len(legs) else {"TC":0.0,"Dist":0.0})
-        arow = alt_map.get(clean_point_name(to), {})
+        arow = alts[i] if i < len(alts) else {"Fix": False, "Alt_ft": _round_alt(st.session_state.cruise_alt), "Hold": False, "Hold_min": 0.0}
         rows.append({
             "From": frm,
             "To": to,
             "TC": float(leg.get("TC", 0.0)),
             "Dist": float(leg.get("Dist", 0.0)),
             "Fix_to": True if i==len(points)-1 else bool(arow.get("Fix", False)),
-            "Alt_to_ft": float(_round_alt(aero_elev(to))) if i==len(points)-1 else float(arow.get("Alt_ft", _round_alt(st.session_state.cruise_alt))),
+            "Alt_to_ft": (float(_round_alt(aero_elev(to))) if i==len(points)-1
+                          else (float(arow.get("Alt_ft", _round_alt(st.session_state.cruise_alt))) if bool(arow.get("Fix", False)) else "")),
             "Hold_to": bool(arow.get("Hold", False)),
             "Hold_to_min": float(arow.get("Hold_min", 0.0)),
         })
     return rows
 
 def normalize_from_combined(points: List[str], edited_rows: List[dict]) -> Tuple[List[dict], List[dict]]:
-    """Produz plan_rows e alt_rows (para TODOS os pontos), lendo Fix/HOLD do destino de cada perna."""
     # plan_rows
     plan_rows=[]
     for i in range(1, len(points)):
@@ -522,7 +485,7 @@ def normalize_from_combined(points: List[str], edited_rows: List[dict]) -> Tuple
             "TC": float(r.get("TC", 0.0)),
             "Dist": float(r.get("Dist", 0.0)),
         })
-    # alt_rows
+    # alt_rows por índice
     dep_e = _round_alt(aero_elev(points[0]))
     arr_e = _round_alt(aero_elev(points[-1]))
     out = []
@@ -533,14 +496,15 @@ def normalize_from_combined(points: List[str], edited_rows: List[dict]) -> Tuple
             base["Fix"] = True; base["Alt_ft"] = float(dep_e)
         elif i == len(points)-1:
             base["Fix"] = True; base["Alt_ft"] = float(arr_e)
-            # HOLD no ARR se tiver sido marcado na última linha
             r_last = edited_rows[-1] if edited_rows else {}
             base["Hold"] = bool(r_last.get("Hold_to", False))
             base["Hold_min"] = float(r_last.get("Hold_to_min", 0.0))
         else:
             r = edited_rows[i-1] if i-1 < len(edited_rows) else {}
-            base["Fix"] = bool(r.get("Fix_to", False))
-            base["Alt_ft"] = float(r.get("Alt_to_ft", _round_alt(st.session_state.cruise_alt)))
+            is_fix = bool(r.get("Fix_to", False))
+            base["Fix"] = is_fix
+            base["Alt_ft"] = (float(r.get("Alt_to_ft", _round_alt(st.session_state.cruise_alt))) if is_fix
+                              else float(_round_alt(st.session_state.cruise_alt)))
             base["Hold"] = bool(r.get("Hold_to", False))
             base["Hold_min"] = float(r.get("Hold_to_min", 0.0))
         out.append({"Point": p, **base})
@@ -557,10 +521,7 @@ if st.button("Aplicar rota"):
     st.session_state.route_text = " ".join(pts)
     st.session_state.plan_rows = rebuild_plan_rows(pts, st.session_state.get("plan_rows"))
     st.session_state.alt_rows  = rebuild_alt_rows(pts, st.session_state.cruise_alt, st.session_state.get("alt_rows"))
-    # reconstruir combinado
-    st.session_state.combined_rows = build_combined_rows(st.session_state.points,
-                                                         st.session_state.plan_rows,
-                                                         st.session_state.alt_rows)
+    st.session_state.combined_rows = build_combined_rows(st.session_state.points, st.session_state.plan_rows, st.session_state.alt_rows)
     st.success("Rota aplicada.")
 
 # init defaults
@@ -570,13 +531,10 @@ if "plan_rows" not in st.session_state:
     st.session_state.plan_rows = rebuild_plan_rows(st.session_state.points, None)
 if "alt_rows" not in st.session_state:
     st.session_state.alt_rows = rebuild_alt_rows(st.session_state.points, st.session_state.cruise_alt, None)
-# Combined inicial
 if "combined_rows" not in st.session_state or st.session_state.combined_rows is None:
-    st.session_state.combined_rows = build_combined_rows(st.session_state.points,
-                                                         st.session_state.plan_rows,
-                                                         st.session_state.alt_rows)
+    st.session_state.combined_rows = build_combined_rows(st.session_state.points, st.session_state.plan_rows, st.session_state.alt_rows)
 
-# ===== Editor Único: Legs + Altitude/HOLD do destino =====
+# ===== Editor Único =====
 st.subheader("Plano (TC/Dist + Altitude & HOLD no Fix de destino)")
 combined_cfg = {
     "From": st.column_config.TextColumn("From", disabled=True),
@@ -603,7 +561,6 @@ with st.form("combined_form", clear_on_submit=False):
         st.session_state.plan_rows = plan_rows
         st.session_state.alt_rows  = alt_rows
         st.session_state.combined_rows = build_combined_rows(st.session_state.points, plan_rows, alt_rows)
-
         if st.session_state.auto_fix_edits:
             crz=_round_alt(st.session_state.cruise_alt)
             for i,r in enumerate(st.session_state.alt_rows):
@@ -622,9 +579,9 @@ if st.session_state.use_navaids:
     if "nav_rows" not in st.session_state or len(st.session_state.nav_rows) != len(st.session_state.points):
         st.session_state.nav_rows = [{"Point":p,"IDENT":"","FREQ":""} for p in st.session_state.points]
     if [r["Point"] for r in st.session_state.nav_rows] != st.session_state.points:
-        old = {clean_point_name(r["Point"]):r for r in st.session_state.nav_rows}
-        st.session_state.nav_rows = [{"Point":p,"IDENT":old.get(p,{}).get("IDENT",""),
-                                      "FREQ":old.get(p,{}).get("FREQ","")} for p in st.session_state.points]
+        old = {i:r for i,r in enumerate(st.session_state.nav_rows)}
+        st.session_state.nav_rows = [{"Point":p,"IDENT":old.get(i,{}).get("IDENT",""),
+                                      "FREQ":old.get(i,{}).get("FREQ","")} for i,p in enumerate(st.session_state.points)]
     nav_cfg = {"Point": st.column_config.TextColumn("Fix", disabled=True),
                "IDENT": st.column_config.TextColumn("Ident"),
                "FREQ":  st.column_config.TextColumn("Freq")}
@@ -638,7 +595,7 @@ if st.session_state.use_navaids:
             st.success("NAVAIDs aplicados.")
 
 # =========================================================
-# Cálculo (perfil + holds)
+# Cálculo (perfil com TOC/TOD apenas para CRUISE)
 # =========================================================
 points = st.session_state.points
 legs   = st.session_state.plan_rows
@@ -673,79 +630,16 @@ def gs_for(i:int, phase:str) -> float:
     _,_,gs = wind_triangle(tcs[i], tas, wdir, wkt)
     return max(gs,1e-6)
 
-# ---- Perfil alvo a partir das ALTITUDES APLICADAS ----
-alt_map = {clean_point_name(r["Point"]): r for r in alts}
+# ---- Perfil alvo por índice a partir das ALTITUDES APLICADAS ----
 A_target=[]
 for i,p in enumerate(points):
-    r = alt_map.get(p, {})
+    r = alts[i] if i < len(alts) else {"Fix":False,"Alt_ft":cruise_alt}
     if i==0:                A_target.append(float(dep_elev))
     elif i==len(points)-1:  A_target.append(float(arr_elev))
     else:
         A_target.append(float(r.get("Alt_ft", cruise_alt)) if bool(r.get("Fix", False)) else float(cruise_alt))
 
-# Alocação climbs/descents
-gsC = [gs_for(i,"CLIMB")   for i in range(N)]
-gsD = [gs_for(i,"DESCENT") for i in range(N)]
-climb_d = [0.0]*N
-desc_d  = [0.0]*N
-
-impossible_notes=[]
-# Descidas de trás para a frente
-for k in range(1, len(A_target)):
-    drop = A_target[k-1] - A_target[k]
-    if drop > 0:
-        need_min = drop / max(st.session_state.rod_fpm,1e-6)
-        rem = need_min
-        for j in range(k-1, -1, -1):
-            free_len = dist[j] - desc_d[j] - climb_d[j]
-            if free_len <= 1e-9: continue
-            t_avail = (60.0 * free_len) / max(gsD[j],1e-6)
-            use = min(rem, t_avail)
-            d   = gsD[j] * use / 60.0
-            desc_d[j] += d
-            rem -= use
-            if rem <= 1e-9: break
-        if rem > 1e-9:
-            impossible_notes.append(f"Não há distância para descer {int(round(drop))} ft até {points[k]}.")
-
-# Subidas da frente para trás
-for k in range(1, len(A_target)):
-    rise = A_target[k] - A_target[k-1]
-    if rise > 0:
-        need_min = rise / max(roc,1e-6)
-        rem = need_min
-        for j in range(0, k):
-            free_len = dist[j] - desc_d[j] - climb_d[j]
-            if free_len <= 1e-9: continue
-            t_avail = (60.0 * free_len) / max(gsC[j],1e-6)
-            use = min(rem, t_avail)
-            d   = gsC[j] * use / 60.0
-            climb_d[j] += d
-            rem -= use
-            if rem <= 1e-9: break
-        if rem > 1e-9:
-            impossible_notes.append(f"Não há distância para subir {int(round(rise))} ft até {points[k]}.")
-
-# TOC/TOD
-toc_positions=[]; tod_positions=[]
-for i in range(N):
-    d_cl = min(climb_d[i], dist[i])
-    d_ds = min(desc_d[i],  dist[i]-d_cl)
-    d_cr = max(0.0, dist[i]-d_cl-d_ds)
-    if d_cl>1e-9 and (d_cr>0 or d_ds>0): toc_positions.append((i, d_cl))
-    if d_ds>1e-9: tod_positions.append((i, d_cl+d_cr))
-
-toc_labels={}
-if len(toc_positions)==1: toc_labels[toc_positions[0]]="TOC"
-else:
-    for n,key in enumerate(toc_positions, start=1): toc_labels[key]=f"TOC-{n}"
-
-tod_labels={}
-if len(tod_positions)==1: tod_labels[tod_positions[0]]="TOD"
-else:
-    for n,key in enumerate(tod_positions, start=1): tod_labels[key]=f"TOD-{n}"
-
-# ---- Construção de segmentos + HOLDs ----
+# ======= PERFIL POR PERNA — TOC/TOD apenas para CRUISE =======
 rows=[]; seq_points=[]
 efob=float(st.session_state.start_fuel)
 
@@ -753,12 +647,23 @@ startup = parse_hhmm(st.session_state.startup)
 takeoff = add_seconds(startup, int(st.session_state.taxi_min*60)) if startup else None
 clock = takeoff
 
-seq_points.append({"name": points[0], "alt": _round_alt(A_target[0]),
+# contadores de ocorrências por nome (para distinguir VACOR (1), VACOR (2), ...)
+_occ_counter: Dict[str,int] = {}
+
+def _occ_label(name: str) -> str:
+    k = clean_point_name(name)
+    _occ_counter[k] = _occ_counter.get(k, 0) + 1
+    n = _occ_counter[k]
+    return f"{name} ({n})" if n > 1 else name
+
+first_label = _occ_label(points[0])
+seq_points.append({"name": first_label, "base_name": points[0], "alt": _round_alt(A_target[0]),
                    "tc":"", "th":"", "mc":"", "mh":"", "tas":"", "gs":"", "dist":"",
                    "ete_sec":0, "eto": (takeoff.strftime("%H:%M") if takeoff else ""),
                    "burn":"", "efob": efob, "leg_idx": None, "phase":"DEP"})
 
 def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
+    # cálculo e logging do segmento
     global clock, efob
     if d_nm <= 1e-9: return alt_start_ft
     wdir,wkt = leg_wind(i_leg)
@@ -789,8 +694,10 @@ def add_seg(phase, frm, to, i_leg, d_nm, tas, ff_lph, alt_start_ft, rate_fpm):
         "Dist (nm)": fmt(d_nm,'dist'), "ETE (mm:ss)": mmss_from_seconds(int(ete_sec)), "ETO": eto,
         "Burn (L)": fmt(burn_raw,'fuel'), "EFOB (L)": fmt(efob,'fuel')
     })
+
+    label_to = _occ_label(to) if to == points[i_leg+1] else to
     seq_points.append({
-        "name": to, "alt": _round_alt(alt_end),
+        "name": label_to, "base_name": to, "alt": _round_alt(alt_end),
         "tc": _round_angle(tc), "th": _round_angle(th),
         "mc": _round_angle(mc), "mh": _round_angle(mh),
         "tas": _round_unit(tas), "gs": _round_unit(gs),
@@ -814,8 +721,9 @@ def add_hold(point_name, minutes, alt_now):
         clock = add_seconds(clock, int(ete_sec))
         eto = clock.strftime("%H:%M")
     efob_local = max(0.0, _round_tenth(efob - burn_raw))
+    label = _occ_label(point_name)
     rows.append({
-        "Fase":"⟳", "Leg/Marker": f"HOLD @{point_name}",
+        "Fase":"⟳", "Leg/Marker": f"HOLD @{label}",
         "ALT (ft)": f"{fmt(alt_now,'alt')}→{fmt(alt_now,'alt')}",
         "TC (°T)":"", "TH (°T)":"", "MC (°M)":"", "MH (°M)":"",
         "TAS (kt)": _round_unit(st.session_state.hold_ref_kt), "GS (kt)":"",
@@ -824,7 +732,7 @@ def add_hold(point_name, minutes, alt_now):
         "Burn (L)": fmt(burn_raw,'fuel'), "EFOB (L)": fmt(efob_local,'fuel')
     })
     seq_points.append({
-        "name": point_name, "alt": _round_alt(alt_now),
+        "name": label, "base_name": point_name, "alt": _round_alt(alt_now),
         "tc":"", "th":"", "mc":"", "mh":"",
         "tas": _round_unit(st.session_state.hold_ref_kt), "gs":"",
         "wca": 0.0, "dist":"", "ete_sec": int(ete_sec), "ete_raw": float(ete_sec),
@@ -834,39 +742,78 @@ def add_hold(point_name, minutes, alt_now):
     efob = efob_local
     return alt_now
 
-cur_alt = A_target[0]
 toc_list=[]; tod_list=[]
+cur_alt = float(A_target[0])
+CRZ = float(st.session_state.cruise_alt)
+
 for i in range(N):
     frm, to = legs[i]["From"], legs[i]["To"]
-    d = dist[i]
-    d_cl = min(climb_d[i], d)
-    d_ds = min(desc_d[i],   d - d_cl)
-    d_cr = max(0.0, d - d_cl - d_ds)
+    d_leg = float(dist[i]); tc_i = float(tcs[i])
 
-    if d_cl > 1e-9:
-        name_toc = toc_labels.get((i,d_cl), to)
-        if name_toc != to: toc_list.append((i, d_cl, name_toc))
-        cur_alt = add_seg("CLIMB", frm, name_toc, i, d_cl, vy_kt, ff_climb, cur_alt, roc)
-        frm = name_toc
+    # GS por fase
+    wdir,wkt = leg_wind(i)
+    _,_,gsC = wind_triangle(tc_i, vy_kt, wdir, wkt)
+    _,_,gsR = wind_triangle(tc_i, float(st.session_state.cruise_ref_kt), wdir, wkt)
+    _,_,gsD = wind_triangle(tc_i, float(st.session_state.descent_ref_kt), wdir, wkt)
+    gsC = max(gsC,1e-6); gsR=max(gsR,1e-6); gsD=max(gsD,1e-6)
 
-    if d_cr > 1e-9:
-        name_tod = tod_labels.get((i, d_cl+d_cr), to)
-        if name_tod != to: tod_list.append((i, d_cl+d_cr, name_tod))
-        cur_alt = add_seg("CRUISE", frm, name_tod, i, d_cr, float(st.session_state.cruise_ref_kt), ff_cruise, cur_alt, 0.0)
-        frm = name_tod
+    alt_to = float(A_target[i+1])
+    remain = d_leg
 
-    if d_ds > 1e-9:
-        cur_alt = add_seg("DESCENT", frm, to, i, d_ds, float(st.session_state.descent_ref_kt), ff_descent, cur_alt, st.session_state.rod_fpm)
+    # ---------- SUBIDA ----------
+    if alt_to > cur_alt + 1e-6:
+        # marca TOC apenas quando atravessas o CRZ
+        if cur_alt < CRZ <= alt_to:
+            t_to_crz = (CRZ - cur_alt) / max(roc,1e-6)
+            d_to_crz = clamp(gsC * (t_to_crz/60.0), 0.0, remain)
+            if d_to_crz > 1e-9:
+                name_toc = "TOC" if not toc_list else f"TOC-{len(toc_list)+1}"
+                cur_alt = add_seg("CLIMB", _occ_label(frm) if frm==points[i] else frm, name_toc, i, d_to_crz, vy_kt, ff_climb, cur_alt, roc)
+                toc_list.append((i, d_to_crz, name_toc))
+                frm = name_toc
+                remain -= d_to_crz
+                cur_alt = CRZ
+        # continuar até ao alvo (sem marcar TOC)
+        if alt_to > cur_alt + 1e-6 and remain > 1e-9:
+            t_up = (alt_to - cur_alt)/max(roc,1e-6)
+            d_up = clamp(gsC * (t_up/60.0), 0.0, remain)
+            cur_alt = add_seg("CLIMB", frm, to if abs(d_up-remain)<1e-9 else to, i, d_up, vy_kt, ff_climb, cur_alt, roc)
+            frm = to if abs(d_up-remain)<1e-9 else frm
+            remain -= d_up
+            cur_alt = alt_to
 
-    # HOLD no destino da perna (se pedido e aplicado)
-    to_row = alt_map.get(clean_point_name(points[i+1]), {})
-    if bool(to_row.get("Hold")) and float(to_row.get("Hold_min",0)) > 0:
+    # ---------- DESCIDA ----------
+    elif alt_to < cur_alt - 1e-6:
+        # TOD apenas quando sais do CRZ
+        if abs(cur_alt - CRZ) < 1e-6 and alt_to < CRZ and remain > 1e-9:
+            t_down = (cur_alt - alt_to) / max(st.session_state.rod_fpm,1e-6)
+            d_down = gsD * (t_down/60.0)
+            if d_down < remain - 1e-9:
+                d_cruise = remain - d_down
+                name_tod = "TOD" if not tod_list else f"TOD-{len(tod_list)+1}"
+                cur_alt = add_seg("CRUISE", frm, name_tod, i, d_cruise, float(st.session_state.cruise_ref_kt), ff_cruise, cur_alt, 0.0)
+                tod_list.append((i, d_cruise, name_tod))
+                frm = name_tod
+                remain = d_down
+        if remain > 1e-9:
+            cur_alt = add_seg("DESCENT", frm, to, i, remain, float(st.session_state.descent_ref_kt), ff_descent, cur_alt, float(st.session_state.rod_fpm))
+            frm = to; remain = 0.0
+            cur_alt = alt_to
+
+    # ---------- CRUISE ----------
+    if remain > 1e-9 and frm != to:
+        cur_alt = add_seg("CRUISE", frm, to, i, remain, float(st.session_state.cruise_ref_kt), ff_cruise, cur_alt, 0.0)
+        remain = 0.0
+
+    # ---------- HOLD no destino (índice i+1) ----------
+    to_row = alts[i+1] if (i+1) < len(alts) else {}
+    if bool(to_row.get("Hold")) and float(to_row.get("Hold_min", 0)) > 0:
         cur_alt = add_hold(points[i+1], float(to_row["Hold_min"]), cur_alt)
 
 eta = clock
 shutdown = add_seconds(eta, 5*60) if eta else None
 
-# ==== Totais (tempo e burn por fase) ====
+# ==== Totais ====
 phase_secs = {"CLIMB":0, "CRUISE":0, "DESCENT":0, "HOLD":0}
 phase_burn = {"CLIMB":0.0, "CRUISE":0.0, "DESCENT":0.0, "HOLD":0.0}
 for p in seq_points:
@@ -878,25 +825,25 @@ for p in seq_points:
 taxi_min = int(st.session_state.taxi_min)
 fuel_taxi = st.session_state.taxi_ff_lph * (taxi_min / 60.0)
 
-# Para Observações: holds por ponto
-holds_by_point = {}
+# Holds por ocorrência (nome com sufixo (n))
+holds_by_occ = {}
 for p in seq_points:
     if p.get("phase")=="HOLD":
         nm = p.get("name","")
-        holds_by_point.setdefault(nm, {"sec":0,"burn":0.0})
-        holds_by_point[nm]["sec"]  += int(p.get("ete_sec",0))
-        holds_by_point[nm]["burn"] += float(p.get("burn",0.0))
+        holds_by_occ.setdefault(nm, {"sec":0,"burn":0.0})
+        holds_by_occ[nm]["sec"]  += int(p.get("ete_sec",0))
+        holds_by_occ[nm]["burn"] += float(p.get("burn",0.0))
 
 # =========================================================
 # Depuração: Perfil alvo aplicado
 # =========================================================
-st.subheader("Perfil alvo aplicado (ponto / Fixar? / Altitude alvo)")
+st.subheader("Perfil alvo aplicado (por índice)")
 _applied_rows = []
 for i,p in enumerate(points):
-    r = alt_map.get(clean_point_name(p), {})
+    r = alts[i] if i < len(alts) else {}
     fixed = True if i in (0,len(points)-1) else bool(r.get("Fix", False))
     altv  = A_target[i]
-    _applied_rows.append({"Fix": "✔" if fixed else "—", "Fix name": p, "Alt alvo (ft)": int(round(altv))})
+    _applied_rows.append({"#": i, "Fix?": "✔" if fixed else "—", "Fix name": p, "Alt alvo (ft)": int(round(altv))})
 st.dataframe(_applied_rows, use_container_width=True)
 
 # =========================================================
@@ -916,8 +863,6 @@ with cC:
     st.metric("ISA dev @ DEP (°C)", int(round(isa_dev)))
     if toc_list: st.write("**TOC**: " + ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')} nm" for (leg,pos,name) in toc_list]))
     if tod_list: st.write("**TOD**: " + ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')} nm" for (leg,pos,name) in tod_list]))
-    if impossible_notes:
-        for note in impossible_notes: st.warning(note)
 
 st.dataframe(rows, use_container_width=True)
 
@@ -925,7 +870,12 @@ tot_ete_sec = sum(int(p.get('ete_sec',0)) for p in seq_points if isinstance(p.ge
 tot_nm  = sum(float(p['dist']) for p in seq_points if isinstance(p.get('dist'), (int,float)))
 tot_bo  = _round_tenth(sum(float(p['burn']) for p in seq_points if isinstance(p.get('burn'), (int,float))))
 line = f"**Totais** — Dist {fmt(tot_nm,'dist')} nm • ETE {hhmmss_from_seconds(int(tot_ete_sec))} • Burn {fmt(tot_bo,'fuel')} L • EFOB {fmt(seq_points[-1]['efob'],'fuel')} L"
-if eta: line += f" • **ETA {eta.strftime('%H:%M')}** • **Shutdown {shutdown.strftime('%H:%M')}**"
+eta = next((p.get("eto") for p in reversed(seq_points) if p.get("phase") in ("CLIMB","CRUISE","DESCENT")), "")
+if eta: line += f" • **ETA {eta}**"
+shutdown_txt = ""
+if parse_hhmm(eta):
+    shutdown_txt = add_seconds(parse_hhmm(eta), 5*60).strftime("%H:%M")
+    line += f" • **Shutdown {shutdown_txt}**"
 st.markdown(line)
 
 # =========================================================
@@ -948,8 +898,10 @@ def PAll(keys: List[str], value: str):
 
 if fieldset:
     etd = (add_seconds(parse_hhmm(st.session_state.startup), st.session_state.taxi_min*60).strftime("%H:%M") if st.session_state.startup else "")
-    eta_txt = (eta.strftime("%H:%M") if eta else "")
-    shutdown_txt = (shutdown.strftime("%H:%M") if shutdown else "")
+    eta_time = parse_hhmm(eta)
+    eta_txt = (eta_time.strftime("%H:%M") if eta_time else "")
+    shutdown_final = add_seconds(eta_time, 5*60) if eta_time else None
+    shutdown_str = shutdown_final.strftime("%H:%M") if shutdown_final else ""
 
     PAll(["AIRCRAFT","Aircraft"], st.session_state.aircraft)
     PAll(["REGISTRATION","Registration"], st.session_state.registration)
@@ -958,7 +910,7 @@ if fieldset:
     PAll(["STARTUP","Startup"], st.session_state.startup)
     PAll(["TAKEOFF","Takeoff"], etd)
     PAll(["LANDING","Landing"], eta_txt)
-    PAll(["SHUTDOWN","Shutdown"], shutdown_txt)
+    PAll(["SHUTDOWN","Shutdown"], shutdown_str)
     PAll(["LESSON","Lesson"], st.session_state.lesson)
     PAll(["INSTRUTOR","Instructor","INSTRUCTOR"], st.session_state.instrutor)
     PAll(["STUDENT","Student"], st.session_state.student)
@@ -987,14 +939,16 @@ if fieldset:
     # linhas (até 22)
     acc_dist = 0.0; acc_sec = 0
     max_lines = 22
-    nav_by_point = {clean_point_name(r["Point"]):r for r in st.session_state.get("nav_rows", [])} if st.session_state.use_navaids else {}
+    nav_by_idx = {i:r for i,r in enumerate(st.session_state.get("nav_rows", []))} if st.session_state.use_navaids else {}
     for idx, p in enumerate(seq_points[:max_lines], start=1):
         tag=f"Leg{idx:02d}_"; is_seg = (idx>1)
         P(tag+"Waypoint", p["name"])
         if p["alt"]!="": P(tag+"Altitude_FL", fmt(p["alt"],'alt'))
 
-        if st.session_state.use_navaids and clean_point_name(p["name"]) in nav_by_point and is_seg:
-            nv = nav_by_point[clean_point_name(p["name"])]
+        # navaids por índice (se existir)
+        if st.session_state.use_navaids and is_seg and (p.get("leg_idx") is not None):
+            to_index = p["leg_idx"]+1
+            nv = nav_by_idx.get(to_index, {})
             if nv.get("IDENT"): P(tag+"Navaid_Identifier", nv["IDENT"])
             if nv.get("FREQ"):  P(tag+"Navaid_Frequency",  nv["FREQ"])
 
@@ -1017,35 +971,20 @@ if fieldset:
             if p.get("eto") is not None:  P(tag+"ETO", p["eto"])
             if p.get("efob") is not None: P(tag+"Estimated_FOB", fmt(p["efob"], 'fuel'))
 
-    # ===== OBSERVAÇÕES — tempos por fase + ETO por fix + HOLD por fix =====
+    # ===== OBSERVAÇÕES — tempos + holds por ocorrência =====
     def mmss(sec): return mmss_from_seconds(int(round(sec)))
-
-    # ETO por fix (último ETO registado por ponto)
-    eto_by_point = {}
-    for p in seq_points:
-        nm = p.get("name","")
-        if nm and (p.get("eto") or ""):
-            eto_by_point[nm] = p["eto"]
-
     obs_lines = [
         f"Start-up & Taxi: {st.session_state.taxi_min} min @ 20 L/h → {fmt(fuel_taxi,'fuel')} L",
         f"Climb: {mmss(phase_secs['CLIMB'])} → {fmt(phase_burn['CLIMB'],'fuel')} L",
         f"Enroute (Cruise): {mmss(phase_secs['CRUISE'])} → {fmt(phase_burn['CRUISE'],'fuel')} L",
         f"Descent: {mmss(phase_secs['DESCENT'])} → {fmt(phase_burn['DESCENT'],'fuel')} L",
     ]
-    # Por fix: ETO e HOLD (se existir)
-    for p in points:
-        line = f"{p}:"
-        if p in eto_by_point:
-            line += f" ETO {eto_by_point[p]}"
-        if p in holds_by_point and holds_by_point[p]["sec"] > 0:
-            line += f" • HOLD {mmss(holds_by_point[p]['sec'])} → {fmt(holds_by_point[p]['burn'],'fuel')} L"
-        if line != f"{p}:":
-            obs_lines.append(line)
-
-    if phase_secs["HOLD"] > 0:
-        obs_lines.append(f"TOTAL Holding: {mmss(phase_secs['HOLD'])} → {fmt(phase_burn['HOLD'],'fuel')} L")
-
+    if holds_by_occ:
+        for occ, agg in holds_by_occ.items():
+            obs_lines.append(f"HOLD @{occ}: {int(round(agg['sec']/60))} min → {fmt(agg['burn'],'fuel')} L")
+        total_hold_sec = sum(v["sec"] for v in holds_by_occ.values())
+        total_hold_burn = sum(v["burn"] for v in holds_by_occ.values())
+        obs_lines.append(f"TOTAL Holding: {mmss(total_hold_sec)} → {fmt(total_hold_burn,'fuel')} L")
     P("OBSERVATIONS", "\n".join(obs_lines))
 
 if st.button("Gerar PDF NAVLOG", type="primary"):
@@ -1079,14 +1018,18 @@ def build_report_pdf():
     story.append(Paragraph("NAVLOG — Relatório do Planeamento", H1))
     story.append(Spacer(1,4))
 
-    # strings separadas para evitar SyntaxError
+    # TOC/TOD resumo
     toc_str = ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')}nm" for (leg,pos,name) in toc_list])
     tod_str = ", ".join([f"{name} L{leg+1}@{fmt(pos,'dist')}nm" for (leg,pos,name) in tod_list])
     tt_line = (toc_str + ("; " if toc_str and tod_str else "") + tod_str) or "—"
 
+    # cabeçalho
+    dep_elev_txt = fmt(aero_elev(points[0]), 'alt')
+    arr_elev_txt = fmt(aero_elev(points[-1]), 'alt')
+
     resume = [
         ["DEP / ARR / ALTN", f"{points[0]} / {points[-1]} / {st.session_state.altn}"],
-        ["Elev DEP/ARR/ALTN (ft)", f"{fmt(dep_elev,'alt')} / {fmt(arr_elev,'alt')} / {fmt(altn_elev,'alt')}"],
+        ["Elev DEP/ARR/ALTN (ft)", f"{dep_elev_txt} / {arr_elev_txt} / {fmt(altn_elev,'alt')}"],
         ["Cruise Alt (ft)", fmt(cruise_alt,'alt')],
         ["Startup / Taxi / ETD", f"{st.session_state.startup} / {st.session_state.taxi_min} min / {(add_seconds(parse_hhmm(st.session_state.startup),st.session_state.taxi_min*60).strftime('%H:%M') if st.session_state.startup else '')}"],
         ["QNH / OAT / ISA dev", f"{int(st.session_state.qnh)} / {int(st.session_state.temp_c)} / {int(round(st.session_state.temp_c - isa_temp(pressure_alt(dep_elev, st.session_state.qnh))))}"],
@@ -1159,5 +1102,7 @@ if st.button("Gerar Relatório (PDF)"):
         st.success("Relatório gerado.")
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
+
+
 
 
