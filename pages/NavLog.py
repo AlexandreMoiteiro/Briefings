@@ -11,6 +11,13 @@ from math import sin, asin, radians, degrees, fmod
 st.set_page_config(page_title="NAVLOG (PDF + Relatório)", layout="wide", initial_sidebar_state="collapsed")
 PDF_TEMPLATE_PATHS = ["NAVLOG_FORM.pdf", "/mnt/data/NAVLOG_FORM.pdf"]
 
+# ---- helper de re-run (compatível com várias versões de Streamlit) ----
+def _rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
 # ===== Optional deps =====
 try:
     from pypdf import PdfReader, PdfWriter
@@ -515,6 +522,11 @@ st.session_state.plan_rows = st.data_editor(
     hide_index=True, use_container_width=True, num_rows="fixed",
     column_config=leg_cfg, column_order=list(leg_cfg.keys())
 )
+# ---- Botão para aplicar Legs ----
+if st.button("Aplicar Legs (TC/Dist)"):
+    # Os valores já estão em st.session_state.plan_rows; forçamos recálculo
+    st.success("Legs aplicadas.")
+    _rerun()
 
 st.subheader("Altitudes por Fix")
 st.caption("Marcar **Fixar?** = altitude *obrigatória* nesse fix. Não marcado = segue o perfil (Cruise por defeito). DEP/ARR são sempre fixos às elevações.")
@@ -531,6 +543,10 @@ st.session_state.alt_rows = st.data_editor(
     hide_index=True, use_container_width=True, num_rows="fixed",
     column_config=alt_cfg, column_order=list(alt_cfg.keys())
 )
+# ---- Botão para aplicar Altitudes/Holds ----
+if st.button("Aplicar Altitudes / Holds"):
+    st.success("Altitudes aplicadas.")
+    _rerun()
 
 # Opcional: se editar Alt_ft diferente do cruzeiro, marcar Fixar? automaticamente
 if st.session_state.auto_fix_edits:
@@ -562,6 +578,10 @@ if st.session_state.use_navaids:
         hide_index=True, use_container_width=True, num_rows="fixed",
         column_config=nav_cfg, column_order=list(nav_cfg.keys())
     )
+    # ---- Botão para aplicar NAVAIDs ----
+    if st.button("Aplicar NAVAIDs"):
+        st.success("NAVAIDs aplicados.")
+        _rerun()
 
 # =========================================================
 # Cálculo (perfil com TOC/TOD dinâmicos + HOLDs)
@@ -1039,11 +1059,11 @@ def build_report_pdf():
             ("BACKGROUND",(0,0),(1,0),colors.whitesmoke),
             ("GRID",(0,1),(-1,-1),0.25,colors.lightgrey),
             ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-            ("FONTSIZE",(0,0),(-1,-1),9),
-            ("LEFTPADDING",(0,0),(-1,-1),4),
-            ("RIGHTPADDING",(0,0),(-1,-1),6),
-            ("TOPPADDING",(0,0),(-1,-1),3),
-            ("BOTTOMPADDING",(0,0),(-1,-1),3),
+            ("FONTSIZE",(0,0),( -1,-1),9),
+            ("LEFTPADDING",(0,0),( -1,-1),4),
+            ("RIGHTPADDING",(0,0),( -1,-1),6),
+            ("TOPPADDING",(0,0),( -1,-1),3),
+            ("BOTTOMPADDING",(0,0),( -1,-1),3),
         ]))
         story.append(KeepTogether([t, Spacer(1,6)]))
 
