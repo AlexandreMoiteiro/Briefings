@@ -1,4 +1,3 @@
-
 # app.py — NAVLOG (TOC/TOD dinâmicos, Altitudes por fix que APLICAM, HOLDs por ponto, PDF + Relatório)
 # Reqs: streamlit, pypdf, reportlab, pytz
 
@@ -558,27 +557,6 @@ with st.form("alt_form", clear_on_submit=False):
         st.session_state["__alts_applied_at__"] = dt.datetime.utcnow().isoformat()
         st.success("Altitudes & Holds APLICADOS.")
 
-# ===== NAVAIDs (opcional) =====
-if st.session_state.use_navaids:
-    st.subheader("NAVAIDs opcionais (para o PDF)")
-    if "nav_rows" not in st.session_state or len(st.session_state.nav_rows) != len(st.session_state.points):
-        st.session_state.nav_rows = [{"Point":p,"IDENT":"","FREQ":""} for p in st.session_state.points]
-    if [r["Point"] for r in st.session_state.nav_rows] != st.session_state.points:
-        old = {clean_point_name(r["Point"]):r for r in st.session_state.nav_rows}
-        st.session_state.nav_rows = [{"Point":p,"IDENT":old.get(p,{}).get("IDENT",""),
-                                      "FREQ":old.get(p,{}).get("FREQ","")} for p in st.session_state.points]
-    nav_cfg = {"Point": st.column_config.TextColumn("Fix", disabled=True),
-               "IDENT": st.column_config.TextColumn("Ident"),
-               "FREQ":  st.column_config.TextColumn("Freq")}
-    with st.form("navaids_form", clear_on_submit=False):
-        edited_nav = st.data_editor(st.session_state.nav_rows, key="navaids_table",
-                                    hide_index=True, use_container_width=True, num_rows="fixed",
-                                    column_config=nav_cfg, column_order=list(nav_cfg.keys()))
-        nav_submit = st.form_submit_button("Aplicar NAVAIDs")
-        if nav_submit:
-            st.session_state.nav_rows = to_records(edited_nav)
-            st.success("NAVAIDs aplicados.")
-
 # =========================================================
 # Cálculo (perfil + holds)
 # =========================================================
@@ -615,58 +593,57 @@ def gs_for(i:int, phase:str) -> float:
     _,_,gs = wind_triangle(tcs[i], tas, wdir, wkt)
     return max(gs,1e-6)
 
-# ---- Perfil alvo a partir das ALTITUDES APLICADAS ----
-alt_map = {clean_point_name(r["Point"]): r for r in alts}
+# ---- Perfil alvo a partir das ALTITUDES APLICADAS (INDEX-BASED, Fix = hard stop) ----
 A_target=[]
-for i,p in enumerate(points):
-    r = alt_map.get(p, {})
-    if i==0:                A_target.append(float(dep_elev))
-    elif i==len(points)-1:  A_target.append(float(arr_elev))
+for i in range(len(points)):
+    if i == 0:
+        A_target.append(float(dep_elev))
+    elif i == len(points)-1:
+        A_target.append(float(arr_elev))
     else:
-        A_target.append(float(r.get("Alt_ft", cruise_alt)) if bool(r.get("Fix", False)) else float(cruise_alt))
+        row = alts[i] if i < len(alts) else {}
+        if bool(row.get("Fix", False)):
+            A_target.append(float(row.get("Alt_ft", cruise_alt)))
+        else:
+            A_target.append(float(cruise_alt))
 
-# Alocação climbs/descents
+# ---- Alocação climbs/descents — por perna, respeitando o alvo do fix seguinte ----
 gsC = [gs_for(i,"CLIMB")   for i in range(N)]
 gsD = [gs_for(i,"DESCENT") for i in range(N)]
 climb_d = [0.0]*N
 desc_d  = [0.0]*N
 
 impossible_notes=[]
-# Descidas de trás para a frente
-for k in range(1, len(A_target)):
-    drop = A_target[k-1] - A_target[k]
-    if drop > 0:
-        need_min = drop / max(st.session_state.rod_fpm,1e-6)
-        rem = need_min
-        for j in range(k-1, -1, -1):
-            free_len = dist[j] - desc_d[j] - climb_d[j]
-            if free_len <= 1e-9: continue
-            t_avail = (60.0 * free_len) / max(gsD[j],1e-6)
-            use = min(rem, t_avail)
-            d   = gsD[j] * use / 60.0
-            desc_d[j] += d
-            rem -= use
-            if rem <= 1e-9: break
-        if rem > 1e-9:
-            impossible_notes.append(f"Não há distância para descer {int(round(drop))} ft até {points[k]}.")
 
-# Subidas da frente para trás
-for k in range(1, len(A_target)):
-    rise = A_target[k] - A_target[k-1]
-    if rise > 0:
-        need_min = rise / max(roc,1e-6)
-        rem = need_min
-        for j in range(0, k):
-            free_len = dist[j] - desc_d[j] - climb_d[j]
-            if free_len <= 1e-9: continue
-            t_avail = (60.0 * free_len) / max(gsC[j],1e-6)
-            use = min(rem, t_avail)
-            d   = gsC[j] * use / 60.0
-            climb_d[j] += d
-            rem -= use
-            if rem <= 1e-9: break
-        if rem > 1e-9:
-            impossible_notes.append(f"Não há distância para subir {int(round(rise))} ft até {points[k]}.")
+for i in range(N):
+    alt_start_i = A_target[i]
+    alt_end_i   = A_target[i+1]
+
+    if alt_end_i > alt_start_i:
+        need_ft  = alt_end_i - alt_start_i
+        need_min = need_ft / max(roc, 1e-6)
+        need_nm  = gsC[i] * need_min / 60.0
+        if need_nm > dist[i] + 1e-9:
+            impossible_notes.append(
+                f"Perna {points[i]}→{points[i+1]} curta para subir {int(round(need_ft))} ft "
+                f"(precisa de {fmt(need_nm,'dist')} nm, só há {fmt(dist[i],'dist')} nm)."
+            )
+            climb_d[i] = dist[i]
+        else:
+            climb_d[i] = need_nm
+
+    elif alt_end_i < alt_start_i:
+        need_ft  = alt_start_i - alt_end_i
+        need_min = need_ft / max(st.session_state.rod_fpm, 1e-6)
+        need_nm  = gsD[i] * need_min / 60.0
+        if need_nm > dist[i] + 1e-9:
+            impossible_notes.append(
+                f"Perna {points[i]}→{points[i+1]} curta para descer {int(round(need_ft))} ft "
+                f"(precisa de {fmt(need_nm,'dist')} nm, só há {fmt(dist[i],'dist')} nm)."
+            )
+            desc_d[i] = dist[i]
+        else:
+            desc_d[i] = need_nm
 
 # TOC/TOD
 toc_positions=[]; tod_positions=[]
@@ -800,8 +777,8 @@ for i in range(N):
     if d_ds > 1e-9:
         cur_alt = add_seg("DESCENT", frm, to, i, d_ds, float(st.session_state.descent_ref_kt), ff_descent, cur_alt, st.session_state.rod_fpm)
 
-    # HOLD no destino da perna (se pedido e aplicado)
-    to_row = alt_map.get(clean_point_name(points[i+1]), {})
+    # HOLD no destino da perna (ler por índice para evitar mismatch de nomes)
+    to_row = (st.session_state.alt_rows[i+1] if (i+1) < len(st.session_state.alt_rows) else {})
     if bool(to_row.get("Hold")) and float(to_row.get("Hold_min",0)) > 0:
         cur_alt = add_hold(points[i+1], float(to_row["Hold_min"]), cur_alt)
 
@@ -835,7 +812,7 @@ for p in seq_points:
 st.subheader("Perfil alvo aplicado (ponto / Fixar? / Altitude alvo)")
 _applied_rows = []
 for i,p in enumerate(points):
-    r = alt_map.get(clean_point_name(p), {})
+    r = alts[i] if i < len(alts) else {}
     fixed = True if i in (0,len(points)-1) else bool(r.get("Fix", False))
     altv  = A_target[i]
     _applied_rows.append({"Fix": "✔" if fixed else "—", "Fix name": p, "Alt alvo (ft)": int(round(altv))})
@@ -1084,5 +1061,4 @@ if st.button("Gerar Relatório (PDF)"):
         st.success("Relatório gerado.")
     except Exception as e:
         st.error(f"Erro ao gerar relatório: {e}")
-
 
