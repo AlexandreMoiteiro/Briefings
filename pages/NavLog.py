@@ -124,7 +124,7 @@ def ensure(k,v):
 
 ensure("qnh",1013); ensure("oat",15); ensure("mag_var",1); ensure("mag_is_e",False)
 ensure("weight_kg",650.0)
-ensure("rpm_climb",2250); ensure("rpm_cruise",2000); ensure("rpm_descent",1800)
+ensure("rpm_climb",2250); ensure("rpm_cruise",2100); ensure("rpm_descent",1800)
 ensure("descent_angle",3.0)
 ensure("start_clock","")
 ensure("carry_alt",0.0); ensure("carry_efob",85.0)
@@ -255,20 +255,40 @@ CSS = """
 """
 
 def timeline(seg, cps, start_label, end_label):
-    total=max(1,int(seg['time']))
-    bars=[]
+    total = max(1, int(seg.get('time') or seg.get('time_sec')))
+    ticks = []
     for cp in cps:
-        pct=(cp['t']/total)*100.0
-        bars.append(f"<div class='tick' style='left:{pct:.2f}%;'></div>")
-        lbl=f"<div class='lbl' style='left:{pct:.2f}%;'><div>T+{cp['min']}m</div><div>{cp['nm']} nm</div>"+ (f"<div>{cp['eto']}</div>" if cp['eto'] else "") + f"<div>EFOB {cp['efob']:.1f}</div></div>"
-        bars.append(lbl)
-    st.markdown(CSS + f"""
+        t = cp.get('t') or cp.get('t_sec')
+        pct = (t / total) * 100.0
+        ticks.append(f"<div class='tick' style='left:{pct:.2f}%;'></div>")
+        lbl = (
+            f"<div class='lbl' style='left:{pct:.2f}%;'>"
+            f"<div>T+{cp.get('min', cp.get('t_min'))}m</div><div>{cp.get('nm')} nm</div>"
+            + (f"<div>{cp.get('eto')}</div>" if cp.get('eto') else "")
+            + f"<div>EFOB {cp.get('efob'):.1f}</div></div>"
+        )
+        ticks.append(lbl)
+    css = """
+    <style>
+      .tl{position:relative;margin:6px 0 10px 0;padding-top:18px}
+      .tl .bar{height:3px;background:#e6e6e6;border-radius:2px}
+      .tl .tick{position:absolute;top:8px;width:2px;height:12px;background:#333}
+      .tl .lbl{position:absolute;top:22px;transform:translateX(-50%);text-align:center;font-size:11px;color:#333}
+      .tl .head{display:flex;justify-content:space-between;font-size:12px;color:#666;margin-bottom:4px}
+    </style>
+    """
+    html = (
+        css
+        + f"""
     <div class='tl'>
-      <div class='head'><div>{start_label}</div><div>GS {int(round(seg['GS']))} kt · TAS {int(round(seg['TAS']))} kt · FF {int(round(seg['ff']))} L/h</div><div>{end_label}</div></div>
+      <div class='head'><div>{start_label}</div><div>GS {int(round(seg.get('GS')))} kt · TAS {int(round(seg.get('TAS')))} kt · FF {int(round(seg.get('ff')))} L/h</div><div>{end_label}</div></div>
       <div class='bar'></div>
-      {''.join(bars)}
+      {''.join(ticks)}
     </div>
-    """, unsafe_allow_html=True)
+    """
+    )
+    import streamlit.components.v1 as components
+    components.html(html, height=120, scrolling=False)
 
 # ---------- clocks ----------
 clock=None
@@ -283,25 +303,38 @@ st.markdown("---")
 st.subheader("Resultados da Perna")
 
 st.markdown(f"### Segmento 1 — {segA['name']}")
-c1,c2,c3,c4 = st.columns(4)
+c1,c2,c3,c4,c5 = st.columns(5)
 c1.metric("Alt ini→fim (ft)", f"{int(round(segA['alt0']))} → {int(round(segA['alt1']))}")
-c2.metric("TH/MH (°)", f"{r_ang(segA['TH'])}T / {r_ang(segA['MH'])}M")
+c2.metric("TH/MH (°)", f"{r_ang(segA['TH'])}T / { r_ang(segA['MH']) }M")
 c3.metric("GS/TAS (kt)", f"{r_unit(segA['GS'])} / {r_unit(segA['TAS'])}")
 c4.metric("FF (L/h)", f"{r_unit(segA['ff'])}")
-c5,c6,c7 = st.columns(3)
-c5.metric("Tempo", mmss(int(segA['time'])))
-c6.metric("Dist (nm)", f"{segA['dist']:.1f}")
-c7.metric("Burn (L)", f"{r_1(segA['burn']):.1f}")
+if profile=="CLIMB":
+    c5.metric("ROC @ início (ft/min)", r_unit(ROC))
+else:
+    c5.metric("ROD calc (ft/min)", r_unit(ROD))
+
+b1,b2,b3 = st.columns(3)
+b1.metric("Tempo", mmss(int(segA['time'])))
+b2.metric("Dist (nm)", f"{segA['dist']:.1f}")
+b3.metric("Burn (L)", f"{r_1(segA['burn']):.1f}")
+
 EF0=float(st.session_state.carry_efob)
 base1 = clock
 cpA = build_cps(segA, int(CK), base1, EF0)
 start_lbl = base1.strftime('%H:%M') if base1 else 'T+0'
 end_lbl = (base1 + dt.timedelta(seconds=int(segA['time']))).strftime('%H:%M') if base1 else mmss(int(segA['time']))
 st.caption("Checkpoints do segmento (T+ reinicia)")
+# mostrar ETOs (início/fim do segmento)
+st.metric("ETO início/fim", f"{start_lbl} → {end_lbl}")
 timeline(segA, cpA, start_lbl, end_lbl)
 
 if segB:
-    st.info(("TOC" if profile=="CLIMB" else "TOD") + f" — {mmss(int(segA['time']))} • {segA['dist']:.1f} nm")
+    # TOC/TOD destacado com horas reais
+if clock:
+    toc_time = (base1 + dt.timedelta(seconds=int(segA['time']))).strftime('%H:%M')
+else:
+    toc_time = mmss(int(segA['time']))
+st.info(("TOC" if profile=="CLIMB" else "TOD") + f" — {toc_time} • {segA['dist']:.1f} nm")
     st.markdown(f"### Segmento 2 — {segB['name']}")
     d1,d2,d3,d4 = st.columns(4)
     d1.metric("Alt ini→fim (ft)", f"{int(round(segB['alt0']))} → {int(round(segB['alt1']))}")
@@ -336,7 +369,7 @@ if st.button("➕ Construir próxima perna (guardar esta)", type="primary"):
     })
     st.session_state.carry_alt = (segA['alt1'] if not segB else segB['alt1'])
     st.session_state.carry_efob = EF_END
-    st.experimental_rerun()
+    st.toast("Perna adicionada. Próxima perna pronta.")
 
 # ---------- histórico ----------
 st.subheader("Histórico de Pernas")
