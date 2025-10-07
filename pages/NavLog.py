@@ -95,6 +95,17 @@ ens("qnh",1013); ens("oat",15); ens("mag_var",1); ens("mag_is_e",False); ens("we
 ens("rpm_climb",2250); ens("rpm_cruise",2100); ens("rpm_desc",1800); ens("desc_angle",3.0)
 ens("start_clock",""); ens("carry_alt",0.0); ens("carry_efob",85.0); ens("legs",[])
 
+# ==== helpers de UI ====
+def render_history():
+    st.subheader("Histórico")
+    if not st.session_state.legs:
+        st.caption("(sem pernas guardadas)")
+    else:
+        for i,leg in enumerate(st.session_state.legs, start=1):
+            st.markdown(f"**Perna {i}** · TC {rint(leg['inputs']['TC'])}°T · {leg['inputs']['Dist']:.1f} nm · ETE {mmss(leg['ete_sec'])} · End Alt {int(leg['end_alt'])} ft · EFOB {leg['end_efob']:.1f} L")
+            for j,seg in enumerate(leg['segments'], start=1):
+                st.caption(f"Seg{j}: {seg['name']} · TH/MH {rang(seg['TH'])}T/{rang(seg['MH'])}M · GS/TAS {rint(seg['GS'])}/{rint(seg['TAS'])} · {mmss(seg['time'])} · {seg['dist']:.1f} nm · Burn {r10f(seg['burn']):.1f} L")
+
 # ==== cabeçalho ====
 st.title("NAVLOG — Performance v10 (AFM)")
 with st.expander("Cabeçalho / Performance", expanded=True):
@@ -113,6 +124,9 @@ with st.expander("Cabeçalho / Performance", expanded=True):
         st.session_state.rpm_cruise=st.number_input("Cruise RPM",1800,2265,int(st.session_state.rpm_cruise),step=5)
         st.session_state.rpm_desc=st.number_input("Descent RPM",1600,2265,int(st.session_state.rpm_desc),step=5)
         st.session_state.desc_angle=st.number_input("Ângulo desc (°)",1.0,6.0,float(st.session_state.desc_angle),step=0.1)
+
+# Mostra histórico primeiro (pedido do utilizador)
+render_history()
 
 # ==== entrada perna ====
 st.subheader("Perna atual — entrada")
@@ -189,15 +203,16 @@ def cps(seg,every_min,base_clk,efob_start):
 # ==== UI styles ====
 CSS="""
 <style>
-.card{border:1px solid #eee;border-radius:12px;padding:14px 16px;margin:10px 0;background:#fff}
-.hlite{background:#f8fbff;border:1px solid #dde9ff}
+*{letter-spacing:0.1px}
+.card{border:1px solid #e9eef5;border-radius:14px;padding:16px 18px;margin:12px 0;background:#fff;box-shadow:0 2px 6px rgba(16,24,40,.06)}
+.hlite{background:#f6f9ff;border:1px solid #dbe7ff}
 .badge{display:inline-block;padding:6px 12px;border-radius:999px;background:#155eef; color:#fff; font-weight:700; letter-spacing:0.3px}
-.sep{height:1px;background:#eee;margin:10px 0}
-.small{font-size:12px;color:#666}
-.tl{position:relative;margin:6px 0 4px 0;padding-top:16px}
-.tl .bar{height:3px;background:#e6e6e6;border-radius:2px}
-.tl .tick{position:absolute;top:6px;width:2px;height:10px;background:#333}
-.tl .lbl{position:absolute;top:18px;transform:translateX(-50%);text-align:center;font-size:11px;color:#333}
+.sep{height:1px;background:#edf0f3;margin:10px 0}
+.small{font-size:12px;color:#667085}
+.tl{position:relative;margin:8px 0 6px 0;padding-top:18px}
+.tl .bar{height:3px;background:#e6eaf0;border-radius:2px}
+.tl .tick{position:absolute;top:6px;width:2px;height:10px;background:#111827}
+.tl .lbl{position:absolute;top:18px;transform:translateX(-50%);text-align:center;font-size:11px;color:#111827;white-space:nowrap}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -283,16 +298,8 @@ with a2:
 
 st.caption("Dica: usa 'Guardar' para manter a perna no histórico. 'Definir próxima' apenas propaga Alt/EFOB sem gravar.")
 
-# ==== histórico compacto ====
-st.subheader("Histórico")
-if not st.session_state.legs:
-    st.caption("(sem pernas guardadas)")
-else:
-    for i,leg in enumerate(st.session_state.legs, start=1):
-        st.markdown(f"**Perna {i}** · TC {rint(leg['inputs']['TC'])}°T · {leg['inputs']['Dist']:.1f} nm · ETE {mmss(leg['ete_sec'])} · End Alt {int(leg['end_alt'])} ft · EFOB {leg['end_efob']:.1f} L")
-        for j,seg in enumerate(leg['segments'], start=1):
-            st.caption(f"Seg{j}: {seg['name']} · TH/MH {rang(seg['TH'])}T/{rang(seg['MH'])}M · GS/TAS {rint(seg['GS'])}/{rint(seg['TAS'])} · {mmss(seg['time'])} · {seg['dist']:.1f} nm · Burn {r10f(seg['burn']):.1f} L")
-
+# ==== histórico (já renderizado no topo) ====
+st.markdown("")
 
 
 
