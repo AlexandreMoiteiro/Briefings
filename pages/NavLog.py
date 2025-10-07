@@ -3,21 +3,6 @@ import datetime as dt
 import math
 from math import sin, asin, radians, degrees
 
-"""
-NAVLOG — Streamlined UI & cleaner flow
-- Cartões por leg com header compacto + acumulados
-- Perfil real da leg (Climb + Cruise, Descent + Cruise, Level, etc.)
-- Timeline com margem extra e marcadores TOC/TOD "pill" sem sobreposição
-- Acumulados (tempo e combustível) no header e rodapé
-- Cruise RPM por defeito = 2100
-- Botão para download de "NAVLOG_FORM.pdf" (caminho exato no diretório da app)
-
-Observações:
-- Mantida a lógica aerodinâmica original, com pequenas limpezas
-- Melhorado CSS, hierarquia visual e copy em PT
-- Removidas menções a v9/AFM no título e no conteúdo
-"""
-
 # =============================
 # CONFIG & THEME
 # =============================
