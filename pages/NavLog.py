@@ -303,6 +303,10 @@ for k in range(1, 100):  # limite superior arbitrário
 st.markdown("---")
 st.subheader("Resultados da Perna")
 
+# Destaque: quando atingimos a altitude alvo
+if t1_sec > 0:
+    st.info(f"Chegada à altitude alvo em {mmss_from_seconds(int(t1_sec))} • {d1_nm:.1f} nm desde o início")
+
 cA,cB,cC = st.columns(3)
 with cA:
     st.metric("Vy (kt)", _round_unit(vy_kt))
@@ -346,6 +350,7 @@ if st.button("Usar estes resultados como ponto de partida da próxima perna", ty
 st.markdown("---")
 st.subheader("Cumulativos da Sessão")
 st.write(f"Tempo total: {hhmmss_from_seconds(int(st.session_state.carry_time_sec))} • Dist total: {st.session_state.carry_dist_nm:.1f} nm • EFOB atual: {st.session_state.carry_efoB_L:.1f} L")
+
 
 
 
