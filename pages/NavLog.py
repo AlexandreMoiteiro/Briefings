@@ -1,53 +1,21 @@
-# app.py — NAVLOG v9 (AFM) — UI limpa, estruturada, cada leg é uma caixinha
-# Planeamento por pernas com TOC/TOD como FIX; TAS/FF por tabelas AFM;
-# ROC (climb) por tabela; ROD (descent) por ângulo; gestão de legs (mover/duplicar/apagar).
-# Foco em apresentação clara: inputs vs resultados, KPIs, TOC/TOD destacado, timeline legível.
+# app.py — NAVLOG v9 (AFM) — UI limpa, fluxo lógico e acumulados por leg
+# - Cada leg é uma caixinha: header compacto + expander de detalhes
+# - Resumo global no topo (ETE total / Burn total / EFOB final)
+# - TOC/TOD destacados (sem sobrepor checkpoints)
+# - ROC/ROD visíveis
+# - Acumulado (tempo e combustível) ao fim de cada leg
+# - Cruise RPM = 2100 por defeito
 
 import streamlit as st
 import datetime as dt
 import math
 from math import sin, asin, radians, degrees
-from copy import deepcopy
 
-# ========= CONFIG =========
-st.set_page_config(page_title="NAVLOG v9 (AFM) — Clean Cards", layout="wide", initial_sidebar_state="collapsed")
+# ====== CONFIG ======
+st.set_page_config(page_title="NAVLOG v9 (AFM) — Clean Flow", layout="wide", initial_sidebar_state="collapsed")
 
-# ========= STYLE =========
-CSS = """
-<style>
-:root { --card-br:#e8e9ef; --muted:#6b7280; --bg:#fff; }
-.card{border:1px solid var(--card-br);border-radius:14px;padding:14px 16px;margin-bottom:14px;background:var(--bg);
-      box-shadow:0 1px 2px rgba(0,0,0,0.04);}
-.hint{color:var(--muted);font-size:12px}
-.kpi{background:#fafafa;border:1px solid #eee;border-radius:12px;padding:10px 12px;min-width:140px}
-.row{display:flex;gap:12px;flex-wrap:wrap;margin:6px 0 10px 0}
-.badge{display:inline-block;background:#eef1f5;border-radius:999px;padding:2px 8px;font-size:11px;margin-left:6px}
-.sep{height:1px;background:#eee;margin:10px 0}
-.tl{position:relative;margin:8px 0 8px 0}
-.tl .bar{height:6px;background:#eef1f5;border-radius:3px}
-.tl .tick{position:absolute;top:10px;width:2px;height:14px;background:#333}
-.tl .cp-lbl{position:absolute;top:28px;transform:translateX(-50%);text-align:center;font-size:11px;color:#333;white-space:nowrap}
-.tl .tocdot, .tl .toddot{
-  position:absolute;top:-8px;width:16px;height:16px;border-radius:50%;transform:translateX(-50%);
-  border:2px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,0.15)
-}
-.tl .tocdot{background:#1f77b4}
-.tl .toddot{background:#d62728}
-.tl .head{display:flex;justify-content:space-between;font-size:12px;color:#555;margin-bottom:6px}
-.pill{display:inline-flex;gap:8px;align-items:center;background:#f6f7fb;border:1px solid #e7e8ef;border-radius:999px;padding:4px 10px;font-size:12px;color:#333}
-.pill .dot{width:8px;height:8px;border-radius:50%}
-.small{font-size:12px;color:#4b5563}
-.btnrow{display:flex;gap:6px;flex-wrap:wrap}
-.btn{font-size:12px;border:1px solid #ddd;border-radius:8px;padding:4px 8px;background:#fafafa;cursor:pointer}
-.btn:hover{background:#f2f2f2}
-.warn{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:10px;padding:8px 10px}
-.ok{background:#eefbf4;border:1px solid #b7f0ce;color:#065f46;border-radius:10px;padding:8px 10px}
-</style>
-"""
-st.markdown(CSS, unsafe_allow_html=True)
-
-# ========= UTILS =========
-rt10 = lambda s: max(10, int(round(s/10.0)*10)) if s > 0 else 0
+# ====== UTILS ======
+rt10 = lambda s: max(10, int(round(s/10.0)*10)) if s>0 else 0
 mmss = lambda t: f"{t//60:02d}:{t%60:02d}"
 hhmmss = lambda t: f"{t//3600:02d}:{(t%3600)//60:02d}:{t%60:02d}"
 rang = lambda x: int(round(float(x))) % 360
@@ -74,7 +42,7 @@ def wind_triangle(tc, tas, wdir, wkt):
 
 apply_var = lambda th, var, east_is_neg=False: wrap360(th - var if east_is_neg else th + var)
 
-# ========= AFM TABLES (Tecnam P2008 — resumo) =========
+# ====== AFM TABLES (Tecnam P2008 — resumo) ======
 ROC_ENR = {
     0:{-25:981,0:835,25:704,50:586}, 2000:{-25:870,0:726,25:597,50:481},
     4000:{-25:759,0:617,25:491,50:377}, 6000:{-25:648,0:509,25:385,50:273},
@@ -97,7 +65,8 @@ press_alt = lambda alt, qnh: float(alt) + (1013.0 - float(qnh))*30.0
 clamp = lambda v, lo, hi: max(lo, min(hi, v))
 
 def interp1(x, x0, x1, y0, y1):
-    if x1 == x0: return y0
+    if x1 == x0:
+        return y0
     t = (x - x0) / (x1 - x0)
     return y0 + t*(y1 - y0)
 
@@ -108,6 +77,7 @@ def cruise_lookup(pa, rpm, oat, weight):
     p0 = max([p for p in pas if p <= pa_c])
     p1 = min([p for p in pas if p >= pa_c])
     table0 = CRUISE[p0]; table1 = CRUISE[p1]
+
     def v(tab):
         rpms = sorted(tab.keys())
         if rpm in tab: return tab[rpm]
@@ -119,12 +89,20 @@ def cruise_lookup(pa, rpm, oat, weight):
         (tas_lo, ff_lo), (tas_hi, ff_hi) = tab[lo], tab[hi]
         t = (rpm - lo) / (hi - lo) if hi != lo else 0
         return (tas_lo + t*(tas_hi - tas_lo), ff_lo + t*(ff_hi - ff_lo))
+
     tas0, ff0 = v(table0); tas1, ff1 = v(table1)
-    tas = interp1(pa_c, p0, p1, tas0, tas1); ff = interp1(pa_c, p0, p1, ff0, ff1)
+    tas = interp1(pa_c, p0, p1, tas0, tas1)
+    ff  = interp1(pa_c, p0, p1, ff0,  ff1)
+
     if oat is not None:
         dev = oat - isa_temp(pa_c)
-        if dev > 0: tas *= 1 - 0.02*(dev/15.0); ff *= 1 - 0.025*(dev/15.0)
-        elif dev < 0: tas *= 1 + 0.01*((-dev)/15.0); ff *= 1 + 0.03*((-dev)/15.0)
+        if dev > 0:
+            tas *= 1 - 0.02*(dev/15.0)
+            ff  *= 1 - 0.025*(dev/15.0)
+        elif dev < 0:
+            tas *= 1 + 0.01*((-dev)/15.0)
+            ff  *= 1 + 0.03*((-dev)/15.0)
+
     tas *= (1.0 + 0.033*((650.0 - float(weight))/100.0))
     return max(0.0, tas), max(0.0, ff)
 
@@ -142,7 +120,7 @@ def roc_interp(pa, temp):
     v10, v11 = ROC_ENR[p1][t0], ROC_ENR[p1][t1]
     v0 = interp1(t, t0, t1, v00, v01)
     v1 = interp1(t, t0, t1, v10, v11)
-    return max(1.0, interp1(pa_c, p0, p1, v0, v1)*ROC_FACTOR)
+    return max(1.0, interp1(pa_c, p0, p1, v0, v1) * ROC_FACTOR)
 
 def vy_interp(pa):
     pas = sorted(VY.keys())
@@ -151,70 +129,68 @@ def vy_interp(pa):
     p1 = min([p for p in pas if p >= pa_c])
     return interp1(pa_c, p0, p1, VY[p0], VY[p1])
 
-# ========= STATE =========
+# ====== STATE ======
 def ens(k, v): return st.session_state.setdefault(k, v)
 
-ens("mag_var", 1); ens("mag_is_e", False); ens("qnh", 1013); ens("oat", 15)
+ens("mag_var", 1)
+ens("mag_is_e", False)
+ens("qnh", 1013)
+ens("oat", 15)
 ens("weight", 650.0)
-ens("rpm_climb", 2250); ens("rpm_cruise", 2100); ens("rpm_desc", 1800)
+ens("rpm_climb", 2250)
+ens("rpm_cruise", 2100)  # por defeito
+ens("rpm_desc", 1800)
 ens("desc_angle", 3.0)
-ens("start_clock", ""); ens("start_efob", 85.0)
-ens("legs", []); ens("computed", [])
+ens("start_clock", "")
+ens("start_efob", 85.0)
+ens("legs", [])
+ens("computed", [])
 
-# ========= HEADER =========
-left, right = st.columns([2,1])
-with left:
-    st.title("NAVLOG — v9 (AFM) • Caixinhas")
-with right:
-    if st.button("➕ Nova leg", type="primary", use_container_width=True):
-        pref = None
-        if st.session_state.computed:
-            ca = st.session_state.computed[-1]["carry_alt_after"]
-            pref = dict(Alt0=r10f(ca), Alt1=r10f(ca))
-        elif st.session_state.legs:
-            pref = dict(Alt0=st.session_state.legs[-1]['Alt1'], Alt1=st.session_state.legs[-1]['Alt1'])
-        st.session_state.legs.append(dict(TC=90.0, Dist=10.0, Alt0=0.0, Alt1=4000.0, Wfrom=180, Wkt=15, CK=2, **(pref or {})))
+# ====== STYLE ======
+CSS = """
+<style>
+.card{border:1px solid #e7e7e9;border-radius:14px;padding:14px 16px;margin-bottom:12px;background:#fff;
+      box-shadow:0 1px 2px rgba(0,0,0,0.04)}
+.hrow{display:flex;gap:12px;flex-wrap:wrap;margin:6px 0 10px 0}
+.kpi{background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px 10px;min-width:120px}
+.tl{position:relative;margin:8px 0 10px 0}
+.tl .bar{height:6px;background:#eef1f5;border-radius:3px}
+.tl .tick{position:absolute;top:10px;width:2px;height:14px;background:#333}
+.tl .cp-lbl{position:absolute;top:28px;transform:translateX(-50%);text-align:center;font-size:11px;color:#333;white-space:nowrap}
+.tl .tocdot,.tl .toddot{position:absolute;top:-6px;width:14px;height:14px;border-radius:50%;transform:translateX(-50%);
+                         border:2px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,0.15)}
+.tl .tocdot{background:#1f77b4}
+.tl .toddot{background:#d62728}
+.tl .head{display:flex;justify-content:space-between;font-size:12px;color:#555;margin-bottom:6px}
+.badge{display:inline-block;background:#eef1f5;border-radius:999px;padding:2px 8px;font-size:11px;margin-left:6px}
+.leg-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.leg-title{font-weight:600;font-size:1.05rem}
+.sep{height:1px;background:#eee;margin:8px 0}
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
 
-with st.expander("Parâmetros Globais", expanded=False):
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.session_state.qnh = st.number_input("QNH (hPa)", 900, 1050, int(st.session_state.qnh))
-        st.session_state.oat = st.number_input("OAT (°C)", -40, 50, int(st.session_state.oat))
-    with c2:
-        st.session_state.mag_var = st.number_input("Mag Var (°)", 0, 30, int(st.session_state.mag_var))
-        st.session_state.mag_is_e = st.selectbox("Var E/W", ["W","E"], index=(1 if st.session_state.mag_is_e else 0)) == "E"
-    with c3:
-        st.session_state.weight = st.number_input("Peso (kg)", 450.0, 700.0, float(st.session_state.weight), step=1.0)
-        st.session_state.start_clock = st.text_input("Hora off-blocks (HH:MM)", st.session_state.start_clock)
-    with c4:
-        st.session_state.rpm_climb = st.number_input("Climb RPM", 1800, 2265, int(st.session_state.rpm_climb), step=5)
-        st.session_state.rpm_cruise = st.number_input("Cruise RPM", 1800, 2265, int(st.session_state.rpm_cruise), step=5)
-        st.session_state.rpm_desc = st.number_input("Descent RPM", 1600, 2265, int(st.session_state.rpm_desc), step=5)
-        st.session_state.desc_angle = st.number_input("Ângulo desc (°)", 1.0, 6.0, float(st.session_state.desc_angle), step=0.1)
-    st.session_state.start_efob = st.number_input("EFOB inicial (L)", 0.0, 200.0, float(st.session_state.start_efob), step=0.5)
-    st.caption("Sugestão: mantém esta secção recolhida durante o planeamento por legs para reduzir ruído visual.")
-
-# ========= TIMELINE =========
+# ====== TIMELINE ======
 def timeline(seg, cps, start_label, end_label, toc_tod=None):
     total = max(1, int(seg['time']))
-    bars = []
-    head = f"<div class='head'><div>{start_label}</div><div>GS {rint(seg['GS'])} kt · TAS {rint(seg['TAS'])} kt · FF {rint(seg['ff'])} L/h</div><div>{end_label}</div></div>"
-    html = f"<div class='tl'>{head}<div class='bar'></div>"
-    # CP ticks
+    html = f"<div class='tl'><div class='head'><div>{start_label}</div>" \
+           f"<div>GS {rint(seg['GS'])} kt · TAS {rint(seg['TAS'])} kt · FF {rint(seg['ff'])} L/h</div>" \
+           f"<div>{end_label}</div></div><div class='bar'></div>"
+    parts = []
     for cp in cps:
         pct = (cp['t']/total)*100.0
-        bars.append(f"<div class='tick' style='left:{pct:.2f}%;'></div>")
-        lbl = f"<div class='cp-lbl' style='left:{pct:.2f}%;'><div>T+{cp['min']}m</div><div>{cp['nm']} nm</div>" + (f"<div>{cp['eto']}</div>" if cp['eto'] else "") + f"<div>EFOB {cp['efob']:.1f}</div></div>"
-        bars.append(lbl)
-    # TOC/TOD marker
+        parts.append(f"<div class='tick' style='left:{pct:.2f}%;'></div>")
+        lbl = f"<div class='cp-lbl' style='left:{pct:.2f}%;'><div>T+{cp['min']}m</div><div>{cp['nm']} nm</div>" + \
+              (f"<div>{cp['eto']}</div>" if cp['eto'] else "") + f"<div>EFOB {cp['efob']:.1f}</div></div>"
+        parts.append(lbl)
     if toc_tod is not None and 0 < toc_tod['t'] < total:
         pct = (toc_tod['t']/total)*100.0
         cls = 'tocdot' if toc_tod['type'] == 'TOC' else 'toddot'
-        bars.append(f"<div class='{cls}' title='{toc_tod['type']}' style='left:{pct:.2f}%;'></div>")
-    html += ''.join(bars) + "</div>"
+        parts.append(f"<div class='{cls}' title='{toc_tod['type']}' style='left:{pct:.2f}%;'></div>")
+    html += ''.join(parts) + "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
-# ========= CORE CALC =========
+# ====== CÁLCULO DE UMA LEG ======
 def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
     qnh, oat, mag_var, mag_is_e = params['qnh'], params['oat'], params['mag_var'], params['mag_is_e']
     rpm_climb, rpm_cruise, rpm_desc, desc_angle, weight = params['rpm_climb'], params['rpm_cruise'], params['rpm_desc'], params['desc_angle'], params['weight']
@@ -236,8 +212,10 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
     MHd = apply_var(THd, mag_var, mag_is_e)
 
     ROD = max(100.0, GSde * 5.0 * (desc_angle / 3.0))  # ft/min
+
     profile = "LEVEL" if abs(alt1 - alt0) < 1e-6 else ("CLIMB" if alt1 > alt0 else "DESCENT")
-    segA = {}; segB = None; END_ALT = alt0; toc_tod_marker = None
+    segA = {}; segB = None; END_ALT = alt0
+    toc_tod_marker = None
 
     if profile == "CLIMB":
         t_need = (alt1 - alt0) / max(ROC, 1e-6)  # min
@@ -295,8 +273,17 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
             out.append({"t":t, "min":int(t/60), "nm":round(d,1), "eto":eto, "efob":efob})
         return out
 
-    return dict(segments=segments, tot_sec=tot_sec, tot_burn=tot_burn, roc=ROC, rod=ROD, toc_tod=toc_tod_marker, ck_func=cps)
+    return {
+        "segments": segments,
+        "tot_sec": tot_sec,
+        "tot_burn": tot_burn,
+        "roc": ROC,
+        "rod": ROD,
+        "toc_tod": toc_tod_marker,
+        "ck_func": cps
+    }
 
+# ====== RECOMPUTE (com acumulados) ======
 def recompute_all():
     st.session_state.computed = []
     params = dict(
@@ -305,57 +292,82 @@ def recompute_all():
         rpm_cruise=st.session_state.rpm_cruise, rpm_desc=st.session_state.rpm_desc,
         desc_angle=st.session_state.desc_angle, weight=st.session_state.weight
     )
+
     base_time = None
     if st.session_state.start_clock.strip():
         try:
             h, m = map(int, st.session_state.start_clock.split(":"))
             base_time = dt.datetime.combine(dt.date.today(), dt.time(h, m))
-        except: base_time = None
+        except:
+            base_time = None
 
     carry_efob = float(st.session_state.start_efob)
     clock = base_time
+    cum_sec = 0
+    cum_burn = 0.0
 
-    for leg in st.session_state.legs:
-        res = build_segments(leg['TC'], leg['Dist'], leg['Alt0'], leg['Alt1'],
-                             leg['Wfrom'], leg['Wkt'], leg['CK'], params)
-        segs = res["segments"]
-        # EFOB start por segmento
+    for idx, leg in enumerate(st.session_state.legs):
+        res = build_segments(
+            tc=leg['TC'], dist=leg['Dist'], alt0=leg['Alt0'], alt1=leg['Alt1'],
+            wfrom=leg['Wfrom'], wkt=leg['Wkt'], ck_min=leg['CK'], params=params
+        )
+
         EF0 = carry_efob
+        segs = res["segments"]
         segs[0]["EFOB_start"] = EF0
         if len(segs) > 1:
             EF1 = max(0.0, r10f(EF0 - segs[0]['burn']))
             segs[1]["EFOB_start"] = EF1
-        # Relógio
+
         base1 = clock
         if base1:
             segs[0]["clock_start"] = base1.strftime('%H:%M')
             segs[0]["clock_end"] = (base1 + dt.timedelta(seconds=segs[0]['time'])).strftime('%H:%M')
         else:
-            segs[0]["clock_start"] = 'T+0'; segs[0]["clock_end"] = mmss(segs[0]['time'])
+            segs[0]["clock_start"] = 'T+0'
+            segs[0]["clock_end"] = mmss(segs[0]['time'])
         if len(segs) > 1:
             base2 = (base1 + dt.timedelta(seconds=segs[0]['time'])) if base1 else None
             if base2:
                 segs[1]["clock_start"] = base2.strftime('%H:%M')
                 segs[1]["clock_end"] = (base2 + dt.timedelta(seconds=segs[1]['time'])).strftime('%H:%M')
             else:
-                segs[1]["clock_start"] = 'T+0'; segs[1]["clock_end"] = mmss(segs[1]['time'])
-        # Checkpoints
+                segs[1]["clock_start"] = 'T+0'
+                segs[1]["clock_end"] = mmss(segs[1]['time'])
+
+        # checkpoints
         cpA = res["ck_func"](segs[0], int(leg['CK']), base1, EF0)
-        cpB = []
-        if len(segs) > 1:
-            EF1 = max(0.0, r10f(EF0 - segs[0]['burn']))
-            base2 = (base1 + dt.timedelta(seconds=segs[0]['time'])) if base1 else None
-            cpB = res["ck_func"](segs[1], int(leg['CK']), base2, EF1)
-        # Atualiza carries
+        cpB = res["ck_func"](segs[1], int(leg['CK']),
+                             (base1 + dt.timedelta(seconds=segs[0]['time'])) if base1 and len(segs)>1 else None,
+                             max(0.0, r10f(EF0 - segs[0]['burn'])) if len(segs)>1 else None) if len(segs)>1 else []
+
+        # atualizar carries e acumulados
         clock = (clock + dt.timedelta(seconds=res['tot_sec'])) if clock else None
         carry_efob = max(0.0, r10f(carry_efob - sum(s['burn'] for s in segs)))
         carry_alt = segs[-1]['alt1']
+        cum_sec += res['tot_sec']
+        cum_burn = r10f(cum_burn + res['tot_burn'])
 
-        st.session_state.computed.append(dict(
-            segments=segs, tot_sec=res["tot_sec"], tot_burn=res["tot_burn"],
-            roc=res["roc"], rod=res["rod"], toc_tod=res["toc_tod"],
-            cpA=cpA, cpB=cpB, carry_efob_after=carry_efob, carry_alt_after=carry_alt
-        ))
+        st.session_state.computed.append({
+            "segments": segs,
+            "tot_sec": res["tot_sec"],
+            "tot_burn": res["tot_burn"],
+            "roc": res["roc"],
+            "rod": res["rod"],
+            "toc_tod": res["toc_tod"],
+            "cpA": cpA, "cpB": cpB,
+            "carry_efob_after": carry_efob,
+            "carry_alt_after": carry_alt,
+            "cum_sec": cum_sec,
+            "cum_burn": cum_burn
+        })
+
+# ====== CRUD ======
+def add_leg(prefill=None):
+    d = dict(TC=90.0, Dist=10.0, Alt0=0.0, Alt1=4000.0, Wfrom=180, Wkt=15, CK=2)
+    if prefill: d.update(prefill)
+    st.session_state.legs.append(d)
+    recompute_all()
 
 def update_leg(i, vals):
     st.session_state.legs[i].update(vals)
@@ -365,152 +377,159 @@ def delete_leg(i):
     st.session_state.legs.pop(i)
     recompute_all()
 
-def move_leg(i, direction):
-    j = i + ( -1 if direction=="up" else 1 )
-    if 0 <= j < len(st.session_state.legs):
-        st.session_state.legs[i], st.session_state.legs[j] = st.session_state.legs[j], st.session_state.legs[i]
-        recompute_all()
+# ====== HEADER GLOBAL ======
+st.title("NAVLOG — v9 (AFM) • Fluxo Limpo")
+with st.form("hdr"):
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.session_state.qnh = st.number_input("QNH (hPa)", 900, 1050, int(st.session_state.qnh))
+        st.session_state.oat = st.number_input("OAT (°C)", -40, 50, int(st.session_state.oat))
+    with c2:
+        st.session_state.mag_var = st.number_input("Mag Var (°)", 0, 30, int(st.session_state.mag_var))
+        st.session_state.mag_is_e = st.selectbox("Var E/W", ["W","E"], index=(1 if st.session_state.mag_is_e else 0)) == "E"
+    with c3:
+        st.session_state.weight = st.number_input("Peso (kg)", 450.0, 700.0, float(st.session_state.weight), step=1.0)
+        st.session_state.start_clock = st.text_input("Hora off-blocks (HH:MM)", st.session_state.start_clock)
+    with c4:
+        st.session_state.rpm_climb = st.number_input("Climb RPM", 1800, 2265, int(st.session_state.rpm_climb), step=5)
+        st.session_state.rpm_cruise = st.number_input("Cruise RPM", 1800, 2265, int(st.session_state.rpm_cruise), step=5)
+        st.session_state.rpm_desc = st.number_input("Descent RPM", 1600, 2265, int(st.session_state.rpm_desc), step=5)
+        st.session_state.desc_angle = st.number_input("Ângulo desc (°)", 1.0, 6.0, float(st.session_state.desc_angle), step=0.1)
+    st.session_state.start_efob = st.number_input("EFOB inicial (L)", 0.0, 200.0, float(st.session_state.start_efob), step=0.5)
+    st.form_submit_button("Aplicar parâmetros")
 
-def duplicate_leg(i):
-    st.session_state.legs.insert(i+1, deepcopy(st.session_state.legs[i]))
+# ====== AÇÕES ======
+act1, act2 = st.columns([1,3])
+with act1:
+    if st.button("➕ Nova leg", type="primary", use_container_width=True):
+        if st.session_state.computed:
+            pref = dict(Alt0=r10f(st.session_state.computed[-1]["carry_alt_after"]),
+                        Alt1=r10f(st.session_state.computed[-1]["carry_alt_after"]))
+        elif st.session_state.legs:
+            pref = dict(Alt0=st.session_state.legs[-1]['Alt1'], Alt1=st.session_state.legs[-1]['Alt1'])
+        else:
+            pref = None
+        add_leg(prefill=pref)
+with act2:
+    st.caption("Fluxo: define parâmetros globais → cria legs → edita nos cartões. Cada edição recalcula e **propaga** para as seguintes.")
+
+st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+
+# ====== CONTEÚDO ======
+if not st.session_state.legs:
+    st.info("Sem legs ainda. Clica **Nova leg** para começar.")
+else:
+    # Garantir cálculo
     recompute_all()
 
-# ========= DRAW =========
-if st.session_state.legs:
-    recompute_all()
-
-# Barra resumo global
-if st.session_state.computed:
+    # Resumo global (sempre visível no topo)
     total_time = sum(c["tot_sec"] for c in st.session_state.computed)
     total_burn = r10f(sum(c["tot_burn"] for c in st.session_state.computed))
-    final_efob = st.session_state.computed[-1]['carry_efob_after']
-    st.info(f"Resumo Global — ETE **{hhmmss(total_time)}** · Burn **{total_burn:.1f} L** · EFOB final **{final_efob:.1f} L**")
+    efob_final = st.session_state.computed[-1]['carry_efob_after']
+    s1, s2, s3 = st.columns(3)
+    with s1: st.metric("ETE total", hhmmss(total_time))
+    with s2: st.metric("Burn total (L)", f"{total_burn:.1f}")
+    with s3: st.metric("EFOB final (L)", f"{efob_final:.1f}")
 
-st.markdown("---")
+    st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
-if not st.session_state.legs:
-    st.info("Sem legs. Clique **➕ Nova leg** para criar a primeira.")
-else:
+    # Lista de legs (caixinhas)
     for i, leg in enumerate(st.session_state.legs):
         comp = st.session_state.computed[i]
+        segA = comp['segments'][0]
+        dist_total_leg = sum(s['dist'] for s in comp['segments'])
+
+        # ==== CARTÃO ====
         st.markdown("<div class='card'>", unsafe_allow_html=True)
 
-        # Header da caixinha
-        h1, h2 = st.columns([3,2])
-        with h1:
-            st.subheader(f"Leg {i+1} <span class='badge'>caixinha</span>", anchor=False)
-            st.caption("Inputs em cima, resultados em baixo. Edita e carrega Atualizar nesta caixinha.")
-        with h2:
-            colb1, colb2, colb3, colb4 = st.columns(4)
-            with colb1:
-                if st.button("▲", key=f"up_{i}", help="Mover para cima", use_container_width=True): move_leg(i, "up")
-            with colb2:
-                if st.button("▼", key=f"dn_{i}", help="Mover para baixo", use_container_width=True): move_leg(i, "down")
-            with colb3:
-                if st.button("✚", key=f"dup_{i}", help="Duplicar leg", use_container_width=True): duplicate_leg(i)
-            with colb4:
-                if st.button("🗑️", key=f"del_{i}", help="Apagar leg", use_container_width=True): delete_leg(i); st.stop()
+        # Header compacto da leg
+        hc1, hc2, hc3, hc4, hc5, hc6 = st.columns([3,2,2,2,2,2])
+        with hc1:
+            st.markdown(f"<div class='leg-head'><span class='leg-title'>Leg {i+1}</span>"
+                        f"<span class='badge'>{segA['name'].split('→')[0]}</span></div>", unsafe_allow_html=True)
+        with hc2: st.metric("ETE", hhmmss(comp["tot_sec"]))
+        with hc3: st.metric("Burn (L)", f"{comp['tot_burn']:.1f}")
+        with hc4: st.metric("ROC (ft/min)", rint(comp["roc"]))
+        with hc5: st.metric("ROD (ft/min)", rint(comp["rod"]))
+        with hc6: st.metric("Dist (nm)", f"{dist_total_leg:.1f}")
 
-        # Inputs
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            TC   = st.number_input(f"True Course (°T) — L{i+1}", 0.0, 359.9, float(leg['TC']), step=0.1, key=f"TC_{i}")
-            Dist = st.number_input(f"Distância (nm) — L{i+1}", 0.0, 500.0, float(leg['Dist']), step=0.1, key=f"Dist_{i}")
-        with c2:
-            Alt0 = st.number_input(f"Alt início (ft) — L{i+1}", 0.0, 30000.0, float(leg['Alt0']), step=50.0, key=f"Alt0_{i}")
-            Alt1 = st.number_input(f"Alt alvo (ft) — L{i+1}", 0.0, 30000.0, float(leg['Alt1']), step=50.0, key=f"Alt1_{i}")
-        with c3:
-            Wfrom = st.number_input(f"Vento FROM (°T) — L{i+1}", 0, 360, int(leg['Wfrom']), step=1, key=f"Wfrom_{i}")
-            Wkt   = st.number_input(f"Vento (kt) — L{i+1}", 0, 150, int(leg['Wkt']), step=1, key=f"Wkt_{i}")
-        with c4:
-            CK = st.number_input(f"Checkpoints (min) — L{i+1}", 1, 10, int(leg['CK']), step=1, key=f"CK_{i}")
+        # Detalhes & edição num expander (fluxo mais limpo)
+        with st.expander("Detalhes e edição desta leg", expanded=False):
+            # Inputs
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                TC = st.number_input(f"True Course (°T) — L{i+1}", 0.0, 359.9, float(leg['TC']), step=0.1, key=f"TC_{i}")
+                Dist = st.number_input(f"Distância (nm) — L{i+1}", 0.0, 500.0, float(leg['Dist']), step=0.1, key=f"Dist_{i}")
+            with c2:
+                Alt0 = st.number_input(f"Alt início (ft) — L{i+1}", 0.0, 30000.0, float(leg['Alt0']), step=50.0, key=f"Alt0_{i}")
+                Alt1 = st.number_input(f"Alt alvo (ft) — L{i+1}", 0.0, 30000.0, float(leg['Alt1']), step=50.0, key=f"Alt1_{i}")
+            with c3:
+                Wfrom = st.number_input(f"Vento FROM (°T) — L{i+1}", 0, 360, int(leg['Wfrom']), step=1, key=f"Wfrom_{i}")
+                Wkt   = st.number_input(f"Vento (kt) — L{i+1}", 0, 150, int(leg['Wkt']), step=1, key=f"Wkt_{i}")
+            with c4:
+                CK = st.number_input(f"Checkpoints (min) — L{i+1}", 1, 10, int(leg['CK']), step=1, key=f"CK_{i}")
 
-        # Botões de ação leg
-        a1, a2, a3 = st.columns([1,1,6])
-        with a1:
-            if st.button("Atualizar", key=f"upd_{i}", use_container_width=True):
-                update_leg(i, dict(TC=TC, Dist=Dist, Alt0=Alt0, Alt1=Alt1, Wfrom=Wfrom, Wkt=Wkt, CK=CK))
-        with a2:
-            if st.button("Reset inputs", key=f"rst_{i}", use_container_width=True):
-                update_leg(i, dict(TC=90.0, Dist=10.0, Alt0=0.0, Alt1=4000.0, Wfrom=180, Wkt=15, CK=2))
+            b1, b2, b3 = st.columns([1,1,6])
+            with b1:
+                if st.button("Atualizar", key=f"upd_{i}", use_container_width=True):
+                    update_leg(i, dict(TC=TC, Dist=Dist, Alt0=Alt0, Alt1=Alt1, Wfrom=Wfrom, Wkt=Wkt, CK=CK))
+            with b2:
+                if st.button("Apagar", key=f"del_{i}", use_container_width=True):
+                    delete_leg(i)
+                    st.stop()
 
-        # Avisos simples
-        if Dist <= 0:
-            st.markdown("<div class='warn'>Distância é 0 nm — o cálculo pode não ser útil.</div>", unsafe_allow_html=True)
-        if Wkt == 0:
-            st.markdown("<div class='hint'>Vento 0 kt — GS≈TAS (pode facilitar planeamento).</div>", unsafe_allow_html=True)
+            st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
-        st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+            # Segmento 1
+            st.markdown(f"**Segmento 1 — {segA['name']}**")
+            s1a, s1b, s1c, s1d = st.columns(4)
+            s1a.metric("Alt ini→fim (ft)", f"{int(round(segA['alt0']))} → {int(round(segA['alt1']))}")
+            s1b.metric("TH/MH (°)", f"{rang(segA['TH'])}T / {rang(segA['MH'])}M")
+            s1c.metric("GS/TAS (kt)", f"{rint(segA['GS'])} / {rint(segA['TAS'])}")
+            s1d.metric("FF (L/h)", f"{rint(segA['ff'])}")
+            s1e, s1f, s1g = st.columns(3)
+            s1e.metric("Tempo", mmss(segA['time']))
+            s1f.metric("Dist (nm)", f"{segA['dist']:.1f}")
+            s1g.metric("Burn (L)", f"{r10f(segA['burn']):.1f}")
 
-        # KPIs principais
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.metric("ETE da leg", hhmmss(comp["tot_sec"]))
-        with k2:
-            st.metric("Burn (L)", f"{comp['tot_burn']:.1f}")
-        with k3:
-            st.metric("ROC @PA0 (ft/min)", rint(comp["roc"]))
-        with k4:
-            st.metric("ROD alvo (ft/min)", rint(comp["rod"]))
+            st.caption("Checkpoints do Segmento 1")
+            start_lbl = segA.get("clock_start", "T+0"); end_lbl = segA.get("clock_end", mmss(segA['time']))
+            timeline(segA, comp["cpA"], start_lbl, end_lbl,
+                     toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segA)==0 else None)
 
-        # TOC/TOD “plaquinha”
-        if comp["toc_tod"]:
-            tt = comp["toc_tod"]["type"]; tsec = comp["toc_tod"]["t"]
-            nm_from_start = comp["segments"][0]["GS"]*(tsec/3600.0) if tt=="TOC" or tt=="TOD" else 0.0
-            colp1, colp2 = st.columns([2,3])
-            with colp1:
-                st.markdown(f"<div class='pill'><div class='dot' style='background:{'#1f77b4' if tt=='TOC' else '#d62728'}'></div><b>{tt}</b> · T+{mmss(tsec)}</div>", unsafe_allow_html=True)
-            with colp2:
-                st.caption(f"{tt} ocorre após **{mmss(tsec)}** · ~**{nm_from_start:.1f} nm** desde o início da leg")
-
-        # Segmento 1
-        segA = comp['segments'][0]
-        st.markdown("#### Segmento 1")
-        s1a,s1b,s1c,s1d = st.columns(4)
-        s1a.metric("Alt ini→fim (ft)", f"{int(round(segA['alt0']))} → {int(round(segA['alt1']))}")
-        s1b.metric("TH/MH (°)", f"{rang(segA['TH'])}T / {rang(segA['MH'])}M")
-        s1c.metric("GS/TAS (kt)", f"{rint(segA['GS'])} / {rint(segA['TAS'])}")
-        s1d.metric("FF (L/h)", f"{rint(segA['ff'])}")
-        s1e,s1f,s1g = st.columns(3)
-        s1e.metric("Tempo", mmss(segA['time']))
-        s1f.metric("Dist (nm)", f"{segA['dist']:.1f}")
-        s1g.metric("Burn (L)", f"{r10f(segA['burn']):.1f}")
-        st.caption("Checkpoints — Segmento 1")
-        timeline(segA, comp["cpA"], segA.get("clock_start","T+0"), segA.get("clock_end", mmss(segA['time'])),
-                 toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segA)==0 else None)
-
-        # Marcador TOC/TOD entre segmentos
-        if len(comp['segments']) > 1:
-            st.info(("TOC" if comp["toc_tod"] and comp["toc_tod"]["type"]=="TOC" else "TOD") +
-                    f" — {mmss(comp['segments'][0]['time'])} • {comp['segments'][0]['dist']:.1f} nm desde o início")
-
-            segB = comp['segments'][1]
-            st.markdown("#### Segmento 2")
-            s2a,s2b,s2c,s2d = st.columns(4)
-            s2a.metric("Alt ini→fim (ft)", f"{int(round(segB['alt0']))} → {int(round(segB['alt1']))}")
-            s2b.metric("TH/MH (°)", f"{rang(segB['TH'])}T / {rang(segB['MH'])}M")
-            s2c.metric("GS/TAS (kt)", f"{rint(segB['GS'])} / {rint(segB['TAS'])}")
-            s2d.metric("FF (L/h)", f"{rint(segB['ff'])}")
-            s2e,s2f,s2g = st.columns(3)
-            s2e.metric("Tempo", mmss(segB['time']))
-            s2f.metric("Dist (nm)", f"{segB['dist']:.1f}")
-            s2g.metric("Burn (L)", f"{r10f(segB['burn']):.1f}")
-            st.caption("Checkpoints — Segmento 2")
-            timeline(segB, comp["cpB"], segB.get("clock_start","T+0"), segB.get("clock_end", mmss(segB['time'])),
-                     toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segB)==1 else None)
-
-        # Totais da leg
-        st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
-        st.markdown(f"**Totais da leg** — ETE {hhmmss(comp['tot_sec'])} • Burn {comp['tot_burn']:.1f} L")
-        EF_START = comp['segments'][0].get("EFOB_start", None)
-        if EF_START is not None:
-            st.markdown(f"**EFOB** — Start {EF_START:.1f} L → End {comp['carry_efob_after']:.1f} L")
-
-        # Detalhes avançados (limpa o ruído para quem só quer o essencial)
-        with st.expander("Detalhes avançados (segmentos, vetores, consumos)", expanded=False):
-            st.write("Segmento 1:", segA)
+            # Segmento 2 (se existir)
             if len(comp['segments']) > 1:
-                st.write("Segmento 2:", comp['segments'][1])
+                segB = comp['segments'][1]
+                st.info(("TOC" if comp["toc_tod"] and comp["toc_tod"]["type"]=="TOC" else "TOD") +
+                        f" — {mmss(comp['segments'][0]['time'])} • {comp['segments'][0]['dist']:.1f} nm desde o início")
+                st.markdown(f"**Segmento 2 — {segB['name']}**")
+                s2a, s2b, s2c, s2d = st.columns(4)
+                s2a.metric("Alt ini→fim (ft)", f"{int(round(segB['alt0']))} → {int(round(segB['alt1']))}")
+                s2b.metric("TH/MH (°)", f"{rang(segB['TH'])}T / {rang(segB['MH'])}M")
+                s2c.metric("GS/TAS (kt)", f"{rint(segB['GS'])} / {rint(segB['TAS'])}")
+                s2d.metric("FF (L/h)", f"{rint(segB['ff'])}")
+                s2e, s2f, s2g = st.columns(3)
+                s2e.metric("Tempo", mmss(segB['time']))
+                s2f.metric("Dist (nm)", f"{segB['dist']:.1f}")
+                s2g.metric("Burn (L)", f"{r10f(segB['burn']):.1f}")
 
-        st.markdown("</div>", unsafe_allow_html=True)
+                st.caption("Checkpoints do Segmento 2")
+                start_lbl2 = segB.get("clock_start", "T+0"); end_lbl2 = segB.get("clock_end", mmss(segB['time']))
+                timeline(segB, comp["cpB"], start_lbl2, end_lbl2,
+                         toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segB)==1 else None)
+
+        # Rodapé do cartão: totais e ACUMULADOS (pedido)
+        st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+        colA, colB, colC = st.columns(3)
+        with colA:
+            st.markdown(f"**Totais da leg** — ETE {hhmmss(comp['tot_sec'])} • Burn {comp['tot_burn']:.1f} L")
+        with colB:
+            EF_START = comp['segments'][0].get("EFOB_start", None)
+            if EF_START is not None:
+                st.markdown(f"**EFOB** — Start {EF_START:.1f} L → End {comp['carry_efob_after']:.1f} L")
+        with colC:
+            st.markdown(f"**Acumulado até Leg {i+1}** — Tempo {hhmmss(comp['cum_sec'])} • Fuel {comp['cum_burn']:.1f} L")
+
+        st.markdown("</div>", unsafe_allow_html=True)  # end card
+
 
