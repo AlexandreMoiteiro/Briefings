@@ -1,9 +1,8 @@
-# app.py — NAVLOG v9 (AFM) — UI limpa, fluxo lógico e acumulados por leg
-# - Cada leg é uma caixinha: header compacto + expander de detalhes
-# - Resumo global no topo (ETE total / Burn total / EFOB final)
-# - TOC/TOD destacados (sem sobrepor checkpoints)
-# - ROC/ROD visíveis
-# - Acumulado (tempo e combustível) ao fim de cada leg
+# app.py — NAVLOG v9 (AFM) — Clean Flow + cumulativos no header + perfil correto + timeline sem sobreposição
+# - Cada leg é uma caixinha (cartão) com header compacto (inclui acumulados) e expander de detalhes
+# - Perfil da leg calculado pelos segmentos reais: "Climb + Cruise", "Descent + Cruise", "Level", etc.
+# - Timeline com padding/margem extra e "pill" TOC/TOD para evitar sobreposições
+# - Acumulado (tempo e combustível) no header e no rodapé de cada leg
 # - Cruise RPM = 2100 por defeito
 
 import streamlit as st
@@ -149,14 +148,14 @@ ens("computed", [])
 # ====== STYLE ======
 CSS = """
 <style>
-.card{border:1px solid #e7e7e9;border-radius:14px;padding:14px 16px;margin-bottom:12px;background:#fff;
+.card{border:1px solid #e7e7e9;border-radius:14px;padding:14px 16px;margin-bottom:14px;background:#fff;
       box-shadow:0 1px 2px rgba(0,0,0,0.04)}
 .hrow{display:flex;gap:12px;flex-wrap:wrap;margin:6px 0 10px 0}
 .kpi{background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px 10px;min-width:120px}
-.tl{position:relative;margin:8px 0 10px 0}
+.tl{position:relative;margin:8px 0 18px 0;padding-bottom:46px} /* mais espaço para labels */
 .tl .bar{height:6px;background:#eef1f5;border-radius:3px}
 .tl .tick{position:absolute;top:10px;width:2px;height:14px;background:#333}
-.tl .cp-lbl{position:absolute;top:28px;transform:translateX(-50%);text-align:center;font-size:11px;color:#333;white-space:nowrap}
+.tl .cp-lbl{position:absolute;top:32px;transform:translateX(-50%);text-align:center;font-size:11px;color:#333;white-space:nowrap}
 .tl .tocdot,.tl .toddot{position:absolute;top:-6px;width:14px;height:14px;border-radius:50%;transform:translateX(-50%);
                          border:2px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,0.15)}
 .tl .tocdot{background:#1f77b4}
@@ -166,6 +165,9 @@ CSS = """
 .leg-head{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .leg-title{font-weight:600;font-size:1.05rem}
 .sep{height:1px;background:#eee;margin:8px 0}
+.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#f6f8fb;border:1px solid #e6e9ef;
+     font-size:12px;color:#333}
+.spacer{height:6px}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -189,6 +191,25 @@ def timeline(seg, cps, start_label, end_label, toc_tod=None):
         parts.append(f"<div class='{cls}' title='{toc_tod['type']}' style='left:{pct:.2f}%;'></div>")
     html += ''.join(parts) + "</div>"
     st.markdown(html, unsafe_allow_html=True)
+    # pequeno espaçador para garantir isolamento visual com o que vier abaixo:
+    st.markdown("<div class='spacer'></div>", unsafe_allow_html=True)
+
+# ====== PERFIL LEG (rótulo) ======
+def leg_profile_label(segments):
+    if not segments: return "—"
+    n = len(segments)
+    s0 = segments[0]['name']
+    if "Climb" in s0:
+        if n > 1 and "Cruise" in segments[1]['name']:
+            return "Climb + Cruise"
+        return "Climb (não atinge)" if "não atinge" in s0 else "Climb"
+    if "Descent" in s0:
+        if n > 1 and "Cruise" in segments[1]['name']:
+            return "Descent + Cruise"
+        return "Descent (não atinge)" if "não atinge" in s0 else "Descent"
+    if "Level" in s0:
+        return "Level"
+    return s0
 
 # ====== CÁLCULO DE UMA LEG ======
 def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
@@ -411,7 +432,7 @@ with act1:
             pref = None
         add_leg(prefill=pref)
 with act2:
-    st.caption("Fluxo: define parâmetros globais → cria legs → edita nos cartões. Cada edição recalcula e **propaga** para as seguintes.")
+    st.caption("Fluxo: parâmetros globais → criar legs → editar nos cartões. Cada edição recalcula e **propaga** para as seguintes.")
 
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
@@ -419,10 +440,9 @@ st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 if not st.session_state.legs:
     st.info("Sem legs ainda. Clica **Nova leg** para começar.")
 else:
-    # Garantir cálculo
     recompute_all()
 
-    # Resumo global (sempre visível no topo)
+    # Resumo global
     total_time = sum(c["tot_sec"] for c in st.session_state.computed)
     total_burn = r10f(sum(c["tot_burn"] for c in st.session_state.computed))
     efob_final = st.session_state.computed[-1]['carry_efob_after']
@@ -438,22 +458,23 @@ else:
         comp = st.session_state.computed[i]
         segA = comp['segments'][0]
         dist_total_leg = sum(s['dist'] for s in comp['segments'])
+        profile_lbl = leg_profile_label(comp['segments'])
 
-        # ==== CARTÃO ====
         st.markdown("<div class='card'>", unsafe_allow_html=True)
 
-        # Header compacto da leg
-        hc1, hc2, hc3, hc4, hc5, hc6 = st.columns([3,2,2,2,2,2])
+        # Header com acumulados incluídos
+        hc1, hc2, hc3, hc4, hc5, hc6, hc7, hc8 = st.columns([3,2,2,2,2,2,2,2])
         with hc1:
             st.markdown(f"<div class='leg-head'><span class='leg-title'>Leg {i+1}</span>"
-                        f"<span class='badge'>{segA['name'].split('→')[0]}</span></div>", unsafe_allow_html=True)
+                        f"<span class='badge'>{profile_lbl}</span></div>", unsafe_allow_html=True)
         with hc2: st.metric("ETE", hhmmss(comp["tot_sec"]))
         with hc3: st.metric("Burn (L)", f"{comp['tot_burn']:.1f}")
-        with hc4: st.metric("ROC (ft/min)", rint(comp["roc"]))
-        with hc5: st.metric("ROD (ft/min)", rint(comp["rod"]))
-        with hc6: st.metric("Dist (nm)", f"{dist_total_leg:.1f}")
+        with hc4: st.metric("Tempo acum.", hhmmss(comp["cum_sec"]))       # NOVO no header
+        with hc5: st.metric("Fuel acum. (L)", f"{comp['cum_burn']:.1f}")  # NOVO no header
+        with hc6: st.metric("ROC (ft/min)", rint(comp["roc"]))
+        with hc7: st.metric("ROD (ft/min)", rint(comp["rod"]))
+        with hc8: st.metric("Dist (nm)", f"{dist_total_leg:.1f}")
 
-        # Detalhes & edição num expander (fluxo mais limpo)
         with st.expander("Detalhes e edição desta leg", expanded=False):
             # Inputs
             c1, c2, c3, c4 = st.columns(4)
@@ -497,11 +518,14 @@ else:
             timeline(segA, comp["cpA"], start_lbl, end_lbl,
                      toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segA)==0 else None)
 
+            # TOC/TOD como pill discreta (sem empurrar layout)
+            if comp["toc_tod"]:
+                st.markdown(f"<span class='pill'>{comp['toc_tod']['type']} — {mmss(comp['segments'][0]['time'])} • {comp['segments'][0]['dist']:.1f} nm desde o início</span>", unsafe_allow_html=True)
+
             # Segmento 2 (se existir)
             if len(comp['segments']) > 1:
                 segB = comp['segments'][1]
-                st.info(("TOC" if comp["toc_tod"] and comp["toc_tod"]["type"]=="TOC" else "TOD") +
-                        f" — {mmss(comp['segments'][0]['time'])} • {comp['segments'][0]['dist']:.1f} nm desde o início")
+                st.markdown("<div class='spacer'></div>", unsafe_allow_html=True)
                 st.markdown(f"**Segmento 2 — {segB['name']}**")
                 s2a, s2b, s2c, s2d = st.columns(4)
                 s2a.metric("Alt ini→fim (ft)", f"{int(round(segB['alt0']))} → {int(round(segB['alt1']))}")
@@ -518,7 +542,7 @@ else:
                 timeline(segB, comp["cpB"], start_lbl2, end_lbl2,
                          toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segB)==1 else None)
 
-        # Rodapé do cartão: totais e ACUMULADOS (pedido)
+        # Rodapé do cartão (mantemos também aqui)
         st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
         colA, colB, colC = st.columns(3)
         with colA:
@@ -530,6 +554,6 @@ else:
         with colC:
             st.markdown(f"**Acumulado até Leg {i+1}** — Tempo {hhmmss(comp['cum_sec'])} • Fuel {comp['cum_burn']:.1f} L")
 
-        st.markdown("</div>", unsafe_allow_html=True)  # end card
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
