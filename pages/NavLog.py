@@ -261,19 +261,27 @@ st.markdown("---")
 EF_END=max(0.0, r10f(float(st.session_state.carry_efob)-sum(s['burn'] for s in segments)))
 st.markdown(f"**Totais** — ETE {hhmmss(TOT_SEC)} · Burn {r10f(sum(s['burn'] for s in segments)):.1f} L · EFOB fim {EF_END:.1f} L")
 
-# ==== guardar perna e herdar propriedades ====
-if st.button("💾 Guardar perna e preparar próxima", type="primary"):
-    st.session_state.legs.append({
-        "inputs": {"TC":TC,"Dist":Dist,"Alt0":Alt0,"Alt1":Alt1,"Wfrom":Wfrom,"Wkt":Wkt,"CK":CK,
-                   "rpm":{"climb":st.session_state.rpm_climb,"cruise":st.session_state.rpm_cruise,"desc":st.session_state.rpm_desc}},
-        "segments": segments,
-        "end_alt": float(segments[-1]['alt1']),
-        "end_efob": EF_END,
-        "ete_sec": TOT_SEC
-    })
-    st.session_state.carry_alt=float(segments[-1]['alt1'])
-    st.session_state.carry_efob=EF_END
-    st.success("Perna guardada. Início da próxima predefinido com a altitude & EFOB finais.")
+# ==== guardar / preparar próxima ====
+st.subheader("Ações")
+a1,a2 = st.columns(2)
+with a1:
+    if st.button("💾 Guardar perna no histórico", type="primary"):
+        st.session_state.legs.append({
+            "inputs": {"TC":TC,"Dist":Dist,"Alt0":Alt0,"Alt1":Alt1,"Wfrom":Wfrom,"Wkt":Wkt,"CK":CK,
+                       "rpm":{"climb":st.session_state.rpm_climb,"cruise":st.session_state.rpm_cruise,"desc":st.session_state.rpm_desc}},
+            "segments": segments,
+            "end_alt": float(segments[-1]['alt1']),
+            "end_efob": EF_END,
+            "ete_sec": TOT_SEC
+        })
+        st.success("Perna guardada no histórico.")
+with a2:
+    if st.button("➕ Definir próxima perna (não guarda)"):
+        st.session_state.carry_alt=float(segments[-1]['alt1'])
+        st.session_state.carry_efob=EF_END
+        st.info(f"Próxima perna iniciará a {int(st.session_state.carry_alt)} ft · EFOB {st.session_state.carry_efob:.1f} L")
+
+st.caption("Dica: usa 'Guardar' para manter a perna no histórico. 'Definir próxima' apenas propaga Alt/EFOB sem gravar.")
 
 # ==== histórico compacto ====
 st.subheader("Histórico")
@@ -284,6 +292,7 @@ else:
         st.markdown(f"**Perna {i}** · TC {rint(leg['inputs']['TC'])}°T · {leg['inputs']['Dist']:.1f} nm · ETE {mmss(leg['ete_sec'])} · End Alt {int(leg['end_alt'])} ft · EFOB {leg['end_efob']:.1f} L")
         for j,seg in enumerate(leg['segments'], start=1):
             st.caption(f"Seg{j}: {seg['name']} · TH/MH {rang(seg['TH'])}T/{rang(seg['MH'])}M · GS/TAS {rint(seg['GS'])}/{rint(seg['TAS'])} · {mmss(seg['time'])} · {seg['dist']:.1f} nm · Burn {r10f(seg['burn']):.1f} L")
+
 
 
 
