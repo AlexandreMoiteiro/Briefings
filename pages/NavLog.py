@@ -1,11 +1,5 @@
-# app.py — NAVLOG v9 (AFM) — Clean Flow completo
-# - Cada leg é uma caixinha (cartão) com header compacto (inclui acumulados) e expander de detalhes
-# - Perfil correto por leg (Climb + Cruise, Descent + Cruise, Level, …)
-# - Timeline com espaçamento extra e marcador TOC/TOD sem sobrepor checkpoints
-# - Checkpoints legíveis com ETO e EFOB
-# - Header da leg mostra Tempo acumulado e Fuel acumulado
-# - Resumo global + somatório final de tempo por fase (Climb / Level / Descent)
-# - Cruise RPM = 2100 por defeito
+# app.py — NAVLOG v9 (AFM) — Clean Flow + cumulativos + perfil correto + timeline sem sobreposição
+# Acrescentado: breakdown do tempo total por fase (Climb / Level / Descent) no rodapé geral.
 
 import streamlit as st
 import datetime as dt
@@ -75,8 +69,7 @@ def cruise_lookup(pa, rpm, oat, weight):
     rpm = min(int(rpm), 2265)
     pas = sorted(CRUISE.keys())
     pa_c = clamp(pa, pas[0], pas[-1])
-    p0 = max([p for p in pas if p <= pa_c])
-    p1 = min([p for p in pas if p >= pa_c])
+    p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
     table0 = CRUISE[p0]; table1 = CRUISE[p1]
 
     def v(tab):
@@ -85,24 +78,20 @@ def cruise_lookup(pa, rpm, oat, weight):
         if rpm < rpms[0]: lo, hi = rpms[0], rpms[1]
         elif rpm > rpms[-1]: lo, hi = rpms[-2], rpms[-1]
         else:
-            lo = max([r for r in rpms if r <= rpm])
-            hi = min([r for r in rpms if r >= rpm])
+            lo = max([r for r in rpms if r <= rpm]); hi = min([r for r in rpms if r >= rpm])
         (tas_lo, ff_lo), (tas_hi, ff_hi) = tab[lo], tab[hi]
         t = (rpm - lo) / (hi - lo) if hi != lo else 0
         return (tas_lo + t*(tas_hi - tas_lo), ff_lo + t*(ff_hi - ff_lo))
 
     tas0, ff0 = v(table0); tas1, ff1 = v(table1)
-    tas = interp1(pa_c, p0, p1, tas0, tas1)
-    ff  = interp1(pa_c, p0, p1, ff0,  ff1)
+    tas = interp1(pa_c, p0, p1, tas0, tas1); ff = interp1(pa_c, p0, p1, ff0, ff1)
 
     if oat is not None:
         dev = oat - isa_temp(pa_c)
         if dev > 0:
-            tas *= 1 - 0.02*(dev/15.0)
-            ff  *= 1 - 0.025*(dev/15.0)
+            tas *= 1 - 0.02*(dev/15.0); ff *= 1 - 0.025*(dev/15.0)
         elif dev < 0:
-            tas *= 1 + 0.01*((-dev)/15.0)
-            ff  *= 1 + 0.03*((-dev)/15.0)
+            tas *= 1 + 0.01*((-dev)/15.0); ff *= 1 + 0.03*((-dev)/15.0)
 
     tas *= (1.0 + 0.033*((650.0 - float(weight))/100.0))
     return max(0.0, tas), max(0.0, ff)
@@ -110,8 +99,7 @@ def cruise_lookup(pa, rpm, oat, weight):
 def roc_interp(pa, temp):
     pas = sorted(ROC_ENR.keys())
     pa_c = clamp(pa, pas[0], pas[-1])
-    p0 = max([p for p in pas if p <= pa_c])
-    p1 = min([p for p in pas if p >= pa_c])
+    p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
     temps = [-25,0,25,50]
     t = clamp(temp, temps[0], temps[-1])
     if t <= 0: t0, t1 = -25, 0
@@ -126,8 +114,7 @@ def roc_interp(pa, temp):
 def vy_interp(pa):
     pas = sorted(VY.keys())
     pa_c = clamp(pa, pas[0], pas[-1])
-    p0 = max([p for p in pas if p <= pa_c])
-    p1 = min([p for p in pas if p >= pa_c])
+    p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
     return interp1(pa_c, p0, p1, VY[p0], VY[p1])
 
 # ====== STATE ======
@@ -146,7 +133,6 @@ ens("start_clock", "")
 ens("start_efob", 85.0)
 ens("legs", [])
 ens("computed", [])
-ens("phase_totals", {"CLIMB":0, "LEVEL":0, "DESCENT":0})
 
 # ====== STYLE ======
 CSS = """
@@ -155,7 +141,7 @@ CSS = """
       box-shadow:0 1px 2px rgba(0,0,0,0.04)}
 .hrow{display:flex;gap:12px;flex-wrap:wrap;margin:6px 0 10px 0}
 .kpi{background:#fafafa;border:1px solid #eee;border-radius:10px;padding:8px 10px;min-width:120px}
-.tl{position:relative;margin:8px 0 18px 0;padding-bottom:46px} /* mais espaço para labels */
+.tl{position:relative;margin:8px 0 18px 0;padding-bottom:46px}
 .tl .bar{height:6px;background:#eef1f5;border-radius:3px}
 .tl .tick{position:absolute;top:10px;width:2px;height:14px;background:#333}
 .tl .cp-lbl{position:absolute;top:32px;transform:translateX(-50%);text-align:center;font-size:11px;color:#333;white-space:nowrap}
@@ -199,26 +185,15 @@ def timeline(seg, cps, start_label, end_label, toc_tod=None):
 # ====== PERFIL LEG (rótulo) ======
 def leg_profile_label(segments):
     if not segments: return "—"
-    n = len(segments)
-    s0 = segments[0]['name']
+    n = len(segments); s0 = segments[0]['name']
     if "Climb" in s0:
-        if n > 1 and "Cruise" in segments[1]['name']:
-            return "Climb + Cruise"
+        if n > 1 and "Cruise" in segments[1]['name']: return "Climb + Cruise"
         return "Climb (não atinge)" if "não atinge" in s0 else "Climb"
     if "Descent" in s0:
-        if n > 1 and "Cruise" in segments[1]['name']:
-            return "Descent + Cruise"
+        if n > 1 and "Cruise" in segments[1]['name']: return "Descent + Cruise"
         return "Descent (não atinge)" if "não atinge" in s0 else "Descent"
-    if "Level" in s0:
-        return "Level"
+    if "Level" in s0: return "Level"
     return s0
-
-# ====== FASE DO SEGMENTO ======
-def phase_from_name(seg_name: str) -> str:
-    s = seg_name.lower()
-    if "climb" in s:   return "CLIMB"
-    if "descent" in s: return "DESCENT"
-    return "LEVEL"
 
 # ====== CÁLCULO DE UMA LEG ======
 def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
@@ -296,8 +271,7 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
         out = []; t = 0
         while t + every_min*60 <= seg['time']:
             t += every_min*60
-            d = seg['GS']*(t/3600.0)
-            burn = seg['ff']*(t/3600.0)
+            d = seg['GS']*(t/3600.0); burn = seg['ff']*(t/3600.0)
             eto = (base_clk + dt.timedelta(seconds=t)).strftime('%H:%M') if base_clk else ""
             efob = max(0.0, r10f(efob_start - burn))
             out.append({"t":t, "min":int(t/60), "nm":round(d,1), "eto":eto, "efob":efob})
@@ -313,7 +287,7 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
         "ck_func": cps
     }
 
-# ====== RECOMPUTE (com acumulados e totais por fase) ======
+# ====== RECOMPUTE (com acumulados) ======
 def recompute_all():
     st.session_state.computed = []
     params = dict(
@@ -335,7 +309,6 @@ def recompute_all():
     clock = base_time
     cum_sec = 0
     cum_burn = 0.0
-    phase_secs = {"CLIMB": 0, "LEVEL": 0, "DESCENT": 0}
 
     for idx, leg in enumerate(st.session_state.legs):
         res = build_segments(
@@ -372,10 +345,6 @@ def recompute_all():
                              (base1 + dt.timedelta(seconds=segs[0]['time'])) if base1 and len(segs)>1 else None,
                              max(0.0, r10f(EF0 - segs[0]['burn'])) if len(segs)>1 else None) if len(segs)>1 else []
 
-        # acumular por fase
-        for s in segs:
-            phase_secs[phase_from_name(s['name'])] += int(s['time'])
-
         # atualizar carries e acumulados
         clock = (clock + dt.timedelta(seconds=res['tot_sec'])) if clock else None
         carry_efob = max(0.0, r10f(carry_efob - sum(s['burn'] for s in segs)))
@@ -396,8 +365,6 @@ def recompute_all():
             "cum_sec": cum_sec,
             "cum_burn": cum_burn
         })
-
-    st.session_state.phase_totals = phase_secs
 
 # ====== CRUD ======
 def add_leg(prefill=None):
@@ -467,13 +434,6 @@ else:
     with s2: st.metric("Burn total (L)", f"{total_burn:.1f}")
     with s3: st.metric("EFOB final (L)", f"{efob_final:.1f}")
 
-    # Totais por fase
-    ph = st.session_state.get("phase_totals", {"CLIMB":0, "LEVEL":0, "DESCENT":0})
-    c1, c2, c3 = st.columns(3)
-    with c1: st.metric("Tempo em Climb",   hhmmss(int(ph["CLIMB"])))
-    with c2: st.metric("Tempo em Level",   hhmmss(int(ph["LEVEL"])))
-    with c3: st.metric("Tempo em Descent", hhmmss(int(ph["DESCENT"])))
-
     st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
     # Lista de legs (caixinhas)
@@ -519,8 +479,7 @@ else:
                     update_leg(i, dict(TC=TC, Dist=Dist, Alt0=Alt0, Alt1=Alt1, Wfrom=Wfrom, Wkt=Wkt, CK=CK))
             with b2:
                 if st.button("Apagar", key=f"del_{i}", use_container_width=True):
-                    delete_leg(i)
-                    st.stop()
+                    delete_leg(i); st.stop()
 
             st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
@@ -541,11 +500,9 @@ else:
             timeline(segA, comp["cpA"], start_lbl, end_lbl,
                      toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segA)==0 else None)
 
-            # TOC/TOD pill discreta (sem empurrar layout)
             if comp["toc_tod"]:
                 st.markdown(
-                    f"<span class='pill'>{comp['toc_tod']['type']} — {mmss(comp['segments'][0]['time'])} • "
-                    f"{comp['segments'][0]['dist']:.1f} nm desde o início</span>",
+                    f"<span class='pill'>{comp['toc_tod']['type']} — {mmss(comp['segments'][0]['time'])} • {comp['segments'][0]['dist']:.1f} nm desde o início</span>",
                     unsafe_allow_html=True
                 )
 
@@ -582,6 +539,29 @@ else:
             st.markdown(f"**Acumulado até Leg {i+1}** — Tempo {hhmmss(comp['cum_sec'])} • Fuel {comp['cum_burn']:.1f} L")
 
         st.markdown("</div>", unsafe_allow_html=True)
+
+    # ====== BREAKDOWN FINAL POR FASE ======
+    # computa a partir de todos os segmentos (Cruise conta como Level)
+    climb_s = 0; level_s = 0; desc_s = 0
+    for comp in st.session_state.computed:
+        for seg in comp["segments"]:
+            name = seg["name"].lower()
+            if "climb" in name:
+                climb_s += seg["time"]
+            elif "descent" in name:
+                desc_s += seg["time"]
+            else:  # "level" ou "cruise"
+                level_s += seg["time"]
+
+    st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+    st.subheader("Totais por fase")
+    b1, b2, b3, b4 = st.columns(4)
+    with b1: st.metric("Tempo em Climb", hhmmss(climb_s))
+    with b2: st.metric("Tempo em Level (inclui Cruise)", hhmmss(level_s))
+    with b3: st.metric("Tempo em Descent", hhmmss(desc_s))
+    total_check = climb_s + level_s + desc_s
+    with b4: st.metric("Verificação (≈ ETE total)", hhmmss(total_check))
+
 
 
 
