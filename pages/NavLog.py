@@ -385,7 +385,7 @@ def recompute_all():
 
 # ====== CRUD ======
 def add_leg(prefill=None):
-    d = dict(TC=90.0, Dist=10.0, Alt0=0.0, Alt1=4000.0, Wfrom=180, Wkt=15, CK=2)
+    d = dict(TC=0.0, Dist=0.0, Alt0=0.0, Alt1=000.0, Wfrom=0, Wkt=0, CK=2)
     if prefill: d.update(prefill)
     st.session_state.legs.append(d)
     recompute_all()
