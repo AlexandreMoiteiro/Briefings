@@ -1,18 +1,14 @@
-
-# app.py — NAVLOG Performance v3
+# app.py — Performance v4
 # Reqs: streamlit
-# - Entrada manual por perna: TC, Dist (nm), Alt início, Alt alvo, Vento FROM/kt
-# - Vento usado para TH/MH e GS; var magnética aplicada
-# - Se a distância for insuficiente para atingir o alvo, calcula altitude ao fim da perna
-# - Se atingir o alvo, separa explicitamente em TOC/TOD como "fix" e apresenta 2 segmentos
-# - Checkpoints reiniciam em 0 ao passar no TOC/TOD (são como novo fix)
-# - Botão "Adicionar perna" acumula no histórico; as anteriores ficam visíveis
+# - Entrada manual por perna (TC, Dist, Alt início, Alt alvo, Vento FROM/kt)
+# - TOC/TOD é tratado como NOVO FIX: separação física de segmentos e checkpoints reiniciados
+# - Histórico de pernas acumulado; botão "Adicionar perna" mantém as anteriores
 
 import streamlit as st
 import math
 from typing import Optional, Tuple
 
-st.set_page_config(page_title="NAVLOG — Performance v3", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="NAVLOG — Performance v4", layout="wide", initial_sidebar_state="collapsed")
 
 # ===== Helpers =====
 
@@ -68,7 +64,7 @@ def wind_triangle(tc_deg: float, tas_kt: float, wind_from_deg: float, wind_kt: f
 def apply_var(true_deg, var_deg, east_is_negative=False):
     return wrap360(true_deg - var_deg if east_is_negative else true_deg + var_deg)
 
-# ===== Atmosfera/Perf (P2008 simplificado) =====
+# ===== Perf tables (P2008 simplificado) =====
 ROC_ENROUTE = {0:{-25:981,0:835,25:704,50:586},2000:{-25:870,0:726,25:597,50:481},4000:{-25:759,0:617,25:491,50:377},6000:{-25:648,0:509,25:385,50:273},8000:{-25:538,0:401,25:279,50:170},10000:{-25:428,0:294,25:174,50:66},12000:{-25:319,0:187,25:69,50:-37},14000:{-25:210,0:80,25:-35,50:-139}}
 ROC_FACTOR = 0.90
 VY_ENROUTE = {0:67,2000:67,4000:67,6000:67,8000:67,10000:67,12000:67,14000:67}
@@ -132,217 +128,223 @@ ensure("rpm_climb",2250); ensure("rpm_cruise",2000)
 ensure("descent_ff",15.0); ensure("rod_fpm",700); ensure("start_fuel",85.0)
 ensure("cruise_ref_kt",90); ensure("descent_ref_kt",65)
 ensure("next_alt_start", 0.0)
-ensure("legs_history", [])
+ensure("legs", [])
 
 # =========================================================
-# Parâmetros base
+# Inputs de base
 # =========================================================
-st.title("NAVLOG — Performance v3 (TOC/TOD como fix + histórico)")
-with st.form("hdr", clear_on_submit=False):
+st.title("NAVLOG — Performance v4 (TOC/TOD = FIX; checkpoints reset; histórico)")
+with st.form("base", clear_on_submit=False):
     c1,c2,c3 = st.columns(3)
     with c1:
-        qnh = st.number_input("QNH (hPa)", 900, 1050, int(st.session_state.qnh), step=1)
-        oat = st.number_input("OAT (°C)", -40, 50, int(st.session_state.temp_c), step=1)
+        qnh = st.number_input("QNH (hPa)", 900, 1050, int(st.session_state.qnh))
+        oat = st.number_input("OAT (°C)", -40, 50, int(st.session_state.temp_c))
     with c2:
-        var_deg = st.number_input("Mag Variation (°)", 0, 30, int(st.session_state.var_deg), step=1)
+        var_deg = st.number_input("Mag Variation (°)", 0, 30, int(st.session_state.var_deg))
         var_is_e = st.selectbox("Variação E/W", ["W","E"], index=(1 if st.session_state.var_is_e else 0))=="E"
     with c3:
-        rpm_cl = st.number_input("Climb RPM", 1800, 2388, int(st.session_state.rpm_climb), step=10)
-        rpm_cr = st.number_input("Cruise RPM",1800, 2388, int(st.session_state.rpm_cruise), step=10)
-        ff_ds  = st.number_input("Descent FF (L/h)", 0.0, 30.0, float(st.session_state.descent_ff), step=0.1)
-        rod    = st.number_input("ROD (ft/min)", 200, 1500, int(st.session_state.rod_fpm), step=10)
+        rpm_cl = st.number_input("Climb RPM", 1800, 2388, int(st.session_state.rpm_climb))
+        rpm_cr = st.number_input("Cruise RPM", 1800, 2388, int(st.session_state.rpm_cruise))
+        rod    = st.number_input("ROD (ft/min)", 200, 1500, int(st.session_state.rod_fpm))
+        ff_ds  = st.number_input("Descent FF (L/h)", 0.0, 30.0, float(st.session_state.descent_ff))
     if st.form_submit_button("Aplicar"):
         st.session_state.qnh=qnh; st.session_state.temp_c=oat
         st.session_state.var_deg=var_deg; st.session_state.var_is_e=var_is_e
         st.session_state.rpm_climb=rpm_cl; st.session_state.rpm_cruise=rpm_cr
-        st.session_state.descent_ff=ff_ds; st.session_state.rod_fpm=rod
+        st.session_state.rod_fpm=rod; st.session_state.descent_ff=ff_ds
         st.success("Parâmetros aplicados.")
 
 # =========================================================
-# Nova perna — entrada
+# Nova perna
 # =========================================================
 st.subheader("Nova Perna")
-cc1,cc2,cc3,cc4 = st.columns(4)
-with cc1:
-    tc_true = st.number_input("True Course (°T)", 0.0, 359.9, 90.0, step=0.1)
-    dist_nm = st.number_input("Distância (nm)", 0.0, 999.9, 10.0, step=0.1)
-with cc2:
-    alt_start = st.number_input("Alt início (ft)", 0.0, 20000.0, float(st.session_state.next_alt_start), step=50.0)
-    alt_target = st.number_input("Alt alvo (ft)", 0.0, 20000.0, 4000.0, step=50.0)
-with cc3:
-    wind_from = st.number_input("Vento FROM (°T)", 0, 360, 180, step=1)
-    wind_kt   = st.number_input("Vento (kt)", 0, 120, 15, step=1)
-with cc4:
-    ck_every  = st.number_input("Checkpoints a cada (min)", 1, 10, 2, step=1)
+a1,a2,a3,a4 = st.columns(4)
+with a1:
+    TC = st.number_input("True Course (°T)", 0.0, 359.9, 90.0, step=0.1)
+    Dist = st.number_input("Distância (nm)", 0.0, 999.9, 10.0, step=0.1)
+with a2:
+    Alt0 = st.number_input("Alt início (ft)", 0.0, 20000.0, float(st.session_state.next_alt_start), step=50.0)
+    Alt1 = st.number_input("Alt alvo (ft)", 0.0, 20000.0, 4000.0, step=50.0)
+with a3:
+    W_from = st.number_input("Vento FROM (°T)", 0, 360, 180)
+    W_kt   = st.number_input("Vento (kt)", 0, 120, 15)
+with a4:
+    CK = st.number_input("Checkpoints a cada (min)", 1, 10, 2)
+    fuel_start = st.number_input("EFOB inicial (L)", 0.0, 500.0, float(st.session_state.start_fuel))
 
-# ===== Cálculo da perna =====
-pa_start  = pressure_alt(alt_start, st.session_state.qnh)
-vy_kt     = vy_interp_enroute(pa_start)
-roc_fpm   = roc_interp_enroute(pa_start, st.session_state.temp_c)
+# ===== Cálculos
+pa0 = pressure_alt(Alt0, st.session_state.qnh)
+Vy = vy_interp_enroute(pa0)
+ROC = roc_interp_enroute(pa0, st.session_state.temp_c)
 
-_ , ff_climb  = cruise_lookup(alt_start + 0.5*max(0.0, alt_target-alt_start), int(st.session_state.rpm_climb),  st.session_state.temp_c)
-crz_tas_tab , crz_ff_tab = cruise_lookup(pressure_alt(alt_target, st.session_state.qnh), int(st.session_state.rpm_cruise), st.session_state.temp_c)
-crz_tas = st.session_state.cruise_ref_kt or crz_tas_tab
+# TAS/FF base
+_ , FF_climb = cruise_lookup(Alt0 + 0.5*max(0.0, Alt1-Alt0), int(st.session_state.rpm_climb), st.session_state.temp_c)
+TAS_cruise, FF_cruise = cruise_lookup(pressure_alt(Alt1, st.session_state.qnh), int(st.session_state.rpm_cruise), st.session_state.temp_c)
+TAS_cruise = st.session_state.cruise_ref_kt or TAS_cruise
 
-# Fase 1 (climb/level/descent)
-profile = "CLIMB" if alt_target>alt_start+1e-6 else ("DESCENT" if alt_target<alt_start-1e-6 else "LEVEL")
-segA = None; segB = None
+# Headings & GS por fase
+_, TH_climb, GS_climb = wind_triangle(TC, Vy, W_from, W_kt)
+_, TH_cruise, GS_cruise = wind_triangle(TC, TAS_cruise, W_from, W_kt)
+MH_climb  = apply_var(TH_climb, st.session_state.var_deg, st.session_state.var_is_e)
+MH_cruise = apply_var(TH_cruise, st.session_state.var_deg, st.session_state.var_is_e)
+MC = apply_var(TC, st.session_state.var_deg, st.session_state.var_is_e)
 
-if profile=="CLIMB":
-    _, thA, gsA = wind_triangle(tc_true, vy_kt, wind_from, wind_kt)
-    t_need_min = (alt_target - alt_start)/max(roc_fpm,1e-6)
-    d_need = gsA * (t_need_min/60.0)
-    if d_need <= dist_nm:  # chega ao TOC
+# Segmento A (perfil até alvo) e Segmento B (cruise)
+profile = "LEVEL" if abs(Alt1-Alt0) < 1e-6 else ("CLIMB" if Alt1>Alt0 else "DESCENT")
+segA = {}
+segB = None
+reached_marker = False
+
+if profile == "CLIMB":
+    t_need_min = (Alt1-Alt0)/max(ROC,1e-6)
+    d_need = GS_climb*(t_need_min/60.0)
+    if d_need <= Dist:
+        reached_marker = True
         tA = round_to_10s(t_need_min*60.0)
-        segA = {"name":"Climb → TOC","TH":thA,"MH":apply_var(thA, st.session_state.var_deg, st.session_state.var_is_e),
-                "GS":gsA,"TAS":vy_kt,"time":tA,"dist":d_need,"burn":ff_climb*(tA/3600.0),
-                "alt0":alt_start,"alt1":alt_target}
-        # segmento B (cruise)
-        _, thB, gsB = wind_triangle(tc_true, crz_tas, wind_from, wind_kt)
-        rem = max(0.0, dist_nm - d_need)
-        tB = round_to_10s( (rem/max(gsB,1e-6))*3600.0 ) if rem>0 else 0
-        segB = {"name":"Cruise (após TOC)","TH":thB,"MH":apply_var(thB, st.session_state.var_deg, st.session_state.var_is_e),
-                "GS":gsB,"TAS":crz_tas,"time":tB,"dist":rem,"burn":crz_ff_tab*(tB/3600.0),
-                "alt0":alt_target,"alt1":alt_target}
-        end_alt = alt_target
-    else:  # não atinge
-        tA = round_to_10s( (dist_nm/max(gsA,1e-6))*3600.0 )
-        gained = roc_fpm * (tA/60.0)
-        end_alt = alt_start + gained
-        segA = {"name":"Climb (não atinge alvo)","TH":thA,"MH":apply_var(thA, st.session_state.var_deg, st.session_state.var_is_e),
-                "GS":gsA,"TAS":vy_kt,"time":tA,"dist":dist_nm,"burn":ff_climb*(tA/3600.0),
-                "alt0":alt_start,"alt1":end_alt}
-elif profile=="DESCENT":
-    _, thA, gsA = wind_triangle(tc_true, st.session_state.descent_ref_kt, wind_from, wind_kt)
-    t_need_min = (alt_start - alt_target)/max(float(st.session_state.rod_fpm),1e-6)
-    d_need = gsA * (t_need_min/60.0)
-    if d_need <= dist_nm:  # chega ao TOD
-        tA = round_to_10s(t_need_min*60.0)
-        segA = {"name":"Descent → TOD","TH":thA,"MH":apply_var(thA, st.session_state.var_deg, st.session_state.var_is_e),
-                "GS":gsA,"TAS":st.session_state.descent_ref_kt,"time":tA,"dist":d_need,"burn":st.session_state.descent_ff*(tA/3600.0),
-                "alt0":alt_start,"alt1":alt_target}
-        # segmento B (cruise)
-        _, thB, gsB = wind_triangle(tc_true, crz_tas, wind_from, wind_kt)
-        rem = max(0.0, dist_nm - d_need)
-        tB = round_to_10s( (rem/max(gsB,1e-6))*3600.0 ) if rem>0 else 0
-        segB = {"name":"Cruise (após TOD)","TH":thB,"MH":apply_var(thB, st.session_state.var_deg, st.session_state.var_is_e),
-                "GS":gsB,"TAS":crz_tas,"time":tB,"dist":rem,"burn":crz_ff_tab*(tB/3600.0),
-                "alt0":alt_target,"alt1":alt_target}
-        end_alt = alt_target
+        segA = {"name":"Climb → TOC","TH":TH_climb,"MH":MH_climb,"GS":GS_climb,"TAS":Vy,
+                "time":tA,"dist":d_need,"burn":FF_climb*(tA/3600.0),"alt0":Alt0,"alt1":Alt1}
+        rem = max(0.0, Dist-d_need)
+        if rem>0:
+            tB = round_to_10s((rem/max(GS_cruise,1e-6))*3600.0)
+            segB = {"name":"Cruise (após TOC)","TH":TH_cruise,"MH":MH_cruise,"GS":GS_cruise,"TAS":TAS_cruise,
+                    "time":tB,"dist":rem,"burn":FF_cruise*(tB/3600.0),"alt0":Alt1,"alt1":Alt1}
+        end_alt = Alt1
     else:
-        tA = round_to_10s( (dist_nm/max(gsA,1e-6))*3600.0 )
-        lost = float(st.session_state.rod_fpm) * (tA/60.0)
-        end_alt = max(0.0, alt_start - lost)
-        segA = {"name":"Descent (não atinge alvo)","TH":thA,"MH":apply_var(thA, st.session_state.var_deg, st.session_state.var_is_e),
-                "GS":gsA,"TAS":st.session_state.descent_ref_kt,"time":tA,"dist":dist_nm,"burn":st.session_state.descent_ff*(tA/3600.0),
-                "alt0":alt_start,"alt1":end_alt}
-else:  # LEVEL
-    _, thA, gsA = wind_triangle(tc_true, crz_tas, wind_from, wind_kt)
-    tA = round_to_10s( (dist_nm/max(gsA,1e-6))*3600.0 )
-    end_alt = alt_start
-    segA = {"name":"Level","TH":thA,"MH":apply_var(thA, st.session_state.var_deg, st.session_state.var_is_e),
-            "GS":gsA,"TAS":crz_tas,"time":tA,"dist":dist_nm,"burn":crz_ff_tab*(tA/3600.0),
-            "alt0":alt_start,"alt1":end_alt}
+        tA = round_to_10s((Dist/max(GS_climb,1e-6))*3600.0)
+        gained = ROC*(tA/60.0)
+        end_alt = Alt0 + gained
+        segA = {"name":"Climb (não atinge)","TH":TH_climb,"MH":MH_climb,"GS":GS_climb,"TAS":Vy,
+                "time":tA,"dist":Dist,"burn":FF_climb*(tA/3600.0),"alt0":Alt0,"alt1":end_alt}
+elif profile == "DESCENT":
+    _, TH_desc, GS_desc = wind_triangle(TC, st.session_state.descent_ref_kt, W_from, W_kt)
+    MH_desc = apply_var(TH_desc, st.session_state.var_deg, st.session_state.var_is_e)
+    t_need_min = (Alt0-Alt1)/max(float(st.session_state.rod_fpm),1e-6)
+    d_need = GS_desc*(t_need_min/60.0)
+    if d_need <= Dist:
+        reached_marker = True
+        tA = round_to_10s(t_need_min*60.0)
+        segA = {"name":"Descent → TOD","TH":TH_desc,"MH":MH_desc,"GS":GS_desc,"TAS":st.session_state.descent_ref_kt,
+                "time":tA,"dist":d_need,"burn":float(st.session_state.descent_ff)*(tA/3600.0),"alt0":Alt0,"alt1":Alt1}
+        rem = max(0.0, Dist-d_need)
+        if rem>0:
+            tB = round_to_10s((rem/max(GS_cruise,1e-6))*3600.0)
+            segB = {"name":"Cruise (após TOD)","TH":TH_cruise,"MH":MH_cruise,"GS":GS_cruise,"TAS":TAS_cruise,
+                    "time":tB,"dist":rem,"burn":FF_cruise*(tB/3600.0),"alt0":Alt1,"alt1":Alt1}
+        end_alt = Alt1
+    else:
+        tA = round_to_10s((Dist/max(GS_desc,1e-6))*3600.0)
+        lost = float(st.session_state.rod_fpm)*(tA/60.0)
+        end_alt = max(0.0, Alt0 - lost)
+        segA = {"name":"Descent (não atinge)","TH":TH_desc,"MH":MH_desc,"GS":GS_desc,"TAS":st.session_state.descent_ref_kt,
+                "time":tA,"dist":Dist,"burn":float(st.session_state.descent_ff)*(tA/3600.0),"alt0":Alt0,"alt1":end_alt}
+else:
+    tA = round_to_10s((Dist/max(GS_cruise,1e-6))*3600.0)
+    end_alt = Alt0
+    segA = {"name":"Level","TH":TH_cruise,"MH":MH_cruise,"GS":GS_cruise,"TAS":TAS_cruise,
+            "time":tA,"dist":Dist,"burn":FF_cruise*(tA/3600.0),"alt0":Alt0,"alt1":end_alt}
 
 segments = [segA] + ([segB] if segB else [])
 TOTAL_SEC = sum(int(s['time']) for s in segments)
 TOTAL_BURN = _round_tenth(sum(float(s['burn']) for s in segments))
 
-# ===== Apresentação (separação visual forte) =====
+# ===== UI — Apresentação clara =====
 st.markdown("---")
 st.subheader("Resultados da Perna")
 
-# Badges topo
-colt1,colt2,colt3,colt4 = st.columns(4)
-with colt1:
-    st.metric("Perfil", "CLIMB" if profile=="CLIMB" else ("DESCENT" if profile=="DESCENT" else "LEVEL"))
-with colt2:
-    st.metric("GS (seg A)", _round_unit(segA['GS']))
-with colt3:
-    st.metric("GS (seg B)", _round_unit(segB['GS']) if segB else 0)
-with colt4:
-    st.metric("Alt fim (ft)", _round_alt(end_alt))
+# Painéis-resumo do topo
+c1,c2,c3,c4 = st.columns(4)
+with c1: st.metric("Seg A", "CLIMB" if profile=="CLIMB" else ("DESCENT" if profile=="DESCENT" else "LEVEL"))
+with c2: st.metric("GS seg A (kt)", _round_unit(segA['GS']))
+with c3: st.metric("GS seg B (kt)", _round_unit(segB['GS']) if segB else 0)
+with c4: st.metric("Alt fim (ft)", _round_alt(end_alt))
 
-# Cards por segmento
-for idx, s in enumerate(segments, start=1):
-    st.markdown(f"#### Segmento {idx} — {s['name']}")
-    c1,c2,c3,c4,c5,c6 = st.columns(6)
-    c1.write(f"Alt: {_round_alt(s['alt0'])}→{_round_alt(s['alt1'])} ft")
-    c2.write(f"TH/MH: {_round_angle(s['TH'])}°T / {_round_angle(s['MH'])}°M")
-    c3.write(f"GS/TAS: {_round_unit(s['GS'])}/{_round_unit(s['TAS'])} kt")
-    c4.write(f"Tempo: {mmss_from_seconds(int(s['time']))}")
-    c5.write(f"Dist: {s['dist']:.1f} nm")
-    c6.write(f"Burn: {_round_tenth(s['burn']):.1f} L")
-    st.divider()
+# Segmento A (sempre)
+st.markdown("#### Segmento 1 — {}".format(segA['name']))
+s1a,s1b,s1c = st.columns(3)
+s1a.write(f"Alt: {_round_alt(segA['alt0'])}→{_round_alt(segA['alt1'])} ft")
+s1b.write(f"TH/MH: {_round_angle(segA['TH'])}°T / {_round_angle(segA['MH'])}°M")
+s1c.write(f"GS/TAS: {_round_unit(segA['GS'])}/{_round_unit(segA['TAS'])} kt")
+s1d,s1e,s1f = st.columns(3)
+s1d.write(f"Tempo: {mmss_from_seconds(int(segA['time']))}")
+s1e.write(f"Dist: {segA['dist']:.1f} nm")
+s1f.write(f"Burn: {_round_tenth(segA['burn']):.1f} L")
 
-# TOC/TOD claramente assinalado
-if segB:
+# Linha de separação física no marcador
+if reached_marker:
     label = "TOC" if profile=="CLIMB" else "TOD"
-    st.success(f"{label} em {mmss_from_seconds(int(segA['time']))} • {segA['dist']:.1f} nm desde o início")
+    st.success(f"{label} — {mmss_from_seconds(int(segA['time']))} • {segA['dist']:.1f} nm desde o início")
 
-# Totais
-st.markdown(f"**Totais** — ETE {hhmmss_from_seconds(TOTAL_SEC)} • Burn {TOTAL_BURN:.1f} L")
+# Segmento B (se existir)
+if segB:
+    st.markdown("#### Segmento 2 — {}".format(segB['name']))
+    s2a,s2b,s2c = st.columns(3)
+    s2a.write(f"Alt: {_round_alt(segB['alt0'])}→{_round_alt(segB['alt1'])} ft")
+    s2b.write(f"TH/MH: {_round_angle(segB['TH'])}°T / {_round_angle(segB['MH'])}°M")
+    s2c.write(f"GS/TAS: {_round_unit(segB['GS'])}/{_round_unit(segB['TAS'])} kt")
+    s2d,s2e,s2f = st.columns(3)
+    s2d.write(f"Tempo: {mmss_from_seconds(int(segB['time']))}")
+    s2e.write(f"Dist: {segB['dist']:.1f} nm")
+    s2f.write(f"Burn: {_round_tenth(segB['burn']):.1f} L")
 
-# ===== Checkpoints (reiniciam no TOC/TOD) =====
-st.markdown("### Checkpoints")
+st.divider()
+st.markdown(f"**Totais da perna** — ETE {hhmmss_from_seconds(TOTAL_SEC)} • Burn {TOTAL_BURN:.1f} L")
 
-def checkpoints_for(seg, step_min):
+# ===== Checkpoints (reiniciam no marcador) =====
+
+def checkpoints(seg, every_min):
     rows=[]; t=0
-    while t+step_min*60 <= seg['time']:
-        t += step_min*60
-        dist = seg['GS']*(t/3600.0)
-        rows.append({"T+ (min)": int(t/60), "Dist (nm)": round(dist,1)})
+    while t+every_min*60 <= seg['time']:
+        t += every_min*60
+        d = seg['GS']*(t/3600.0)
+        rows.append({"T+ (min)": int(t/60), "Dist (nm)": round(d,1)})
     return rows
 
-cpA = checkpoints_for(segA, ck_every)
+st.subheader("Checkpoints")
+cpA = checkpoints(segA, CK)
 if cpA:
-    st.markdown("**Desde início até {}**".format("TOC" if segB and profile=="CLIMB" else "TOD" if segB else "fim"))
+    st.markdown("**Desde início até {}**".format("TOC" if reached_marker and profile=="CLIMB" else "TOD" if reached_marker else "fim"))
     st.dataframe(cpA, use_container_width=True)
-
 if segB:
-    cpB = checkpoints_for(segB, ck_every)
+    cpB = checkpoints(segB, CK)
     if cpB:
         st.markdown("**Após {} (tempo recomeça em 0)**".format("TOC" if profile=="CLIMB" else "TOD"))
         st.dataframe(cpB, use_container_width=True)
 
-# ===== Adicionar perna ao histórico =====
-st.markdown("---")
+# ===== Adicionar ao histórico =====
 add = st.button("Adicionar perna ao histórico", type="primary")
 
-# EFOB simples (sem taxi)
-start_fuel = st.session_state.start_fuel
-burn_total = sum(float(s['burn']) for s in segments)
-efob_end = max(0.0, _round_tenth(start_fuel - burn_total))
+end_fuel = max(0.0, _round_tenth(fuel_start - (float(segA['burn']) + (float(segB['burn']) if segB else 0.0))))
 
 if add:
-    leg = {
-        "inputs": {"TC": tc_true, "Dist": dist_nm, "Alt0": alt_start, "Alt1": alt_target, "W": (wind_from, wind_kt)},
+    st.session_state.legs.append({
+        "inputs": {"TC": TC, "Dist": Dist, "Alt0": Alt0, "Alt1": Alt1, "W": (W_from, W_kt), "CK": CK, "FuelStart": fuel_start},
         "segments": segments,
-        "label": ("TOC" if (segB and profile=="CLIMB") else ("TOD" if (segB and profile=="DESCENT") else "")),
-        "totals": {"sec": TOTAL_SEC, "burn": burn_total},
-        "end_alt": end_alt,
-        "efob_end": efob_end,
+    	"marker": ("TOC" if (reached_marker and profile=="CLIMB") else ("TOD" if (reached_marker and profile=="DESCENT") else "")),
+        "end_alt": segB['alt1'] if segB else segA['alt1'],
+        "end_fuel": end_fuel,
+        "totals": {"sec": TOTAL_SEC, "burn": float(segA['burn']) + (float(segB['burn']) if segB else 0.0)},
         "check_A": cpA,
-        "check_B": checkpoints_for(segB, ck_every) if segB else []
-    }
-    st.session_state.legs_history.append(leg)
-    st.session_state.next_alt_start = float(end_alt)
-    st.success("Perna adicionada — podes introduzir a próxima.")
+        "check_B": cpB if segB else []
+    })
+    st.session_state.next_alt_start = float(segB['alt1'] if segB else segA['alt1'])
+    st.success("Perna adicionada. Podes inserir a próxima imediatamente acima.")
 
-# ===== Histórico (todas as pernas anteriores + atual opcionalmente) =====
-st.subheader("Histórico de Pernas")
-if st.session_state.legs_history:
-    for i,leg in enumerate(st.session_state.legs_history, start=1):
-        with st.expander(f"Perna {i}: TC {leg['inputs']['TC']:.0f}° • {leg['inputs']['Dist']:.1f} nm • Alt {int(leg['inputs']['Alt0'])}→{int(leg['inputs']['Alt1'])} ft " + (f"• {leg['label']}" if leg['label'] else "")):
-            st.write(f"Totais: {hhmmss_from_seconds(int(leg['totals']['sec']))} • Burn {_round_tenth(leg['totals']['burn']):.1f} L • Alt fim {int(_round_alt(leg['end_alt']))} ft • EFOB {leg['efob_end']:.1f} L")
+# ===== Histórico de pernas =====
+st.subheader("Histórico")
+if st.session_state.legs:
+    for i,leg in enumerate(st.session_state.legs, start=1):
+        title = f"Perna {i}: TC {leg['inputs']['TC']:.0f}° • {leg['inputs']['Dist']:.1f} nm • Alt {int(leg['inputs']['Alt0'])}→{int(leg['inputs']['Alt1'])} ft"
+        if leg['marker']: title += f" • {leg['marker']}"
+        with st.expander(title):
+            st.write(f"Totais: {hhmmss_from_seconds(int(leg['totals']['sec']))} • Burn {_round_tenth(leg['totals']['burn']):.1f} L • Alt fim {_round_alt(leg['end_alt'])} ft • EFOB fim {leg['end_fuel']:.1f} L")
             for j,s in enumerate(leg['segments'], start=1):
-                st.markdown(f"**Segmento {j} — {s['name']}**  | Alt {int(_round_alt(s['alt0']))}→{int(_round_alt(s['alt1']))} ft | TH/MH {_round_angle(s['TH'])}/{_round_angle(s['MH'])} | GS/TAS {_round_unit(s['GS'])}/{_round_unit(s['TAS'])} kt | Tempo {mmss_from_seconds(int(s['time']))} | Dist {s['dist']:.1f} nm | Burn {_round_tenth(s['burn']):.1f} L")
+                st.markdown(f"**Segmento {j} — {s['name']}**  | Alt {_round_alt(s['alt0'])}→{_round_alt(s['alt1'])} ft | TH/MH {_round_angle(s['TH'])}/{_round_angle(s['MH'])} | GS/TAS {_round_unit(s['GS'])}/{_round_unit(s['TAS'])} kt | Tempo {mmss_from_seconds(int(s['time']))} | Dist {s['dist']:.1f} nm | Burn {_round_tenth(s['burn']):.1f} L")
             if leg['check_A']:
                 st.caption("Checkpoints até marcador")
                 st.dataframe(leg['check_A'], use_container_width=True)
             if leg['check_B']:
-                st.caption("Checkpoints após marcador (tempo reinicia)")
+                st.caption("Checkpoints após marcador (T+ reinicia)")
                 st.dataframe(leg['check_B'], use_container_width=True)
 else:
-    st.caption("(Ainda sem pernas no histórico)")
+    st.caption("(Sem pernas ainda)")
 
