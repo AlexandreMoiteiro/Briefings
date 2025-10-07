@@ -89,7 +89,7 @@ def vy_interp(pa):
 # ==== estado ====
 ens=lambda k,v: st.session_state.setdefault(k,v)
 ens("mag_var",1); ens("mag_is_e",False); ens("qnh",1013); ens("oat",15); ens("weight",650.0)
-ens("rpm_climb",2250); ens("rpm_cruise",2100); ens("rpm_desc",1800); ens("desc_angle",3.0)
+ens("rpm_climb",2250); ens("rpm_cruise",2000); ens("rpm_desc",1800); ens("desc_angle",3.0)
 ens("start_clock",""); ens("legs",[]); ens("carry_alt",0.0); ens("carry_efob",85.0)
 
 # ==== cabeçalho ====
@@ -210,88 +210,42 @@ def timeline(seg,cps,start_label,end_label):
 
 # ==== apresentação ====
 st.markdown("---"); st.subheader("Resultados da Perna")
-
-# Estilos de UI
-CARD_CSS = """
-<style>
-.card{border:1px solid #eee;border-radius:12px;padding:14px 16px;margin:10px 0;background:#fff}
-.hlite{background:#f0f6ff;border:1px solid #d6e6ff}
-.badge{display:inline-block;padding:8px 14px;border-radius:999px;background:#002bff14;border:1px solid #002bff33;color:#244; font-weight:600}
-.sep{height:1px;background:#eee;margin:16px 0}
-</style>
-"""
-st.markdown(CARD_CSS, unsafe_allow_html=True)
-
 # Segmento 1
 st.markdown(f"### Segmento 1 — {segA['name']}")
-with st.container():
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    s1a,s1b,s1c,s1d = st.columns(4)
-    s1a.metric("Alt ini→fim (ft)", f"{int(round(segA['alt0']))} → {int(round(segA['alt1']))}")
-    s1b.metric("TH/MH (°)", f"{rang(segA['TH'])}T / { rang(segA['MH']) }M")
-    s1c.metric("GS/TAS (kt)", f"{rint(segA['GS'])} / {rint(segA['TAS'])}")
-    s1d.metric("FF (L/h)", f"{rint(segA['ff'])}")
+s1a,s1b,s1c,s1d=st.columns(4)
+s1a.metric("Alt ini→fim (ft)",f"{int(round(segA['alt0']))} → {int(round(segA['alt1']))}")
+s1b.metric("TH/MH (°)",f"{rang(segA['TH'])}T / {rang(segA['MH'])}M")
+s1c.metric("GS/TAS (kt)",f"{rint(segA['GS'])} / {rint(segA['TAS'])}")
+s1d.metric("FF (L/h)",f"{rint(segA['ff'])}")
+s1e,s1f,s1g=st.columns(3)
+s1e.metric("Tempo",mmss(segA['time']))
+s1f.metric("Dist (nm)",f"{segA['dist']:.1f}")
+s1g.metric("Burn (L)",f"{r10f(segA['burn']):.1f}")
+EF0=float(st.session_state.carry_efob); base1=base
+cpA=cps(segA,int(CK),base1,EF0)
+start_lbl = base1.strftime('%H:%M') if base1 else 'T+0'
+end_lbl = (base1+dt.timedelta(seconds=segA['time'])).strftime('%H:%M') if base1 else mmss(segA['time'])
+st.caption("Checkpoints do Segmento 1")
+timeline(segA,cpA,start_lbl,end_lbl)
 
-    # Linha 2 — tempo/dist/burn + performance específica
-    s1e,s1f,s1g,s1h = st.columns(4)
-    s1e.metric("Tempo", mmss(segA['time']))
-    s1f.metric("Dist (nm)", f"{segA['dist']:.1f}")
-    s1g.metric("Burn (L)", f"{r10f(segA['burn']):.1f}")
-    if profile=="CLIMB":
-        s1h.metric("Vy / ROC", f"{rint(Vy)} kt / {rint(ROC)} fpm")
-    elif profile=="DESCENT":
-        s1h.metric("ROD (auto)", f"{rint(ROD)} fpm")
-    else:
-        s1h.metric("Perfil", "LEVEL")
-
-    # checkpoints do Segmento 1
-    EF0 = float(st.session_state.carry_efob)
-    base1 = base
-    cpA = cps(segA, int(CK), base1, EF0)
-    start_lbl = base1.strftime('%H:%M') if base1 else 'T+0'
-    end_lbl = (base1 + dt.timedelta(seconds=segA['time'])).strftime('%H:%M') if base1 else mmss(segA['time'])
-    st.caption("Checkpoints do Segmento 1 (T+ reinicia aqui)")
-    timeline(segA, cpA, start_lbl, end_lbl)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# Marcador TOC/TOD destacado e separado da timeline
 if segB:
-    label = "TOC" if profile=="CLIMB" else "TOD"
-    html = f"""
-    <div class='sep'></div>
-    <div style='display:flex;align-items:center;gap:10px;margin:10px 0;'>
-      <div class='badge'>{label}</div>
-      <div>Tempo {mmss(segA['time'])} · Dist {segA['dist']:.1f} nm desde o início</div>
-    </div>
-    <div class='sep'></div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
-
-# Segmento 2
-if segB:
+    st.info(("TOC" if profile=="CLIMB" else "TOD")+f" — {mmss(segA['time'])} • {segA['dist']:.1f} nm desde o início")
     st.markdown(f"### Segmento 2 — {segB['name']}")
-    with st.container():
-        st.markdown("<div class='card hlite'>", unsafe_allow_html=True)
-        s2a,s2b,s2c,s2d = st.columns(4)
-        s2a.metric("Alt ini→fim (ft)", f"{int(round(segB['alt0']))} → {int(round(segB['alt1']))}")
-        s2b.metric("TH/MH (°)", f"{rang(segB['TH'])}T / { rang(segB['MH']) }M")
-        s2c.metric("GS/TAS (kt)", f"{rint(segB['GS'])} / {rint(segB['TAS'])}")
-        s2d.metric("FF (L/h)", f"{rint(segB['ff'])}")
-        s2e,s2f,s2g,s2h = st.columns(4)
-        s2e.metric("Tempo", mmss(segB['time']))
-        s2f.metric("Dist (nm)", f"{segB['dist']:.1f}")
-        s2g.metric("Burn (L)", f"{r10f(segB['burn']):.1f}")
-        s2h.metric("Perfil", "CRUISE")
-
-        # checkpoints do Segmento 2 (reinicia no TOC/TOD)
-        EF1 = max(0.0, r10f(EF0 - segA['burn']))
-        base2 = (base1 + dt.timedelta(seconds=segA['time'])) if base1 else None
-        cpB = cps(segB, int(CK), base2, EF1)
-        start_lbl2 = base2.strftime('%H:%M') if base2 else 'T+0'
-        end_lbl2 = (base2 + dt.timedelta(seconds=segB['time'])).strftime('%H:%M') if base2 else mmss(segB['time'])
-        st.caption("Checkpoints do Segmento 2 (reinicia no marcador)")
-        timeline(segB, cpB, start_lbl2, end_lbl2)
-        st.markdown("</div>", unsafe_allow_html=True)
+    s2a,s2b,s2c,s2d=st.columns(4)
+    s2a.metric("Alt ini→fim (ft)",f"{int(round(segB['alt0']))} → {int(round(segB['alt1']))}")
+    s2b.metric("TH/MH (°)",f"{rang(segB['TH'])}T / {rang(segB['MH'])}M")
+    s2c.metric("GS/TAS (kt)",f"{rint(segB['GS'])} / {rint(segB['TAS'])}")
+    s2d.metric("FF (L/h)",f"{rint(segB['ff'])}")
+    s2e,s2f,s2g=st.columns(3)
+    s2e.metric("Tempo",mmss(segB['time']))
+    s2f.metric("Dist (nm)",f"{segB['dist']:.1f}")
+    s2g.metric("Burn (L)",f"{r10f(segB['burn']):.1f}")
+    EF1=max(0.0, r10f(EF0-segA['burn'])); base2=(base1+dt.timedelta(seconds=segA['time'])) if base1 else None
+    st.caption("Checkpoints do Segmento 2")
+    cpB=cps(segB,int(CK),base2,EF1)
+    start_lbl2 = base2.strftime('%H:%M') if base2 else 'T+0'
+    end_lbl2 = (base2+dt.timedelta(seconds=segB['time'])).strftime('%H:%M') if base2 else mmss(segB['time'])
+    timeline(segB,cpB,start_lbl2,end_lbl2)
 
 st.markdown("---")
 TOT_SEC=sum(s['time'] for s in segments); TOT_BURN=r10f(sum(s['burn'] for s in segments))
