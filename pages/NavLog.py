@@ -1,12 +1,11 @@
 """
-NAVLOG v11 — Nova UI (Streamlit)
-• UI completamente redesenhada com navegação por abas (Planejar / Resumo / Timelines / Exportar)
-• Editor em tabela para as legs (com adicionar/apagar em massa)
-• KPIs fixos no topo, layout mais calmo e legível
-• Checkpoints auto-diluídos para evitar sobreposição
-• Mesma lógica de performance (P2008) preservada, estrutura do código mais modular
+NAVLOG v12 — UI Stepper (Streamlit)
+• UI totalmente nova com navegação por **etapas** (1) Configurar → (2) Legs → (3) Revisar → (4) Exportar
+• Editor em **tabela** para legs + ações rápidas (Climb/Level/Descent)
+• **KPIs ao vivo** na direita (dock), modo **impressão**, presets, e validação de entradas
+• Mesma matemática/performance preservadas (Tecnam P2008), código mais modular e comentado
 
-⚠️ Planejamento apenas. Valide sempre com AFM/POH.
+⚠️ Ferramenta de planejamento. Valide sempre com AFM/POH.
 """
 
 from __future__ import annotations
@@ -18,32 +17,42 @@ from typing import Optional, Dict, List, Tuple
 from math import sin, asin, radians, degrees
 
 # ==========================
-# CONFIG & STYLES
+# PAGE CONFIG & THEME
 # ==========================
 st.set_page_config(
-    page_title="NAVLOG v11 — Nova UI",
+    page_title="NAVLOG v12 — UI Stepper",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-CSS = """
+THEME_CSS = """
 <style>
 :root{
-  --card:#fff; --ink:#0f172a; --muted:#64748b; --bd:#e2e8f0; --soft:#f8fafc;
-  --pill:#eef2ff; --pill-bd:#c7d2fe; --good:#10b981; --warn:#f59e0b; --bad:#ef4444;
+  --ink:#0f172a; --muted:#64748b; --bd:#e2e8f0; --soft:#f8fafc; --card:#fff;
+  --pill:#eef2ff; --pill-bd:#c7d2fe; --ok:#10b981; --warn:#f59e0b; --err:#ef4444;
 }
 html, body, [data-testid="stAppViewContainer"]{background:#f6f7fb}
-.headerbar{position:sticky;top:0;z-index:10;background:#ffffffcc;backdrop-filter:saturate(180%) blur(10px);
-  border:1px solid var(--bd);border-radius:14px;padding:10px 14px;margin-bottom:14px;}
-.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
-.kpi{background:var(--soft);border:1px solid var(--bd);border-radius:12px;padding:10px}
-.kpi .lab{font-size:12px;color:var(--muted)}
-.kpi .val{font-weight:700;font-size:20px;color:var(--ink)}
-.card{border:1px solid var(--bd);border-radius:14px;padding:14px;background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.card{border:1px solid var(--bd);border-radius:14px;padding:16px;background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.header{display:flex;gap:12px;align-items:center;margin-bottom:8px}
+.h1{font-weight:800;font-size:22px;color:var(--ink)}
+.small{color:var(--muted);font-size:12px}
 .pill{display:inline-block;padding:4px 10px;border-radius:999px;background:var(--pill);border:1px solid var(--pill-bd);
      font-size:12px;color:#1e293b}
 .sep{height:1px;background:var(--bd);margin:10px 0}
 .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace}
+
+/* Stepper */
+.stepper{display:flex;gap:10px;align-items:center;margin-bottom:12px}
+.step{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--bd);border-radius:12px;background:#fff}
+.step.active{border-color:#6366f1;background:#eef2ff}
+.step .num{width:22px;height:22px;border-radius:999px;display:grid;place-items:center;background:#6366f1;color:#fff;font-weight:700}
+.step .label{font-weight:600}
+
+/* KPIs side dock */
+.dock{position:sticky;top:12px}
+.kpi{background:var(--soft);border:1px solid var(--bd);border-radius:12px;padding:10px;margin-bottom:8px}
+.kpi .lab{font-size:12px;color:var(--muted)}
+.kpi .val{font-weight:700;font-size:20px;color:var(--ink)}
 
 /* Timeline */
 .tl{position:relative;margin:8px 0 26px 0;padding-bottom:46px}
@@ -56,12 +65,12 @@ html, body, [data-testid="stAppViewContainer"]{background:#f6f7fb}
 .tl .tocdot{background:#2563eb}
 .tl .toddot{background:#ef4444}
 
-/* Print mode */
-.print .headerbar, .print [data-testid="stSidebar"] {display:none}
+/* Print */
+.print [data-testid="stSidebar"], .print .stepper, .print .dock {display:none}
 .print .card, .print .kpi{box-shadow:none}
 </style>
 """
-st.markdown(CSS, unsafe_allow_html=True)
+st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 # ==========================
 # SMALL UTILS
@@ -73,8 +82,6 @@ rang   = lambda x: int(round(float(x))) % 360
 rint   = lambda x: int(round(float(x)))
 r10f   = lambda x: round(float(x), 1)
 clamp  = lambda v, lo, hi: max(lo, min(hi, v))
-
-# angles & wind triangle
 
 def wrap360(x: float) -> float:
     x = math.fmod(float(x), 360.0)
@@ -174,7 +181,7 @@ def roc_interp(pa: float, temp_c: float) -> float:
     v00, v01 = ROC_ENR[p0][t0], ROC_ENR[p0][t1]
     v10, v11 = ROC_ENR[p1][t0], ROC_ENR[p1][t1]
     v0 = interp1(t, t0, t1, v00, v01)
-    v1 = interp1(t, t0, t1, v10, v11)
+    v1 = interp1(t, p0, p1, v0, v0) if False else interp1(t, t0, t1, v10, v11)
     return max(1.0, interp1(pa_c, p0, p1, v0, v1) * ROC_FACTOR)
 
 
@@ -185,12 +192,12 @@ def vy_interp(pa: float) -> float:
     return interp1(pa_c, p0, p1, VY[p0], VY[p1])
 
 # ==========================
-# STATE
+# STATE & PRESETS
 # ==========================
 
-def ens(k, v):
-    return st.session_state.setdefault(k, v)
+def ens(k, v): return st.session_state.setdefault(k, v)
 
+ens("step", 1)
 ens("mag_var", 1)
 ens("mag_is_e", False)
 ens("qnh", 1013)
@@ -207,8 +214,14 @@ ens("computed", [])
 ens("print_mode", False)
 ens("auto_carry_alt", True)
 
+PRESETS = {
+    "Economy": dict(rpm_cruise=2000, rpm_climb=2200, rpm_desc=1800, weight=620),
+    "Normal":  dict(rpm_cruise=2100, rpm_climb=2250, rpm_desc=1850, weight=650),
+    "Rápido":  dict(rpm_cruise=2250, rpm_climb=2265, rpm_desc=2000, weight=660),
+}
+
 # ==========================
-# CORE — BUILD ONE LEG
+# CORE — BUILD & RECOMPUTE
 # ==========================
 
 def build_segments(tc: float, dist_nm: float, alt0_ft: float, alt1_ft: float,
@@ -325,9 +338,6 @@ def build_segments(tc: float, dist_nm: float, alt0_ft: float, alt1_ft: float,
         "ck_func": make_checkpoints,
     }
 
-# ==========================
-# RECOMPUTE ALL
-# ==========================
 
 def recompute_all():
     st.session_state.computed = []
@@ -448,19 +458,26 @@ def timeline(seg: Dict, cps: List[Dict], start_label: str, end_label: str, toc_t
     st.markdown(html, unsafe_allow_html=True)
 
 # ==========================
-# SIDEBAR: GLOBAL CONTROLS
+# SIDEBAR: STEP NAV & GLOBALS
 # ==========================
 
 with st.sidebar:
-    st.markdown("### ✈️ Parâmetros Globais")
-    st.session_state.qnh = st.number_input("QNH (hPa)", 900, 1050, int(st.session_state.qnh))
-    st.session_state.oat = st.number_input("OAT (°C)", -40, 50, int(st.session_state.oat))
+    st.markdown("### Navegação")
+    st.session_state.step = st.radio("Etapa", options=[1,2,3,4], index=st.session_state.step-1,
+                                     format_func=lambda i: {1:"1) Configurar",2:"2) Legs",3:"3) Revisar",4:"4) Exportar"}[i])
 
-    colv1, colv2 = st.columns(2)
-    with colv1:
-        st.session_state.mag_var = st.number_input("Mag Var (°)", 0, 30, int(st.session_state.mag_var))
-    with colv2:
-        st.session_state.mag_is_e = st.selectbox("Var E/W", ["W","E"], index=(1 if st.session_state.mag_is_e else 0)) == "E"
+    st.markdown("---")
+    st.markdown("### ✈️ Parâmetros Globais")
+    col0, col1 = st.columns(2)
+    with col0:
+        st.session_state.qnh = st.number_input("QNH (hPa)", 900, 1050, int(st.session_state.qnh))
+        st.session_state.weight = st.number_input("Peso (kg)", 450.0, 700.0, float(st.session_state.weight), step=1.0)
+    with col1:
+        st.session_state.oat = st.number_input("OAT (°C)", -40, 50, int(st.session_state.oat))
+        st.session_state.start_efob  = st.number_input("EFOB inicial (L)", 0.0, 200.0, float(st.session_state.start_efob), step=0.5)
+
+    st.session_state.mag_var = st.number_input("Mag Var (°)", 0, 30, int(st.session_state.mag_var))
+    st.session_state.mag_is_e = st.selectbox("Var E/W", ["W","E"], index=(1 if st.session_state.mag_is_e else 0)) == "E"
 
     st.markdown("### ⚙️ Performance")
     st.session_state.rpm_climb  = st.slider("Climb RPM", 1800, 2265, int(st.session_state.rpm_climb), step=5)
@@ -470,27 +487,37 @@ with st.sidebar:
 
     st.markdown("### 🕒 Voo")
     st.session_state.start_clock = st.text_input("Hora off-blocks (HH:MM)", st.session_state.start_clock)
-    st.session_state.start_efob  = st.number_input("EFOB inicial (L)", 0.0, 200.0, float(st.session_state.start_efob), step=0.5)
+
+    st.markdown("### Presets")
+    preset = st.selectbox("Selecionar", ["—"]+list(PRESETS.keys()))
+    if preset != "—":
+        p = PRESETS[preset]
+        st.session_state.rpm_cruise = p["rpm_cruise"]
+        st.session_state.rpm_climb  = p["rpm_climb"]
+        st.session_state.rpm_desc   = p["rpm_desc"]
+        st.session_state.weight     = p["weight"]
+        st.success(f"Preset aplicado: {preset}")
 
     st.markdown("### Opções")
-    st.session_state.auto_carry_alt = st.toggle("Auto: Alt0(n) = Alt1(n-1)", value=st.session_state.auto_carry_alt)
+    st.session_state.auto_carry_alt = st.toggle("Auto: Alt0(n)=Alt1(n-1)", value=st.session_state.auto_carry_alt)
     st.session_state.print_mode     = st.toggle("Modo impressão", value=st.session_state.print_mode)
-    if st.button("Recalcular tudo", use_container_width=True):
-        recompute_all()
 
-# Apply print-mode class
-if st.session_state.print_mode:
-    st.markdown('<script>document.documentElement.classList.add("print")</script>', unsafe_allow_html=True)
-else:
-    st.markdown('<script>document.documentElement.classList.remove("print")</script>', unsafe_allow_html=True)
+    if st.button("Recalcular", use_container_width=True):
+        if st.session_state.legs:
+            recompute_all()
+
+# Print class
+st.markdown('<script>document.documentElement.classList.'
+            '+ ("add" if st.session_state.print_mode else "remove") + '("print")</script>', unsafe_allow_html=True)
 
 # ==========================
-# HEADER BAR WITH KPIS
+# HEADER & LIVE KPIs DOCK
 # ==========================
 
-st.title("NAVLOG — v11 • Nova UI")
+st.markdown('<div class="header"><div class="h1">NAVLOG — v12 • UI Stepper</div>'
+            '<div class="small">Planeamento • Tecnam P2008</div></div>', unsafe_allow_html=True)
 
-# compute once for KPIs
+# recompute for KPIs preview
 if st.session_state.legs:
     recompute_all()
     total_time = sum(c["tot_sec"] for c in st.session_state.computed)
@@ -501,238 +528,205 @@ else:
     total_burn = 0.0
     efob_final = st.session_state.start_efob
 
-st.markdown("<div class='headerbar'>", unsafe_allow_html=True)
-colk = st.columns(6)
-with colk[0]:
-    st.markdown("<div class='kpi'><div class='lab'>ETE total</div><div class='val mono'>"+hhmmss(total_time)+"</div></div>", unsafe_allow_html=True)
-with colk[1]:
+left, right = st.columns([4,1])
+with right:
+    st.markdown('<div class="dock">', unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi'><div class='lab'>ETE total</div><div class='val mono'>{hhmmss(total_time)}</div></div>", unsafe_allow_html=True)
     st.markdown(f"<div class='kpi'><div class='lab'>Burn total (L)</div><div class='val mono'>{total_burn:.1f}</div></div>", unsafe_allow_html=True)
-with colk[2]:
     st.markdown(f"<div class='kpi'><div class='lab'>EFOB final (L)</div><div class='val mono'>{efob_final:.1f}</div></div>", unsafe_allow_html=True)
-with colk[3]:
-    st.markdown(f"<div class='kpi'><div class='lab'>Climb RPM</div><div class='val mono'>{st.session_state.rpm_climb}</div></div>", unsafe_allow_html=True)
-with colk[4]:
-    st.markdown(f"<div class='kpi'><div class='lab'>Cruise RPM</div><div class='val mono'>{st.session_state.rpm_cruise}</div></div>", unsafe_allow_html=True)
-with colk[5]:
-    st.markdown(f"<div class='kpi'><div class='lab'>Descent RPM</div><div class='val mono'>{st.session_state.rpm_desc}</div></div>", unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-# ==========================
-# ABAS
-# ==========================
+with left:
+    # STEP INDICATOR
+    st.markdown('<div class="stepper">' + ''.join([
+        f"<div class='step {'active' if st.session_state.step==i else ''}'><div class='num'>{i}</div><div class='label'>{lbl}</div></div>"
+        for i,lbl in [(1,'Configurar'),(2,'Legs'),(3,'Revisar'),(4,'Exportar')]
+    ]) + '</div>', unsafe_allow_html=True)
 
-aba_plan, aba_sum, aba_tl, aba_export = st.tabs(["📍 Planejar", "📊 Resumo", "⏱️ Timelines", "⬇️ Exportar"])
-
-# ---- A) PLANEJAR -----------------------------------------------------------
-with aba_plan:
-    st.subheader("Legs do Roteiro")
-
-    # Add/remove helpers
-    c1, c2, c3 = st.columns([1,1,6])
-    with c1:
-        if st.button("➕ Nova leg", use_container_width=True):
-            if st.session_state.legs and st.session_state.auto_carry_alt:
-                last_alt = st.session_state.legs[-1]['Alt1']
-                st.session_state.legs.append(dict(TC=90.0, Dist=10.0, Alt0=float(last_alt), Alt1=float(last_alt), Wfrom=180, Wkt=15, CK=2, _del=False))
-            else:
-                st.session_state.legs.append(dict(TC=90.0, Dist=10.0, Alt0=0.0, Alt1=4000.0, Wfrom=180, Wkt=15, CK=2, _del=False))
-    with c2:
-        if st.button("🗑️ Apagar marcadas", use_container_width=True):
-            st.session_state.legs = [l for l in st.session_state.legs if not l.get('_del', False)]
-
-    # Build DataFrame for editor
-    if not st.session_state.legs:
-        st.info("Sem legs ainda. Clique em **Nova leg**.")
-    else:
-        df = pd.DataFrame(st.session_state.legs)
-        # Column order & dtypes
-        cols = ["TC","Dist","Alt0","Alt1","Wfrom","Wkt","CK","_del"]
-        for c in cols:
-            if c not in df.columns:
-                df[c] = 0
-        df = df[cols]
-        edited = st.data_editor(
-            df,
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "TC": st.column_config.NumberColumn("True Course (°T)", min_value=0.0, max_value=359.9, step=0.1, format="%.1f"),
-                "Dist": st.column_config.NumberColumn("Distância (nm)", min_value=0.0, max_value=500.0, step=0.1, format="%.1f"),
-                "Alt0": st.column_config.NumberColumn("Alt início (ft)", min_value=0.0, max_value=30000.0, step=50.0),
-                "Alt1": st.column_config.NumberColumn("Alt alvo (ft)", min_value=0.0, max_value=30000.0, step=50.0),
-                "Wfrom": st.column_config.NumberColumn("Vento FROM (°T)", min_value=0, max_value=360, step=1),
-                "Wkt": st.column_config.NumberColumn("Vento (kt)", min_value=0, max_value=150, step=1),
-                "CK": st.column_config.NumberColumn("Checkpoints (min)", min_value=1, max_value=10, step=1),
-                "_del": st.column_config.CheckboxColumn("Apagar", help="Marque e clique no botão acima"),
-            },
-            hide_index=True,
-        )
-
-        # Apply button
-        if st.button("Aplicar alterações & Recalcular", type="primary"):
-            # Save back to session_state
-            legs_new: List[Dict] = []
-            prev_alt1: Optional[float] = None
-            for _, row in edited.iterrows():
-                # auto-carry Alt0
-                if st.session_state.auto_carry_alt and prev_alt1 is not None:
-                    row["Alt0"] = float(prev_alt1)
-                leg = dict(
-                    TC=float(row["TC"]), Dist=float(row["Dist"]), Alt0=float(row["Alt0"]), Alt1=float(row["Alt1"]),
-                    Wfrom=int(row["Wfrom"]), Wkt=int(row["Wkt"]), CK=int(row["CK"])
-                )
-                prev_alt1 = leg["Alt1"]
-                legs_new.append(leg)
-            st.session_state.legs = legs_new
-            recompute_all()
-            st.success("Recalcular concluído.")
-
-    # Fast per-leg readout (no expanders)
-    if st.session_state.computed:
+    # ========== STEP 1: CONFIGURAR ==========
+    if st.session_state.step == 1:
+        st.markdown("#### Dicas rápidas")
+        st.info("Ajuste parâmetros globais na esquerda. Use **Presets** para começar rápido. Depois avance para **Legs**.")
         st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
-        st.subheader("Saída por Leg (compacta)")
-        rows = []
-        for i, comp in enumerate(st.session_state.computed, start=1):
-            segs = comp['segments']
-            label = profile_label(segs)
-            dist_total_leg = sum(s['dist'] for s in segs)
-            row = dict(
-                Leg=i,
-                Perfil=label,
-                ETE=hhmmss(comp['tot_sec']),
-                Burn=f"{comp['tot_burn']:.1f}",
-                Dist=f"{dist_total_leg:.1f}",
-                ROC=rint(comp['roc']),
-                ROD=rint(comp['rod']),
-                Tempo_Acum=hhmmss(comp['cum_sec']),
-                Fuel_Acum=f"{comp['cum_burn']:.1f}",
-            )
-            rows.append(row)
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("<div class='card'><b>Validação</b><br><span class='small'>Campos inválidos serão destacados no editor de legs.</span></div>", unsafe_allow_html=True)
+        with c2:
+            st.markdown("<div class='card'><b>Auto-carry</b><br><span class='small'>Quando ligado, Alt0(n) = Alt1(n-1) ao aplicar.</span></div>", unsafe_allow_html=True)
 
-# ---- B) RESUMO -------------------------------------------------------------
-with aba_sum:
-    st.subheader("Resumo do Voo")
-    if not st.session_state.computed:
-        st.info("Sem dados ainda. Edite as legs e clique em **Aplicar alterações & Recalcular** na aba Planejar.")
-    else:
-        # Totais por fase
-        climb_s = level_s = desc_s = 0
-        for comp in st.session_state.computed:
-            for seg in comp["segments"]:
-                name = seg["name"].lower()
-                if "climb" in name:
-                    climb_s += seg["time"]
-                elif "descent" in name:
-                    desc_s  += seg["time"]
+    # ========== STEP 2: LEGS ==========
+    if st.session_state.step == 2:
+        st.subheader("Construtor de Legs")
+        colA, colB, colC = st.columns([1,1,6])
+        with colA:
+            if st.button("➕ Nova leg", use_container_width=True):
+                if st.session_state.legs and st.session_state.auto_carry_alt:
+                    last_alt = st.session_state.legs[-1]['Alt1']
+                    st.session_state.legs.append(dict(TC=90.0, Dist=10.0, Alt0=float(last_alt), Alt1=float(last_alt), Wfrom=180, Wkt=15, CK=2, _del=False))
                 else:
-                    level_s += seg["time"]
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: st.metric("Tempo em Climb", hhmmss(climb_s))
-        with c2: st.metric("Tempo em Level (inclui Cruise)", hhmmss(level_s))
-        with c3: st.metric("Tempo em Descent", hhmmss(desc_s))
-        with c4: st.metric("Verificação (≈ ETE total)", hhmmss(climb_s+level_s+desc_s))
+                    st.session_state.legs.append(dict(TC=90.0, Dist=10.0, Alt0=0.0, Alt1=4000.0, Wfrom=180, Wkt=15, CK=2, _del=False))
+        with colB:
+            if st.button("🗑️ Apagar marcadas", use_container_width=True):
+                st.session_state.legs = [l for l in st.session_state.legs if not l.get('_del', False)]
+        with colC:
+            st.caption("Dica: use as ações rápidas abaixo para preencher colunas comuns.")
 
-        st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
-        # Tabela detalhada por segmento
-        rows = []
-        for i, comp in enumerate(st.session_state.computed, start=1):
-            for j, seg in enumerate(comp['segments'], start=1):
-                rows.append({
-                    "Leg": i,
-                    "Seg": j,
-                    "Nome": seg['name'],
-                    "Alt ini→fim (ft)": f"{int(round(seg['alt0']))}→{int(round(seg['alt1']))}",
-                    "TH/MH (°)": f"{rang(seg['TH'])}T/{rang(seg['MH'])}M",
-                    "GS/TAS (kt)": f"{rint(seg['GS'])}/{rint(seg['TAS'])}",
-                    "FF (L/h)": rint(seg['ff']),
-                    "Tempo": mmss(seg['time']),
-                    "Dist (nm)": f"{seg['dist']:.1f}",
-                    "Burn (L)": f"{r10f(seg['burn']):.1f}",
-                })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
-# ---- C) TIMELINES -----------------------------------------------------------
-with aba_tl:
-    st.subheader("Timelines")
-    if not st.session_state.computed:
-        st.info("Sem dados ainda.")
-    else:
-        # Consolidated timeline (one after another)
-        st.markdown("**Timeline consolidada do voo**")
-        total_elapsed = 0
-        for comp in st.session_state.computed:
-            for idx, seg in enumerate(comp['segments']):
-                # build pseudo clock labels for continuity
-                start_lbl = seg.get("clock_start", f"T+{mmss(total_elapsed)}")
-                end_lbl   = seg.get("clock_end", f"T+{mmss(total_elapsed + seg['time'])}")
-                timeline(seg, comp['cpA'] if idx==0 else comp['cpB'], start_lbl, end_lbl,
-                         toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(seg)==idx else None)
-                total_elapsed += seg['time']
-
-        st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
-        st.markdown("**Timelines por leg**")
-        for i, comp in enumerate(st.session_state.computed, start=1):
-            with st.expander(f"Leg {i}"):
-                segA = comp['segments'][0]
-                timeline(segA, comp['cpA'], segA.get("clock_start","T+0"), segA.get("clock_end", mmss(segA['time'])),
-                         toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segA)==0 else None)
-                if len(comp['segments'])>1:
-                    segB = comp['segments'][1]
-                    timeline(segB, comp['cpB'], segB.get("clock_start","T+0"), segB.get("clock_end", mmss(segB['time'])),
-                             toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segB)==1 else None)
-
-# ---- D) EXPORT --------------------------------------------------------------
-with aba_export:
-    st.subheader("Exportar")
-    if not st.session_state.computed:
-        st.info("Nada para exportar ainda.")
-    else:
-        # CSV: legs
-        legs_csv = pd.DataFrame(st.session_state.legs).to_csv(index=False).encode()
-        st.download_button("⬇️ Baixar CSV das legs", legs_csv, file_name="navlog_legs.csv", mime="text/csv")
-
-        # CSV: segmentos detalhados
-        seg_rows = []
-        for i, comp in enumerate(st.session_state.computed, start=1):
-            for j, seg in enumerate(comp['segments'], start=1):
-                seg_rows.append({
-                    "leg": i,
-                    "segmento": j,
-                    "nome": seg['name'],
-                    "alt0_ft": seg['alt0'],
-                    "alt1_ft": seg['alt1'],
-                    "TH": rang(seg['TH']),
-                    "MH": rang(seg['MH']),
-                    "GS": rint(seg['GS']),
-                    "TAS": rint(seg['TAS']),
-                    "FF_Lph": rint(seg['ff']),
-                    "tempo_s": seg['time'],
-                    "dist_nm": round(seg['dist'],1),
-                    "burn_L": r10f(seg['burn']),
-                })
-        seg_csv = pd.DataFrame(seg_rows).to_csv(index=False).encode()
-        st.download_button("⬇️ Baixar CSV de segmentos", seg_csv, file_name="navlog_segmentos.csv", mime="text/csv")
-
-        # CSV: checkpoints
-        ck_rows = []
-        for i, comp in enumerate(st.session_state.computed, start=1):
-            for seg, cps in zip(comp['segments'], [comp['cpA']] + ([comp['cpB']] if len(comp['segments'])>1 else [])):
-                for k, cp in enumerate(cps, start=1):
-                    ck_rows.append({
-                        "leg": i,
-                        "seg": seg['name'],
-                        "ordem": k,
-                        "T+min": cp['min'],
-                        "NM": cp['nm'],
-                        "ETO": cp['eto'],
-                        "EFOB_L": cp['efob'],
-                    })
-        if ck_rows:
-            ck_csv = pd.DataFrame(ck_rows).to_csv(index=False).encode()
-            st.download_button("⬇️ Baixar CSV de checkpoints", ck_csv, file_name="navlog_checkpoints.csv", mime="text/csv")
+        if not st.session_state.legs:
+            st.info("Sem legs ainda. Clique em **Nova leg**.")
         else:
-            st.caption("Sem checkpoints gerados (pernas muito curtas ou CK elevado).")
+            df = pd.DataFrame(st.session_state.legs)
+            cols = ["TC","Dist","Alt0","Alt1","Wfrom","Wkt","CK","_del"]
+            for c in cols:
+                if c not in df.columns: df[c] = 0
+            df = df[cols]
+
+            edited = st.data_editor(
+                df,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "TC":   st.column_config.NumberColumn("True Course (°T)", min_value=0.0, max_value=359.9, step=0.1, format="%.1f"),
+                    "Dist": st.column_config.NumberColumn("Distância (nm)",  min_value=0.0, max_value=500.0, step=0.1, format="%.1f"),
+                    "Alt0": st.column_config.NumberColumn("Alt início (ft)",  min_value=0.0, max_value=30000.0, step=50.0),
+                    "Alt1": st.column_config.NumberColumn("Alt alvo (ft)",    min_value=0.0, max_value=30000.0, step=50.0),
+                    "Wfrom":st.column_config.NumberColumn("Vento FROM (°T)",  min_value=0,   max_value=360, step=1),
+                    "Wkt":  st.column_config.NumberColumn("Vento (kt)",       min_value=0,   max_value=150, step=1),
+                    "CK":   st.column_config.NumberColumn("Checkpoints (min)",min_value=1,   max_value=10, step=1),
+                    "_del": st.column_config.CheckboxColumn("Apagar", help="Marque e clique no botão acima"),
+                },
+                hide_index=True,
+            )
+
+            # Quick actions row
+            qa1, qa2, qa3, qa4 = st.columns(4)
+            with qa1:
+                if st.button("Level: Alt1 = Alt0", use_container_width=True):
+                    edited["Alt1"] = edited["Alt0"]
+            with qa2:
+                if st.button("Climb: +2000 ft", use_container_width=True):
+                    edited["Alt1"] = edited["Alt0"] + 2000
+            with qa3:
+                if st.button("Desc: −2000 ft", use_container_width=True):
+                    edited["Alt1"] = (edited["Alt0"] - 2000).clip(lower=0)
+            with qa4:
+                if st.button("Dist: arred. 0.1 nm", use_container_width=True):
+                    edited["Dist"] = (edited["Dist"].astype(float)).round(1)
+
+            # Apply
+            if st.button("Aplicar & Recalcular", type="primary"):
+                legs_new: List[Dict] = []
+                prev_alt1: Optional[float] = None
+                errors = []
+                for idx, row in edited.iterrows():
+                    tc, dist = float(row["TC"]), float(row["Dist"])
+                    alt0, alt1 = float(row["Alt0"]), float(row["Alt1"])
+                    wfrom, wkt, ck = int(row["Wfrom"]), int(row["Wkt"]), int(row["CK"])
+                    if not (0.0 <= tc < 360.0): errors.append(f"Linha {idx+1}: TC fora do intervalo")
+                    if dist <= 0: errors.append(f"Linha {idx+1}: Dist deve ser > 0")
+                    if st.session_state.auto_carry_alt and prev_alt1 is not None:
+                        alt0 = float(prev_alt1)
+                    legs_new.append(dict(TC=tc, Dist=dist, Alt0=alt0, Alt1=alt1, Wfrom=wfrom, Wkt=wkt, CK=ck))
+                    prev_alt1 = alt1
+                if errors:
+                    st.error("\n".join(errors))
+                else:
+                    st.session_state.legs = legs_new
+                    recompute_all()
+                    st.success("Recalcular concluído.")
+
+    # ========== STEP 3: REVISAR ==========
+    if st.session_state.step == 3:
+        st.subheader("Revisão do Voo")
+        if not st.session_state.computed:
+            st.info("Sem dados ainda. Vá para **Legs**, aplique e volte aqui.")
+        else:
+            # Overview table
+            rows = []
+            for i, comp in enumerate(st.session_state.computed, start=1):
+                segs = comp['segments']
+                label = profile_label(segs)
+                dist_total_leg = sum(s['dist'] for s in segs)
+                rows.append(dict(
+                    Leg=i, Perfil=label, ETE=hhmmss(comp['tot_sec']), Burn=f"{comp['tot_burn']:.1f}", Dist=f"{dist_total_leg:.1f}",
+                    ROC=rint(comp['roc']), ROD=rint(comp['rod']), Tempo_Acum=hhmmss(comp['cum_sec']), Fuel_Acum=f"{comp['cum_burn']:.1f}",
+                ))
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+            st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+            # Phase totals
+            climb_s = level_s = desc_s = 0
+            for comp in st.session_state.computed:
+                for seg in comp["segments"]:
+                    name = seg["name"].lower()
+                    if "climb" in name: climb_s += seg["time"]
+                    elif "descent" in name: desc_s += seg["time"]
+                    else: level_s += seg["time"]
+            c1, c2, c3, c4 = st.columns(4)
+            with c1: st.metric("Tempo em Climb", hhmmss(climb_s))
+            with c2: st.metric("Tempo em Level (inclui Cruise)", hhmmss(level_s))
+            with c3: st.metric("Tempo em Descent", hhmmss(desc_s))
+            with c4: st.metric("Verificação (≈ ETE total)", hhmmss(climb_s+level_s+desc_s))
+
+            st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+            # Consolidated timeline
+            st.markdown("**Timeline consolidada**")
+            total_elapsed = 0
+            for comp in st.session_state.computed:
+                for idx, seg in enumerate(comp['segments']):
+                    start_lbl = seg.get("clock_start", f"T+{mmss(total_elapsed)}")
+                    end_lbl   = seg.get("clock_end", f"T+{mmss(total_elapsed + seg['time'])}")
+                    timeline(seg, comp['cpA'] if idx==0 else comp['cpB'], start_lbl, end_lbl,
+                             toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(seg)==idx else None)
+                    total_elapsed += seg['time']
+
+            # Per-leg timelines
+            st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+            st.markdown("**Timelines por leg**")
+            for i, comp in enumerate(st.session_state.computed, start=1):
+                with st.expander(f"Leg {i}"):
+                    segA = comp['segments'][0]
+                    timeline(segA, comp['cpA'], segA.get("clock_start","T+0"), segA.get("clock_end", mmss(segA['time'])),
+                             toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segA)==0 else None)
+                    if len(comp['segments'])>1:
+                        segB = comp['segments'][1]
+                        timeline(segB, comp['cpB'], segB.get("clock_start","T+0"), segB.get("clock_end", mmss(segB['time'])),
+                                 toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segB)==1 else None)
+
+    # ========== STEP 4: EXPORTAR ==========
+    if st.session_state.step == 4:
+        st.subheader("Exportar / Imprimir")
+        if not st.session_state.computed:
+            st.info("Nada para exportar ainda. Vá para **Legs** e aplique.")
+        else:
+            legs_csv = pd.DataFrame(st.session_state.legs).to_csv(index=False).encode()
+            st.download_button("⬇️ CSV das legs", legs_csv, file_name="navlog_legs.csv", mime="text/csv")
+
+            seg_rows = []
+            for i, comp in enumerate(st.session_state.computed, start=1):
+                for j, seg in enumerate(comp['segments'], start=1):
+                    seg_rows.append({
+                        "leg": i, "segmento": j, "nome": seg['name'],
+                        "alt0_ft": seg['alt0'], "alt1_ft": seg['alt1'],
+                        "TH": rang(seg['TH']), "MH": rang(seg['MH']), "GS": rint(seg['GS']),
+                        "TAS": rint(seg['TAS']), "FF_Lph": rint(seg['ff']), "tempo_s": seg['time'],
+                        "dist_nm": round(seg['dist'],1), "burn_L": r10f(seg['burn']),
+                    })
+            seg_csv = pd.DataFrame(seg_rows).to_csv(index=False).encode()
+            st.download_button("⬇️ CSV de segmentos", seg_csv, file_name="navlog_segmentos.csv", mime="text/csv")
+
+            ck_rows = []
+            for i, comp in enumerate(st.session_state.computed, start=1):
+                for seg, cps in zip(comp['segments'], [comp['cpA']] + ([comp['cpB']] if len(comp['segments'])>1 else [])):
+                    for k, cp in enumerate(cps, start=1):
+                        ck_rows.append({"leg": i, "seg": seg['name'], "ordem": k, "T+min": cp['min'], "NM": cp['nm'], "ETO": cp['eto'], "EFOB_L": cp['efob']})
+            if ck_rows:
+                ck_csv = pd.DataFrame(ck_rows).to_csv(index=False).encode()
+                st.download_button("⬇️ CSV de checkpoints", ck_csv, file_name="navlog_checkpoints.csv", mime="text/csv")
+            else:
+                st.caption("Sem checkpoints gerados (pernas muito curtas ou CK elevado).")
+
+            st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+            st.caption("Dica: ative **Modo impressão** na navegação para ocultar controles e imprimir.")
 
 
 
