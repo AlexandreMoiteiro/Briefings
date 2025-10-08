@@ -1,5 +1,5 @@
 # app.py — NAVLOG v9 (AFM) — Clean Flow + cumulativos + perfil correto + timeline sem sobreposição
-# Acrescentado: breakdown do tempo total por fase (Climb / Level / Descent) no rodapé geral.
+# NOVO: "Espera" (hold) por leg — inputs: minutos e FF (0=auto); somado aos totais/Acumulado e conta como Level.
 
 import streamlit as st
 import datetime as dt
@@ -17,21 +17,14 @@ rang = lambda x: int(round(float(x))) % 360
 rint = lambda x: int(round(float(x)))
 r10f = lambda x: round(float(x), 1)
 
-def wrap360(x):
-    x = math.fmod(float(x), 360.0)
-    return x + 360 if x < 0 else x
-
-def angdiff(a, b):
-    return (a - b + 180) % 360 - 180
+def wrap360(x): x = math.fmod(float(x), 360.0); return x + 360 if x < 0 else x
+def angdiff(a, b): return (a - b + 180) % 360 - 180
 
 def wind_triangle(tc, tas, wdir, wkt):
-    if tas <= 0:
-        return 0.0, wrap360(tc), 0.0
-    d = radians(angdiff(wdir, tc))
-    cross = wkt * sin(d)
+    if tas <= 0: return 0.0, wrap360(tc), 0.0
+    d = radians(angdiff(wdir, tc)); cross = wkt * sin(d)
     s = max(-1, min(1, cross / max(tas, 1e-9)))
-    wca = degrees(asin(s))
-    th = wrap360(tc + wca)
+    wca = degrees(asin(s)); th = wrap360(tc + wca)
     gs = max(0.0, tas * math.cos(radians(wca)) - wkt * math.cos(d))
     return wca, th, gs
 
@@ -56,19 +49,17 @@ CRUISE = {
 }
 
 isa_temp = lambda pa: 15.0 - 2.0*(pa/1000.0)
-press_alt = lambda alt, qnh: float(alt) + (1013.0 - float(qnh))*30.0
+press_alt = lambda alt, qnh: float(alt) + (1013.0 - float(qnh)) * 30.0
 clamp = lambda v, lo, hi: max(lo, min(hi, v))
 
 def interp1(x, x0, x1, y0, y1):
-    if x1 == x0:
-        return y0
+    if x1 == x0: return y0
     t = (x - x0) / (x1 - x0)
-    return y0 + t*(y1 - y0)
+    return y0 + t * (y1 - y0)
 
 def cruise_lookup(pa, rpm, oat, weight):
     rpm = min(int(rpm), 2265)
-    pas = sorted(CRUISE.keys())
-    pa_c = clamp(pa, pas[0], pas[-1])
+    pas = sorted(CRUISE.keys()); pa_c = clamp(pa, pas[0], pas[-1])
     p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
     table0 = CRUISE[p0]; table1 = CRUISE[p1]
 
@@ -88,50 +79,35 @@ def cruise_lookup(pa, rpm, oat, weight):
 
     if oat is not None:
         dev = oat - isa_temp(pa_c)
-        if dev > 0:
-            tas *= 1 - 0.02*(dev/15.0); ff *= 1 - 0.025*(dev/15.0)
-        elif dev < 0:
-            tas *= 1 + 0.01*((-dev)/15.0); ff *= 1 + 0.03*((-dev)/15.0)
+        if dev > 0: tas *= 1 - 0.02*(dev/15.0); ff *= 1 - 0.025*(dev/15.0)
+        elif dev < 0: tas *= 1 + 0.01*((-dev)/15.0); ff *= 1 + 0.03*((-dev)/15.0)
 
     tas *= (1.0 + 0.033*((650.0 - float(weight))/100.0))
     return max(0.0, tas), max(0.0, ff)
 
 def roc_interp(pa, temp):
-    pas = sorted(ROC_ENR.keys())
-    pa_c = clamp(pa, pas[0], pas[-1])
+    pas = sorted(ROC_ENR.keys()); pa_c = clamp(pa, pas[0], pas[-1])
     p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
-    temps = [-25,0,25,50]
-    t = clamp(temp, temps[0], temps[-1])
+    temps = [-25,0,25,50]; t = clamp(temp, temps[0], temps[-1])
     if t <= 0: t0, t1 = -25, 0
     elif t <= 25: t0, t1 = 0, 25
     else: t0, t1 = 25, 50
     v00, v01 = ROC_ENR[p0][t0], ROC_ENR[p0][t1]
     v10, v11 = ROC_ENR[p1][t0], ROC_ENR[p1][t1]
-    v0 = interp1(t, t0, t1, v00, v01)
-    v1 = interp1(t, t0, t1, v10, v11)
+    v0 = interp1(t, t0, t1, v00, v01); v1 = interp1(t, t0, t1, v10, v11)
     return max(1.0, interp1(pa_c, p0, p1, v0, v1) * ROC_FACTOR)
 
 def vy_interp(pa):
-    pas = sorted(VY.keys())
-    pa_c = clamp(pa, pas[0], pas[-1])
+    pas = sorted(VY.keys()); pa_c = clamp(pa, pas[0], pas[-1])
     p0 = max([p for p in pas if p <= pa_c]); p1 = min([p for p in pas if p >= pa_c])
     return interp1(pa_c, p0, p1, VY[p0], VY[p1])
 
 # ====== STATE ======
 def ens(k, v): return st.session_state.setdefault(k, v)
-
-ens("mag_var", 1)
-ens("mag_is_e", False)
-ens("qnh", 1013)
-ens("oat", 15)
-ens("weight", 650.0)
-ens("rpm_climb", 2250)
-ens("rpm_cruise", 2100)  # por defeito
-ens("rpm_desc", 1800)
-ens("desc_angle", 3.0)
-ens("start_clock", "")
-ens("start_efob", 85.0)
-ens("legs", [])
+ens("mag_var", 1); ens("mag_is_e", False); ens("qnh", 1013); ens("oat", 15); ens("weight", 650.0)
+ens("rpm_climb", 2250); ens("rpm_cruise", 2100); ens("rpm_desc", 1800); ens("desc_angle", 3.0)
+ens("start_clock", ""); ens("start_efob", 85.0)
+ens("legs", [])         # cada leg: {TC, Dist, Alt0, Alt1, Wfrom, Wkt, CK, HoldMin, HoldFF}
 ens("computed", [])
 
 # ====== STYLE ======
@@ -183,20 +159,23 @@ def timeline(seg, cps, start_label, end_label, toc_tod=None):
     st.markdown("<div class='spacer'></div>", unsafe_allow_html=True)
 
 # ====== PERFIL LEG (rótulo) ======
-def leg_profile_label(segments):
-    if not segments: return "—"
-    n = len(segments); s0 = segments[0]['name']
-    if "Climb" in s0:
-        if n > 1 and "Cruise" in segments[1]['name']: return "Climb + Cruise"
-        return "Climb (não atinge)" if "não atinge" in s0 else "Climb"
-    if "Descent" in s0:
-        if n > 1 and "Cruise" in segments[1]['name']: return "Descent + Cruise"
-        return "Descent (não atinge)" if "não atinge" in s0 else "Descent"
-    if "Level" in s0: return "Level"
-    return s0
+def leg_profile_label(segments, has_hold=False):
+    lbl = "—"
+    if segments:
+        n = len(segments); s0 = segments[0]['name']
+        if "Climb" in s0:
+            lbl = "Climb + Cruise" if n > 1 and "Cruise" in segments[1]['name'] else ("Climb (não atinge)" if "não atinge" in s0 else "Climb")
+        elif "Descent" in s0:
+            lbl = "Descent + Cruise" if n > 1 and "Cruise" in segments[1]['name'] else ("Descent (não atinge)" if "não atinge" in s0 else "Descent")
+        elif "Level" in s0:
+            lbl = "Level"
+        else:
+            lbl = s0
+    if has_hold: lbl += " + Hold"
+    return lbl
 
-# ====== CÁLCULO DE UMA LEG ======
-def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
+# ====== CÁLCULO DE UMA LEG (com HOLD) ======
+def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params, hold_min=0.0, hold_ff_input=0.0):
     qnh, oat, mag_var, mag_is_e = params['qnh'], params['oat'], params['mag_var'], params['mag_is_e']
     rpm_climb, rpm_cruise, rpm_desc, desc_angle, weight = params['rpm_climb'], params['rpm_cruise'], params['rpm_desc'], params['desc_angle'], params['weight']
 
@@ -261,6 +240,27 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
         segA = {"name":"Level", "TH":THr, "MH":MHr, "GS":GScr, "TAS":TAS_cru, "ff":FF_cru, "time":tA, "dist":dist, "alt0":alt0, "alt1":END_ALT}
 
     segments = [segA] + ([segB] if segB else [])
+
+    # ----- HOLD / ESPERA -----
+    hold_min = max(0.0, float(hold_min))
+    if hold_min > 0.0:
+        # FF da espera: input >0 usa-o; 0 => auto por cruise @ Alt1 e rpm_cruise
+        hold_ff = float(hold_ff_input)
+        if hold_ff <= 0:
+            _, hold_ff_auto = cruise_lookup(pa1, int(rpm_cruise), oat, weight)
+            hold_ff = hold_ff_auto
+        hold_sec = rt10(hold_min * 60.0)
+        segH = {
+            "name": "Hold/Espera",
+            "TH": segments[-1]["TH"],  # herda o último TH só para exibir
+            "MH": segments[-1]["MH"],
+            "GS": 0.0, "TAS": 0.0,
+            "ff": hold_ff, "time": hold_sec, "dist": 0.0,
+            "alt0": END_ALT, "alt1": END_ALT
+        }
+        segments.append(segH)
+
+    # burn por segmento
     for s in segments:
         s["burn"] = s["ff"] * (s["time"] / 3600.0)
 
@@ -269,9 +269,11 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
 
     def cps(seg, every_min, base_clk, efob_start):
         out = []; t = 0
+        if every_min <= 0: return out
         while t + every_min*60 <= seg['time']:
             t += every_min*60
-            d = seg['GS']*(t/3600.0); burn = seg['ff']*(t/3600.0)
+            d = seg['GS']*(t/3600.0)
+            burn = seg['ff']*(t/3600.0)
             eto = (base_clk + dt.timedelta(seconds=t)).strftime('%H:%M') if base_clk else ""
             efob = max(0.0, r10f(efob_start - burn))
             out.append({"t":t, "min":int(t/60), "nm":round(d,1), "eto":eto, "efob":efob})
@@ -281,8 +283,8 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params):
         "segments": segments,
         "tot_sec": tot_sec,
         "tot_burn": tot_burn,
-        "roc": ROC,
-        "rod": ROD,
+        "roc": roc_interp(pa0, isa_temp(pa0)),  # mostrar ROC base para info
+        "rod": max(100.0, (wind_triangle(tc, cruise_lookup(pa_avg, int(rpm_desc), None, weight)[0], 0, 0)[2]) * 5.0 * (params['desc_angle']/3.0)),
         "toc_tod": toc_tod_marker,
         "ck_func": cps
     }
@@ -307,50 +309,46 @@ def recompute_all():
 
     carry_efob = float(st.session_state.start_efob)
     clock = base_time
-    cum_sec = 0
-    cum_burn = 0.0
+    cum_sec = 0; cum_burn = 0.0
 
     for idx, leg in enumerate(st.session_state.legs):
         res = build_segments(
             tc=leg['TC'], dist=leg['Dist'], alt0=leg['Alt0'], alt1=leg['Alt1'],
-            wfrom=leg['Wfrom'], wkt=leg['Wkt'], ck_min=leg['CK'], params=params
+            wfrom=leg['Wfrom'], wkt=leg['Wkt'], ck_min=leg['CK'], params=params,
+            hold_min=leg.get('HoldMin', 0.0), hold_ff_input=leg.get('HoldFF', 0.0)
         )
 
         EF0 = carry_efob
         segs = res["segments"]
         segs[0]["EFOB_start"] = EF0
         if len(segs) > 1:
-            EF1 = max(0.0, r10f(EF0 - segs[0]['burn']))
-            segs[1]["EFOB_start"] = EF1
+            running_burn = segs[0]['burn']
+            for k in range(1, len(segs)):
+                segs[k]["EFOB_start"] = max(0.0, r10f(EF0 - running_burn))
+                running_burn += segs[k]['burn']
 
         base1 = clock
-        if base1:
-            segs[0]["clock_start"] = base1.strftime('%H:%M')
-            segs[0]["clock_end"] = (base1 + dt.timedelta(seconds=segs[0]['time'])).strftime('%H:%M')
-        else:
-            segs[0]["clock_start"] = 'T+0'
-            segs[0]["clock_end"] = mmss(segs[0]['time'])
-        if len(segs) > 1:
-            base2 = (base1 + dt.timedelta(seconds=segs[0]['time'])) if base1 else None
-            if base2:
-                segs[1]["clock_start"] = base2.strftime('%H:%M')
-                segs[1]["clock_end"] = (base2 + dt.timedelta(seconds=segs[1]['time'])).strftime('%H:%M')
+        t_cursor = 0
+        for k, seg in enumerate(segs):
+            if base1:
+                seg["clock_start"] = (base1 + dt.timedelta(seconds=t_cursor)).strftime('%H:%M')
+                seg["clock_end"]   = (base1 + dt.timedelta(seconds=t_cursor + seg['time'])).strftime('%H:%M')
             else:
-                segs[1]["clock_start"] = 'T+0'
-                segs[1]["clock_end"] = mmss(segs[1]['time'])
+                seg["clock_start"] = 'T+{}'.format(mmss(t_cursor))
+                seg["clock_end"]   = 'T+{}'.format(mmss(t_cursor + seg['time']))
+            t_cursor += seg['time']
 
-        # checkpoints
-        cpA = res["ck_func"](segs[0], int(leg['CK']), base1, EF0)
-        cpB = res["ck_func"](segs[1], int(leg['CK']),
-                             (base1 + dt.timedelta(seconds=segs[0]['time'])) if base1 and len(segs)>1 else None,
-                             max(0.0, r10f(EF0 - segs[0]['burn'])) if len(segs)>1 else None) if len(segs)>1 else []
+        # checkpoints: só para segmentos em movimento (GS>0). Para Hold, omitimos.
+        cp_list = []
+        for k, seg in enumerate(segs):
+            base_k = (clock + dt.timedelta(seconds=sum(s['time'] for s in segs[:k]))) if clock else None
+            efob_k = segs[k].get("EFOB_start", EF0)
+            cp_list.append(res["ck_func"](seg, int(st.session_state.legs[idx]['CK']), base_k, efob_k) if seg['GS']>0 else [])
 
-        # atualizar carries e acumulados
         clock = (clock + dt.timedelta(seconds=res['tot_sec'])) if clock else None
         carry_efob = max(0.0, r10f(carry_efob - sum(s['burn'] for s in segs)))
         carry_alt = segs[-1]['alt1']
-        cum_sec += res['tot_sec']
-        cum_burn = r10f(cum_burn + res['tot_burn'])
+        cum_sec += res['tot_sec']; cum_burn = r10f(cum_burn + res['tot_burn'])
 
         st.session_state.computed.append({
             "segments": segs,
@@ -359,7 +357,7 @@ def recompute_all():
             "roc": res["roc"],
             "rod": res["rod"],
             "toc_tod": res["toc_tod"],
-            "cpA": cpA, "cpB": cpB,
+            "cps": cp_list,
             "carry_efob_after": carry_efob,
             "carry_alt_after": carry_alt,
             "cum_sec": cum_sec,
@@ -368,18 +366,15 @@ def recompute_all():
 
 # ====== CRUD ======
 def add_leg(prefill=None):
-    d = dict(TC=90.0, Dist=10.0, Alt0=0.0, Alt1=4000.0, Wfrom=180, Wkt=15, CK=2)
+    d = dict(TC=90.0, Dist=10.0, Alt0=0.0, Alt1=4000.0, Wfrom=180, Wkt=15, CK=2, HoldMin=0.0, HoldFF=0.0)
     if prefill: d.update(prefill)
-    st.session_state.legs.append(d)
-    recompute_all()
+    st.session_state.legs.append(d); recompute_all()
 
 def update_leg(i, vals):
-    st.session_state.legs[i].update(vals)
-    recompute_all()
+    st.session_state.legs[i].update(vals); recompute_all()
 
 def delete_leg(i):
-    st.session_state.legs.pop(i)
-    recompute_all()
+    st.session_state.legs.pop(i); recompute_all()
 
 # ====== HEADER GLOBAL ======
 st.title("NAVLOG — v9 (AFM) • Fluxo Limpo")
@@ -415,7 +410,7 @@ with act1:
             pref = None
         add_leg(prefill=pref)
 with act2:
-    st.caption("Fluxo: parâmetros globais → criar legs → editar nos cartões. Cada edição recalcula e **propaga** para as seguintes.")
+    st.caption("Fluxo: parâmetros globais → criar legs → editar cartões. Edição propaga e inclui 'Espera' se definido.")
 
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
@@ -439,13 +434,15 @@ else:
     # Lista de legs (caixinhas)
     for i, leg in enumerate(st.session_state.legs):
         comp = st.session_state.computed[i]
-        segA = comp['segments'][0]
-        dist_total_leg = sum(s['dist'] for s in comp['segments'])
-        profile_lbl = leg_profile_label(comp['segments'])
+        segs = comp['segments']
+        segA = segs[0]
+        dist_total_leg = sum(s['dist'] for s in segs)
+        has_hold = any(s['name'].startswith("Hold") for s in segs)
+        profile_lbl = leg_profile_label(segs, has_hold=has_hold)
 
         st.markdown("<div class='card'>", unsafe_allow_html=True)
 
-        # Header com acumulados incluídos
+        # Header com acumulados e info
         hc1, hc2, hc3, hc4, hc5, hc6, hc7, hc8 = st.columns([3,2,2,2,2,2,2,2])
         with hc1:
             st.markdown(f"<div class='leg-head'><span class='leg-title'>Leg {i+1}</span>"
@@ -473,58 +470,49 @@ else:
             with c4:
                 CK = st.number_input(f"Checkpoints (min) — L{i+1}", 1, 10, int(leg['CK']), step=1, key=f"CK_{i}")
 
+            h1, h2, h3, _ = st.columns([1.2,1.2,1.2,6])
+            with h1:
+                HoldMin = st.number_input(f"Espera (min) — L{i+1}", 0.0, 180.0, float(leg.get('HoldMin', 0.0)), step=0.5, key=f"HoldMin_{i}")
+            with h2:
+                HoldFF  = st.number_input(f"FF espera (L/h) — L{i+1} (0=auto)", 0.0, 60.0, float(leg.get('HoldFF', 0.0)), step=0.1, key=f"HoldFF_{i}")
+            with h3:
+                st.caption("Em 'auto', usa FF de cruzeiro à Alt1 com RPM de cruzeiro.")
+
             b1, b2, b3 = st.columns([1,1,6])
             with b1:
                 if st.button("Atualizar", key=f"upd_{i}", use_container_width=True):
-                    update_leg(i, dict(TC=TC, Dist=Dist, Alt0=Alt0, Alt1=Alt1, Wfrom=Wfrom, Wkt=Wkt, CK=CK))
+                    update_leg(i, dict(TC=TC, Dist=Dist, Alt0=Alt0, Alt1=Alt1, Wfrom=Wfrom, Wkt=Wkt, CK=CK, HoldMin=HoldMin, HoldFF=HoldFF))
             with b2:
                 if st.button("Apagar", key=f"del_{i}", use_container_width=True):
                     delete_leg(i); st.stop()
 
             st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
-            # Segmento 1
-            st.markdown(f"**Segmento 1 — {segA['name']}**")
-            s1a, s1b, s1c, s1d = st.columns(4)
-            s1a.metric("Alt ini→fim (ft)", f"{int(round(segA['alt0']))} → {int(round(segA['alt1']))}")
-            s1b.metric("TH/MH (°)", f"{rang(segA['TH'])}T / {rang(segA['MH'])}M")
-            s1c.metric("GS/TAS (kt)", f"{rint(segA['GS'])} / {rint(segA['TAS'])}")
-            s1d.metric("FF (L/h)", f"{rint(segA['ff'])}")
-            s1e, s1f, s1g = st.columns(3)
-            s1e.metric("Tempo", mmss(segA['time']))
-            s1f.metric("Dist (nm)", f"{segA['dist']:.1f}")
-            s1g.metric("Burn (L)", f"{r10f(segA['burn']):.1f}")
+            # Segmentos (até 3: A, B e opcional Hold)
+            for idx_seg, seg in enumerate(segs):
+                st.markdown(f"**Segmento {idx_seg+1} — {seg['name']}**")
+                csa, csb, csc, csd = st.columns(4)
+                csa.metric("Alt ini→fim (ft)", f"{int(round(seg['alt0']))} → {int(round(seg['alt1']))}")
+                csb.metric("TH/MH (°)", f"{rang(seg['TH'])}T / {rang(seg['MH'])}M")
+                csc.metric("GS/TAS (kt)", f"{rint(seg['GS'])} / {rint(seg['TAS'])}")
+                csd.metric("FF (L/h)", f"{rint(seg['ff'])}")
+                cse, csf, csg = st.columns(3)
+                cse.metric("Tempo", mmss(seg['time']))
+                csf.metric("Dist (nm)", f"{seg['dist']:.1f}")
+                csg.metric("Burn (L)", f"{r10f(seg['burn']):.1f}")
 
-            st.caption("Checkpoints do Segmento 1")
-            start_lbl = segA.get("clock_start", "T+0"); end_lbl = segA.get("clock_end", mmss(segA['time']))
-            timeline(segA, comp["cpA"], start_lbl, end_lbl,
-                     toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segA)==0 else None)
-
-            if comp["toc_tod"]:
-                st.markdown(
-                    f"<span class='pill'>{comp['toc_tod']['type']} — {mmss(comp['segments'][0]['time'])} • {comp['segments'][0]['dist']:.1f} nm desde o início</span>",
-                    unsafe_allow_html=True
-                )
-
-            # Segmento 2 (se existir)
-            if len(comp['segments']) > 1:
-                segB = comp['segments'][1]
-                st.markdown("<div class='spacer'></div>", unsafe_allow_html=True)
-                st.markdown(f"**Segmento 2 — {segB['name']}**")
-                s2a, s2b, s2c, s2d = st.columns(4)
-                s2a.metric("Alt ini→fim (ft)", f"{int(round(segB['alt0']))} → {int(round(segB['alt1']))}")
-                s2b.metric("TH/MH (°)", f"{rang(segB['TH'])}T / {rang(segB['MH'])}M")
-                s2c.metric("GS/TAS (kt)", f"{rint(segB['GS'])} / {rint(segB['TAS'])}")
-                s2d.metric("FF (L/h)", f"{rint(segB['ff'])}")
-                s2e, s2f, s2g = st.columns(3)
-                s2e.metric("Tempo", mmss(segB['time']))
-                s2f.metric("Dist (nm)", f"{segB['dist']:.1f}")
-                s2g.metric("Burn (L)", f"{r10f(segB['burn']):.1f}")
-
-                st.caption("Checkpoints do Segmento 2")
-                start_lbl2 = segB.get("clock_start", "T+0"); end_lbl2 = segB.get("clock_end", mmss(segB['time']))
-                timeline(segB, comp["cpB"], start_lbl2, end_lbl2,
-                         toc_tod=comp["toc_tod"] if comp["toc_tod"] and comp["segments"].index(segB)==1 else None)
+                # timeline só para segmentos com GS>0 (hold omitido para evitar confusão)
+                if seg['GS'] > 0:
+                    st.caption(f"Checkpoints do Segmento {idx_seg+1}")
+                    start_lbl = seg.get("clock_start", "T+0"); end_lbl = seg.get("clock_end", mmss(seg['time']))
+                    # pega nos CPs calculados
+                    cps = comp["cps"][idx_seg] if idx_seg < len(comp["cps"]) else []
+                    toc_tod = None
+                    if comp["toc_tod"] and ("Climb" in seg['name'] or "Descent" in seg['name']):
+                        # marcador só no 1º segmento de climb/descent
+                        if idx_seg == 0:
+                            toc_tod = comp["toc_tod"]
+                    timeline(seg, cps, start_lbl, end_lbl, toc_tod=toc_tod)
 
         # Rodapé do cartão
         st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
@@ -541,26 +529,20 @@ else:
         st.markdown("</div>", unsafe_allow_html=True)
 
     # ====== BREAKDOWN FINAL POR FASE ======
-    # computa a partir de todos os segmentos (Cruise conta como Level)
     climb_s = 0; level_s = 0; desc_s = 0
     for comp in st.session_state.computed:
         for seg in comp["segments"]:
             name = seg["name"].lower()
-            if "climb" in name:
-                climb_s += seg["time"]
-            elif "descent" in name:
-                desc_s += seg["time"]
-            else:  # "level" ou "cruise"
-                level_s += seg["time"]
-
+            if "climb" in name: climb_s += seg["time"]
+            elif "descent" in name: desc_s += seg["time"]
+            else: level_s += seg["time"]  # "level", "cruise", "hold"
     st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
     st.subheader("Totais por fase")
     b1, b2, b3, b4 = st.columns(4)
     with b1: st.metric("Tempo em Climb", hhmmss(climb_s))
-    with b2: st.metric("Tempo em Level (inclui Cruise)", hhmmss(level_s))
+    with b2: st.metric("Tempo em Level (inclui Cruise/Hold)", hhmmss(level_s))
     with b3: st.metric("Tempo em Descent", hhmmss(desc_s))
-    total_check = climb_s + level_s + desc_s
-    with b4: st.metric("Verificação (≈ ETE total)", hhmmss(total_check))
+    with b4: st.metric("Verificação (≈ ETE total)", hhmmss(climb_s + level_s + desc_s))
 
 
 
