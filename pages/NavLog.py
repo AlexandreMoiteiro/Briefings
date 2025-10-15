@@ -1,11 +1,13 @@
-# app.py — NAVLOG v9 (AFM) — UI Clean
-# • Fluxo simplificado, menos ruído visual, e cálculos consistentes com OAT
-# • Mantém: holds por leg, cumulativos, timeline (sob expander), EFOB e markers TOC/TOD
-# • Sem defaults nas legs ("Nova leg" cria zeros); ROC reage à OAT
+# app.py — NAVLOG v9 (AFM) — UI Clean + Cálculos consistentes
+# • UI limpo (modo compacto), timeline opcional, warns úteis
+# • CP por defeito global (e botão para aplicar a todas as legs)
+# • Duplicar/Reordenar/Apagar leg
+# • Exportar/Importar JSON
+# • ROC usa OAT; FF de climb usa pressão média; sem prefill de legs
 
 import streamlit as st
 import datetime as dt
-import math
+import math, json
 from math import sin, asin, radians, degrees
 
 # ====== CONFIG ======
@@ -19,9 +21,12 @@ rang = lambda x: int(round(float(x))) % 360
 rint = lambda x: int(round(float(x)))
 r10f = lambda x: round(float(x), 1)
 
-def wrap360(x): x = math.fmod(float(x), 360.0); return x + 360 if x < 0 else x
+def wrap360(x): 
+    x = math.fmod(float(x), 360.0); 
+    return x + 360 if x < 0 else x
 
-def angdiff(a, b): return (a - b + 180) % 360 - 180
+def angdiff(a, b): 
+    return (a - b + 180) % 360 - 180
 
 def wind_triangle(tc, tas, wdir, wkt):
     if tas <= 0: return 0.0, wrap360(tc), 0.0
@@ -80,11 +85,15 @@ def cruise_lookup(pa, rpm, oat, weight):
     tas0, ff0 = v(table0); tas1, ff1 = v(table1)
     tas = interp1(pa_c, p0, p1, tas0, tas1); ff = interp1(pa_c, p0, p1, ff0, ff1)
 
+    # Ajuste por desvio ISA (coerente com AFM simplificado)
     if oat is not None:
         dev = oat - isa_temp(pa_c)
-        if dev > 0: tas *= 1 - 0.02*(dev/15.0); ff *= 1 - 0.025*(dev/15.0)
-        elif dev < 0: tas *= 1 + 0.01*((-dev)/15.0); ff *= 1 + 0.03*((-dev)/15.0)
+        if dev > 0: 
+            tas *= 1 - 0.02*(dev/15.0); ff *= 1 - 0.025*(dev/15.0)
+        elif dev < 0: 
+            tas *= 1 + 0.01*((-dev)/15.0); ff *= 1 + 0.03*((-dev)/15.0)
 
+    # Ajuste de peso simplificado (650 kg base)
     tas *= (1.0 + 0.033*((650.0 - float(weight))/100.0))
     return max(0.0, tas), max(0.0, ff)
 
@@ -106,7 +115,6 @@ def vy_interp(pa):
     return interp1(pa_c, p0, p1, VY[p0], VY[p1])
 
 # ====== STATE ======
-
 def ens(k, v): return st.session_state.setdefault(k, v)
 ens("mag_var", 1); ens("mag_is_e", False); ens("qnh", 1013); ens("oat", 15); ens("weight", 650.0)
 ens("rpm_climb", 2250); ens("rpm_cruise", 2100); ens("rpm_desc", 1800); ens("desc_angle", 3.0)
@@ -114,6 +122,8 @@ ens("start_clock", ""); ens("start_efob", 85.0)
 ens("legs", [])         # cada leg: {TC, Dist, Alt0, Alt1, Wfrom, Wkt, CK, HoldMin, HoldFF}
 ens("computed", [])
 ens("compact", True)
+ens("expand_timeline", False)
+ens("ck_default", 2)    # CP por defeito (min)
 
 # ====== STYLE (Clean) ======
 CSS = """
@@ -125,7 +135,7 @@ CSS = """
 .leg-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .leg-title{font-weight:600;font-size:1.05rem}
 .sep{height:1px;background:var(--line);margin:10px 0}
-.sticky{position:sticky;top:0;background:#ffffffcc;backdrop-filter:saturate(140%) blur(4px);z-index:50;border-bottom:1px solid var(--line)}
+.sticky{position:sticky;top:0;background:#ffffffcc;backdrop-filter:saturate(140%) blur(4px);z-index:50;border-bottom:1px solid var(--line);padding-bottom:6px}
 .kvs{display:flex;gap:8px;flex-wrap:wrap}
 .kv{background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:6px 8px;font-size:12px}
 .tl{position:relative;margin:8px 0 18px 0;padding-bottom:46px}
@@ -141,7 +151,6 @@ CSS = """
 st.markdown(CSS, unsafe_allow_html=True)
 
 # ====== TIMELINE ======
-
 def timeline(seg, cps, start_label, end_label, toc_tod=None):
     total = max(1, int(seg['time']))
     html = f"<div class='tl'><div class='bar'></div>"
@@ -162,7 +171,6 @@ def timeline(seg, cps, start_label, end_label, toc_tod=None):
     st.markdown("<div class='spacer'></div>", unsafe_allow_html=True)
 
 # ====== RÓTULO PERFIL ======
-
 def leg_profile_label(segments, has_hold=False):
     lbl = "—"
     if segments:
@@ -179,7 +187,6 @@ def leg_profile_label(segments, has_hold=False):
     return lbl
 
 # ====== CÁLCULO DE UMA LEG ======
-
 def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params, hold_min=0.0, hold_ff_input=0.0):
     qnh, oat, mag_var, mag_is_e = params['qnh'], params['oat'], params['mag_var'], params['mag_is_e']
     rpm_climb, rpm_cruise, rpm_desc, desc_angle, weight = params['rpm_climb'], params['rpm_cruise'], params['rpm_desc'], params['desc_angle'], params['weight']
@@ -188,7 +195,8 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params, hold_min=0.
     Vy  = vy_interp(pa0)
     ROC = roc_interp(pa0, oat)  # OAT influencia ROC
     TAS_climb = Vy
-    FF_climb  = cruise_lookup(alt0 + 0.5*max(0.0, alt1-alt0), int(rpm_climb), oat, weight)[1]
+    # FF de climb baseado na PA média (coerente com outras consultas)
+    FF_climb  = cruise_lookup((pa0 + pa1)/2.0, int(rpm_climb), oat, weight)[1]
     TAS_cru, FF_cru = cruise_lookup(pa1, int(rpm_cruise), oat, weight)
     TAS_desc, FF_desc = cruise_lookup(pa_avg, int(rpm_desc), oat, weight)
 
@@ -293,7 +301,6 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params, hold_min=0.
     }
 
 # ====== RECOMPUTE ======
-
 def recompute_all():
     st.session_state.computed = []
     params = dict(
@@ -369,9 +376,9 @@ def recompute_all():
         })
 
 # ====== CRUD / ORDEM ======
-
 def add_leg():
-    d = dict(TC=0.0, Dist=0.0, Alt0=0.0, Alt1=0.0, Wfrom=0, Wkt=0, CK=1, HoldMin=0.0, HoldFF=0.0)
+    # sem prefill “inteligente” — zeroed, mas com CK=ck_default
+    d = dict(TC=0.0, Dist=0.0, Alt0=0.0, Alt1=0.0, Wfrom=0, Wkt=0, CK=int(st.session_state.ck_default), HoldMin=0.0, HoldFF=0.0)
     st.session_state.legs.append(d); recompute_all()
 
 def update_leg(i, vals):
@@ -381,27 +388,95 @@ def delete_leg(i):
     st.session_state.legs.pop(i); recompute_all()
 
 def move_leg(i, direction):
-    j = i + ( -1 if direction=="up" else 1 )
+    j = i + (-1 if direction=="up" else 1)
     if 0 <= j < len(st.session_state.legs):
         st.session_state.legs[i], st.session_state.legs[j] = st.session_state.legs[j], st.session_state.legs[i]
         recompute_all()
 
-# ====== HEADER GLOBAL (Clean) ======
+def duplicate_leg(i):
+    clone = dict(st.session_state.legs[i])
+    st.session_state.legs.insert(i+1, clone)
+    recompute_all()
 
+def apply_ck_to_all(ck_val:int):
+    for i in range(len(st.session_state.legs)):
+        st.session_state.legs[i]["CK"] = int(ck_val)
+    recompute_all()
+
+# ====== EXPORT / IMPORT ======
+def export_json():
+    payload = dict(
+        qnh=st.session_state.qnh, oat=st.session_state.oat, mag_var=st.session_state.mag_var, mag_is_e=st.session_state.mag_is_e,
+        rpm_climb=st.session_state.rpm_climb, rpm_cruise=st.session_state.rpm_cruise, rpm_desc=st.session_state.rpm_desc,
+        desc_angle=st.session_state.desc_angle, weight=st.session_state.weight,
+        start_clock=st.session_state.start_clock, start_efob=st.session_state.start_efob,
+        ck_default=st.session_state.ck_default, legs=st.session_state.legs
+    )
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+def import_json(file_bytes: bytes):
+    try:
+        obj = json.loads(file_bytes.decode("utf-8"))
+        if isinstance(obj, dict) and "legs" in obj:
+            st.session_state.qnh = obj.get("qnh", st.session_state.qnh)
+            st.session_state.oat = obj.get("oat", st.session_state.oat)
+            st.session_state.mag_var = obj.get("mag_var", st.session_state.mag_var)
+            st.session_state.mag_is_e = obj.get("mag_is_e", st.session_state.mag_is_e)
+            st.session_state.rpm_climb = obj.get("rpm_climb", st.session_state.rpm_climb)
+            st.session_state.rpm_cruise = obj.get("rpm_cruise", st.session_state.rpm_cruise)
+            st.session_state.rpm_desc = obj.get("rpm_desc", st.session_state.rpm_desc)
+            st.session_state.desc_angle = obj.get("desc_angle", st.session_state.desc_angle)
+            st.session_state.weight = obj.get("weight", st.session_state.weight)
+            st.session_state.start_clock = obj.get("start_clock", st.session_state.start_clock)
+            st.session_state.start_efob = obj.get("start_efob", st.session_state.start_efob)
+            st.session_state.ck_default = obj.get("ck_default", st.session_state.ck_default)
+            legs = obj["legs"]
+        elif isinstance(obj, list):
+            legs = obj
+        else:
+            st.error("Formato inválido.")
+            return
+        # validação mínima de chaves
+        req = {"TC","Dist","Alt0","Alt1","Wfrom","Wkt","CK","HoldMin","HoldFF"}
+        clean = []
+        for l in legs:
+            if not isinstance(l, dict): continue
+            if not req.issubset(l.keys()): continue
+            clean.append({
+                "TC": float(l["TC"]), "Dist": float(l["Dist"]),
+                "Alt0": float(l["Alt0"]), "Alt1": float(l["Alt1"]),
+                "Wfrom": int(l["Wfrom"]), "Wkt": int(l["Wkt"]),
+                "CK": int(l["CK"]), "HoldMin": float(l["HoldMin"]),
+                "HoldFF": float(l["HoldFF"])
+            })
+        st.session_state.legs = clean
+        recompute_all()
+        st.success(f"Importadas {len(clean)} legs.")
+    except Exception as e:
+        st.error(f"Erro ao importar: {e}")
+
+# ====== HEADER (Sticky) ======
 st.markdown("<div class='sticky'>", unsafe_allow_html=True)
-col1, col2, col3, col4 = st.columns([3,2,2,2])
+col1, col2, col3, col4 = st.columns([3,2,2,3])
 with col1:
     st.title("NAVLOG — v9 (AFM)")
 with col2:
     st.toggle("Modo compacto", value=st.session_state.compact, key="compact")
 with col3:
-    if st.button("➕ Nova leg", type="primary", use_container_width=True): add_leg()
+    st.toggle("Timeline por defeito", value=st.session_state.expand_timeline, key="expand_timeline")
 with col4:
-    if st.button("🗑️ Limpar tudo", use_container_width=True) and st.session_state.legs:
-        st.session_state.legs = []; st.session_state.computed = []
+    c41, c42, c43 = st.columns([1,1,1])
+    with c41:
+        if st.button("➕ Nova leg", type="primary", use_container_width=True): add_leg()
+    with c42:
+        if st.button("🧬 Duplicar última", use_container_width=True) and st.session_state.legs:
+            duplicate_leg(len(st.session_state.legs)-1)
+    with c43:
+        if st.button("🗑️ Limpar tudo", use_container_width=True) and st.session_state.legs:
+            st.session_state.legs = []; st.session_state.computed = []
 st.markdown("</div>", unsafe_allow_html=True)
 
-# Parâmetros — básicos em cima; resto em Avançado
+# ====== PARÂMETROS ======
 with st.form("hdr_clean"):
     b1, b2, b3, b4 = st.columns(4)
     with b1:
@@ -415,7 +490,7 @@ with st.form("hdr_clean"):
         st.session_state.rpm_cruise = st.number_input("Cruise RPM", 1800, 2265, int(st.session_state.rpm_cruise), step=5)
     with b4:
         st.session_state.rpm_climb = st.number_input("Climb RPM", 1800, 2265, int(st.session_state.rpm_climb), step=5)
-        st.session_state.rpm_desc  = st.number_input("Descent RPM",1600, 2265, int(st.session_state.rpm_desc),  step=5)
+        st.session_state.rpm_desc  = st.number_input("Descent RPM", 1600, 2265, int(st.session_state.rpm_desc), step=5)
     with st.expander("Avançado", expanded=False):
         a1, a2, a3 = st.columns(3)
         with a1:
@@ -424,8 +499,23 @@ with st.form("hdr_clean"):
         with a2:
             st.session_state.desc_angle = st.number_input("Ângulo desc (°)", 1.0, 6.0, float(st.session_state.desc_angle), step=0.1)
         with a3:
-            st.caption("Perfis e variações finas agrupados aqui para reduzir ruído visual.")
-    st.form_submit_button("Aplicar parâmetros")
+            st.session_state.ck_default = st.number_input("Checkpoints por defeito (min)", 1, 10, int(st.session_state.ck_default), step=1)
+            st.caption("Este valor é usado em novas legs; podes aplicar a todas abaixo.")
+    submitted = st.form_submit_button("Aplicar parâmetros")
+if submitted:
+    recompute_all()
+
+# Botões fora do form (senão não disparam)
+c_ck1, c_ck2, c_exp = st.columns([2,2,6])
+with c_ck1:
+    if st.button("Aplicar CP por defeito a TODAS as legs"):
+        apply_ck_to_all(st.session_state.ck_default)
+with c_ck2:
+    uploaded = st.file_uploader("Importar JSON", type=["json"])
+    if uploaded is not None:
+        import_json(uploaded.read())
+with c_exp:
+    st.download_button("Exportar JSON", data=export_json(), file_name="navlog_legs.json", mime="application/json")
 
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
@@ -435,23 +525,22 @@ if not st.session_state.legs:
 else:
     recompute_all()
 
-    # Resumo global (clean chips)
+    # Resumo global (chips)
     total_time = sum(c["tot_sec"] for c in st.session_state.computed)
     total_burn = r10f(sum(c["tot_burn"] for c in st.session_state.computed))
     efob_final = st.session_state.computed[-1]['carry_efob_after']
-    st.markdown("<div class='kvs'>" \
-                + f"<div class='kv'>⏱️ ETE total: <b>{hhmmss(total_time)}</b></div>" \
-                + f"<div class='kv'>⛽ Burn total: <b>{total_burn:.1f} L</b></div>" \
-                + f"<div class='kv'>🧯 EFOB final: <b>{efob_final:.1f} L</b></div>" \
+    st.markdown("<div class='kvs'>"
+                + f"<div class='kv'>⏱️ ETE total: <b>{hhmmss(total_time)}</b></div>"
+                + f"<div class='kv'>⛽ Burn total: <b>{total_burn:.1f} L</b></div>"
+                + f"<div class='kv'>🧯 EFOB final: <b>{efob_final:.1f} L</b></div>"
                 + "</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
-    # Lista de legs (clean)
+    # Lista de legs
     for i, leg in enumerate(st.session_state.legs):
         comp = st.session_state.computed[i]
         segs = comp['segments']
-        segA = segs[0]
         dist_total_leg = sum(s['dist'] for s in segs)
         has_hold = any(s['name'].startswith("Hold") for s in segs)
         profile_lbl = leg_profile_label(segs, has_hold=has_hold)
@@ -459,26 +548,35 @@ else:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         hc1, hc2, hc3, hc4, hc5 = st.columns([4,2,2,2,2])
         with hc1:
-            st.markdown(f"<div class='leg-head'><span class='leg-title'>Leg {i+1}</span>" \
+            st.markdown(f"<div class='leg-head'><span class='leg-title'>Leg {i+1}</span>"
                         f"<span class='badge'>{profile_lbl}</span></div>", unsafe_allow_html=True)
         with hc2: st.metric("ETE", hhmmss(comp["tot_sec"]))
         with hc3: st.metric("Burn (L)", f"{comp['tot_burn']:.1f}")
         with hc4: st.metric("Dist (nm)", f"{dist_total_leg:.1f}")
         with hc5: st.metric("ROC ft/min", rint(comp["roc"]))
 
-        # Barra de ações compacta
-        ac1, ac2, ac3, ac4 = st.columns([1,1,1,7])
-        with ac1:
-            if st.button("⬆️", key=f"up_{i}"):
-                move_leg(i, "up"); st.stop()
-        with ac2:
-            if st.button("⬇️", key=f"down_{i}"):
-                move_leg(i, "down"); st.stop()
-        with ac3:
-            if st.button("🗑️", key=f"del_{i}"):
-                delete_leg(i); st.stop()
+        # Alertas úteis
+        warns = []
+        if leg["Dist"] == 0 and abs(leg["Alt1"] - leg["Alt0"]) > 50:
+            warns.append("Distância 0 com variação de altitude.")
+        if any("não atinge" in s["name"] for s in comp["segments"]):
+            warns.append("Perfil não atinge a altitude-alvo.")
+        if comp["carry_efob_after"] <= 0:
+            warns.append("EFOB no fim da leg é 0 (ou negativo).")
+        if warns: st.warning(" | ".join(warns))
 
-        # Editor mínimo no modo compacto; completo no modo normal
+        # Barra de ações compacta
+        ac1, ac2, ac3, ac4, ac5 = st.columns([1,1,1,1,6])
+        with ac1:
+            if st.button("⬆️", key=f"up_{i}"): move_leg(i, "up"); st.stop()
+        with ac2:
+            if st.button("⬇️", key=f"down_{i}"): move_leg(i, "down"); st.stop()
+        with ac3:
+            if st.button("🧬", key=f"dup_{i}"): duplicate_leg(i); st.stop()
+        with ac4:
+            if st.button("🗑️", key=f"del_{i}"): delete_leg(i); st.stop()
+
+        # Editor
         with st.expander("Editar esta leg", expanded=not st.session_state.compact):
             c1, c2, c3, c4 = st.columns(4)
             with c1:
@@ -499,8 +597,8 @@ else:
                 if st.button("Guardar", key=f"upd_{i}"):
                     update_leg(i, dict(TC=TC, Dist=Dist, Alt0=Alt0, Alt1=Alt1, Wfrom=Wfrom, Wkt=Wkt, CK=CK, HoldMin=HoldMin, HoldFF=HoldFF))
 
-        # Detalhes (sob demanda)
-        with st.expander("Detalhes e timeline", expanded=False):
+        # Detalhes e timeline
+        with st.expander("Detalhes e timeline", expanded=st.session_state.expand_timeline):
             for idx_seg, seg in enumerate(segs):
                 csa, csb, csc, csd = st.columns(4)
                 csa.metric("Alt ini→fim (ft)", f"{int(round(seg['alt0']))} → {int(round(seg['alt1']))}")
