@@ -1,9 +1,10 @@
-# app.py — NAVLOG v9 (AFM) — UI Clean + Cálculos consistentes
-# • UI limpo (modo compacto), timeline opcional, warns úteis
-# • CP por defeito global (e botão para aplicar a todas as legs)
-# • Duplicar/Reordenar/Apagar leg
+# app.py — NAVLOG v9 (AFM) — UI Clean + Cartão NAV + Cálculos consistentes
+# • UI limpo (modo compacto), timeline opcional, avisos úteis
+# • CP por defeito global (+ botão aplicar a todas as legs)
+# • Duplicar / Reordenar / Apagar leg
 # • Exportar/Importar JSON
-# • ROC usa OAT; FF de climb usa pressão média; sem prefill de legs
+# • Modo Cartão NAV: tabela única (MH, GS, Dist, Tempo, Fuel, EFOB, TOC/TOD, Hold)
+# • ROC usa OAT; FF de climb usa pressão média (PA)
 
 import streamlit as st
 import datetime as dt
@@ -21,12 +22,11 @@ rang = lambda x: int(round(float(x))) % 360
 rint = lambda x: int(round(float(x)))
 r10f = lambda x: round(float(x), 1)
 
-def wrap360(x): 
-    x = math.fmod(float(x), 360.0); 
+def wrap360(x):
+    x = math.fmod(float(x), 360.0)
     return x + 360 if x < 0 else x
 
-def angdiff(a, b): 
-    return (a - b + 180) % 360 - 180
+def angdiff(a, b): return (a - b + 180) % 360 - 180
 
 def wind_triangle(tc, tas, wdir, wkt):
     if tas <= 0: return 0.0, wrap360(tc), 0.0
@@ -56,9 +56,9 @@ CRUISE = {
     10000:{1800:(78,15.5),1900:(82,15.5),2000:(89,16.6),2100:(95,17.9),2250:(103,20.5)},
 }
 
-isa_temp = lambda pa: 15.0 - 2.0*(pa/1000.0)
+isa_temp  = lambda pa: 15.0 - 2.0*(pa/1000.0)
 press_alt = lambda alt, qnh: float(alt) + (1013.0 - float(qnh)) * 30.0
-clamp = lambda v, lo, hi: max(lo, min(hi, v))
+clamp     = lambda v, lo, hi: max(lo, min(hi, v))
 
 def interp1(x, x0, x1, y0, y1):
     if x1 == x0: return y0
@@ -85,15 +85,15 @@ def cruise_lookup(pa, rpm, oat, weight):
     tas0, ff0 = v(table0); tas1, ff1 = v(table1)
     tas = interp1(pa_c, p0, p1, tas0, tas1); ff = interp1(pa_c, p0, p1, ff0, ff1)
 
-    # Ajuste por desvio ISA (coerente com AFM simplificado)
+    # Ajuste por desvio ISA (simplificado)
     if oat is not None:
         dev = oat - isa_temp(pa_c)
-        if dev > 0: 
+        if dev > 0:
             tas *= 1 - 0.02*(dev/15.0); ff *= 1 - 0.025*(dev/15.0)
-        elif dev < 0: 
+        elif dev < 0:
             tas *= 1 + 0.01*((-dev)/15.0); ff *= 1 + 0.03*((-dev)/15.0)
 
-    # Ajuste de peso simplificado (650 kg base)
+    # Ajuste de peso (650kg base)
     tas *= (1.0 + 0.033*((650.0 - float(weight))/100.0))
     return max(0.0, tas), max(0.0, ff)
 
@@ -123,7 +123,8 @@ ens("legs", [])         # cada leg: {TC, Dist, Alt0, Alt1, Wfrom, Wkt, CK, HoldM
 ens("computed", [])
 ens("compact", True)
 ens("expand_timeline", False)
-ens("ck_default", 2)    # CP por defeito (min)
+ens("ck_default", 2)            # CP por defeito (min)
+ens("navcard_mode", True)       # Modo Cartão NAV
 
 # ====== STYLE (Clean) ======
 CSS = """
@@ -170,7 +171,7 @@ def timeline(seg, cps, start_label, end_label, toc_tod=None):
     st.caption(f"GS {rint(seg['GS'])} kt · TAS {rint(seg['TAS'])} kt · FF {rint(seg['ff'])} L/h  |  {start_label} → {end_label}")
     st.markdown("<div class='spacer'></div>", unsafe_allow_html=True)
 
-# ====== RÓTULO PERFIL ======
+# ====== PERFIL (rótulo) ======
 def leg_profile_label(segments, has_hold=False):
     lbl = "—"
     if segments:
@@ -195,8 +196,7 @@ def build_segments(tc, dist, alt0, alt1, wfrom, wkt, ck_min, params, hold_min=0.
     Vy  = vy_interp(pa0)
     ROC = roc_interp(pa0, oat)  # OAT influencia ROC
     TAS_climb = Vy
-    # FF de climb baseado na PA média (coerente com outras consultas)
-    FF_climb  = cruise_lookup((pa0 + pa1)/2.0, int(rpm_climb), oat, weight)[1]
+    FF_climb  = cruise_lookup((pa0 + pa1)/2.0, int(rpm_climb), oat, weight)[1]  # usa PA média
     TAS_cru, FF_cru = cruise_lookup(pa1, int(rpm_cruise), oat, weight)
     TAS_desc, FF_desc = cruise_lookup(pa_avg, int(rpm_desc), oat, weight)
 
@@ -377,7 +377,7 @@ def recompute_all():
 
 # ====== CRUD / ORDEM ======
 def add_leg():
-    # sem prefill “inteligente” — zeroed, mas com CK=ck_default
+    # sem prefill inteligente — zeroed, mas com CK=ck_default
     d = dict(TC=0.0, Dist=0.0, Alt0=0.0, Alt1=0.0, Wfrom=0, Wkt=0, CK=int(st.session_state.ck_default), HoldMin=0.0, HoldFF=0.0)
     st.session_state.legs.append(d); recompute_all()
 
@@ -436,7 +436,6 @@ def import_json(file_bytes: bytes):
         else:
             st.error("Formato inválido.")
             return
-        # validação mínima de chaves
         req = {"TC","Dist","Alt0","Alt1","Wfrom","Wkt","CK","HoldMin","HoldFF"}
         clean = []
         for l in legs:
@@ -455,9 +454,82 @@ def import_json(file_bytes: bytes):
     except Exception as e:
         st.error(f"Erro ao importar: {e}")
 
+# ====== CARTÃO NAV (tabela única) ======
+def _leg_hold_summary(segs):
+    hold = [s for s in segs if s["name"].lower().startswith("hold")]
+    if not hold: return ""
+    h = hold[0]
+    mins = int(round(h["time"]/60.0))
+    return f"{mins} min / {r10f(h['burn']):.1f} L"
+
+def _leg_toc_tod_label(comp):
+    m = comp.get("toc_tod")
+    if not m: return ""
+    return f"{m['type']} T+{mmss(m['t'])}"
+
+def build_navcard_rows(computed):
+    rows = []
+    for i, comp in enumerate(computed):
+        segs = comp["segments"]
+        seg_mv = next((s for s in segs if s["GS"]>0), segs[0])  # primeiro segmento com movimento
+        dist_total = sum(s["dist"] for s in segs)
+        rows.append({
+            "Leg": i+1,
+            "MH°M": rang(seg_mv["MH"]),
+            "GS kt": rint(seg_mv["GS"]),
+            "Dist nm": round(dist_total, 1),
+            "Tempo": mmss(comp["tot_sec"]),
+            "Fuel L": f"{comp['tot_burn']:.1f}",
+            "EFOB L": f"{comp['carry_efob_after']:.1f}",
+            "TOC/TOD": _leg_toc_tod_label(comp),
+            "Hold": _leg_hold_summary(segs),
+        })
+    return rows
+
+def navcard_csv(rows, ete_total, burn_total, efob_final):
+    import csv, io
+    out = io.StringIO()
+    w = csv.DictWriter(out, fieldnames=list(rows[0].keys()))
+    w.writeheader()
+    for r in rows: w.writerow(r)
+    out.write(f"\nResumo,ETE total,{hhmmss(ete_total)},Burn total,{burn_total:.1f} L,EFOB final,{efob_final:.1f} L\n")
+    return out.getvalue()
+
+def navcard_md(rows, ete_total, burn_total, efob_final):
+    hdr = "| " + " | ".join(rows[0].keys()) + " |\n"
+    sep = "| " + " | ".join(["---"]*len(rows[0].keys())) + " |\n"
+    body = "\n".join("| " + " | ".join(str(v) for v in r.values()) + " |" for r in rows)
+    resumo = f"\n\n**ETE total:** {hhmmss(ete_total)} · **Burn total:** {burn_total:.1f} L · **EFOB final:** {efob_final:.1f} L\n"
+    return hdr + sep + body + resumo
+
+def render_nav_card():
+    computed = st.session_state.computed
+    if not computed:
+        st.info("Sem legs para mostrar.")
+        return
+    total_time = sum(c["tot_sec"] for c in computed)
+    total_burn = r10f(sum(c["tot_burn"] for c in computed))
+    efob_final = computed[-1]["carry_efob_after"]
+    rows = build_navcard_rows(computed)
+
+    # Tabela compacta
+    import pandas as pd
+    df = pd.DataFrame(rows)
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+    # Resumo e export
+    st.markdown(f"**ETE total:** {hhmmss(total_time)}  •  **Burn total:** {total_burn:.1f} L  •  **EFOB final:** {efob_final:.1f} L")
+    csv_data = navcard_csv(rows, total_time, total_burn, efob_final)
+    md_data  = navcard_md(rows, total_time, total_burn, efob_final)
+    c1, c2, _ = st.columns([2,2,6])
+    with c1:
+        st.download_button("Exportar CSV (Cartão NAV)", data=csv_data, file_name="navcard.csv", mime="text/csv")
+    with c2:
+        st.download_button("Exportar Markdown (Cartão NAV)", data=md_data, file_name="navcard.md", mime="text/markdown")
+
 # ====== HEADER (Sticky) ======
 st.markdown("<div class='sticky'>", unsafe_allow_html=True)
-col1, col2, col3, col4 = st.columns([3,2,2,3])
+col1, col2, col3, col4, col5 = st.columns([3,2,2,2,3])
 with col1:
     st.title("NAVLOG — v9 (AFM)")
 with col2:
@@ -465,13 +537,15 @@ with col2:
 with col3:
     st.toggle("Timeline por defeito", value=st.session_state.expand_timeline, key="expand_timeline")
 with col4:
-    c41, c42, c43 = st.columns([1,1,1])
-    with c41:
+    st.toggle("Modo Cartão NAV", value=st.session_state.navcard_mode, key="navcard_mode")
+with col5:
+    c51, c52, c53 = st.columns([1,1,1])
+    with c51:
         if st.button("➕ Nova leg", type="primary", use_container_width=True): add_leg()
-    with c42:
+    with c52:
         if st.button("🧬 Duplicar última", use_container_width=True) and st.session_state.legs:
             duplicate_leg(len(st.session_state.legs)-1)
-    with c43:
+    with c53:
         if st.button("🗑️ Limpar tudo", use_container_width=True) and st.session_state.legs:
             st.session_state.legs = []; st.session_state.computed = []
 st.markdown("</div>", unsafe_allow_html=True)
@@ -505,7 +579,7 @@ with st.form("hdr_clean"):
 if submitted:
     recompute_all()
 
-# Botões fora do form (senão não disparam)
+# Botões auxiliares (fora do form)
 c_ck1, c_ck2, c_exp = st.columns([2,2,6])
 with c_ck1:
     if st.button("Aplicar CP por defeito a TODAS as legs"):
@@ -537,7 +611,12 @@ else:
 
     st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
-    # Lista de legs
+    # === Cartão NAV (vista simplificada) ===
+    if st.session_state.navcard_mode:
+        render_nav_card()
+        st.stop()  # mostrar só o cartão (remove esta linha se quiseres ver também o UI detalhado)
+
+    # ---- UI detalhado (se modo Cartão NAV desligado) ----
     for i, leg in enumerate(st.session_state.legs):
         comp = st.session_state.computed[i]
         segs = comp['segments']
@@ -565,7 +644,7 @@ else:
             warns.append("EFOB no fim da leg é 0 (ou negativo).")
         if warns: st.warning(" | ".join(warns))
 
-        # Barra de ações compacta
+        # Barra de ações
         ac1, ac2, ac3, ac4, ac5 = st.columns([1,1,1,1,6])
         with ac1:
             if st.button("⬆️", key=f"up_{i}"): move_leg(i, "up"); st.stop()
@@ -627,8 +706,6 @@ else:
         with colC:
             st.markdown(f"**Acumulado até Leg {i+1}** — Tempo {hhmmss(comp['cum_sec'])} • Fuel {comp['cum_burn']:.1f} L")
 
-        st.markdown("</div>", unsafe_allow_html=True)
-
     # Totais por fase
     climb_s = 0; level_s = 0; desc_s = 0
     for comp in st.session_state.computed:
@@ -645,8 +722,3 @@ else:
     with b2: st.metric("Tempo em Level (inclui Cruise/Hold)", hhmmss(level_s))
     with b3: st.metric("Tempo em Descent", hhmmss(desc_s))
     with b4: st.metric("Verificação (≈ ETE total)", hhmmss(climb_s + level_s + desc_s))
-
-
-
-
-
