@@ -1,17 +1,9 @@
 # app_navlog_rev41_minutos.py
 # ---------------------------------------------------------------
-# - Remoção de VOR manual por WP (fica só VOR em massa)
-# - VOR em massa: escolhes 1 VOR e aplicas a vários WPs de uma vez
-# - Se não aplicares nada, fica AUTO (VOR mais próximo) por defeito
-# - ETO deixa de ser preenchido no PDF (campo em branco)
-# - Labels do mapa deixam de mostrar ETO (mostram só EFOB)
-# - Tempos arredondados AO MINUTO (60 s)
-# - Combustível arredondado à UNIDADE (1 L)
-# - Rasquete Bridge adicionado à base de dados de pesquisa
-# - Permite mudar a ordem dos WPs com botões ↑ / ↓
-# - NÃO acrescenta “#2” quando repetes o nome de um WP
-# - NÃO coloca VOR nos TOC/TOD no PDF
-# - Mantido: TOC/TOD, STOP, doghouses, overlay openAIP, filtro de pernas, 2.ª página PDF
+# - Rotas tipo em Gist (guardar/carregar esqueleto de WPs)
+# - PDF NAVLOG normal (como antes)
+# - PDF extra "esqueleto de legs" com FROM/TO/MH/RADIAL/TEMPO/ALT
+# - Rotas tipo guardam só o esqueleto (sem vento/tempo)
 # ---------------------------------------------------------------
 
 import streamlit as st
@@ -21,14 +13,8 @@ from streamlit_folium import st_folium
 from folium.plugins import Fullscreen, MarkerCluster
 from math import degrees
 from pdfrw import PdfReader, PdfWriter, PdfDict, PdfName
-
-# ========= CONFIG GIST (via st.secrets) =========
-GITHUB_API = "https://api.github.com"
-# Em .streamlit/secrets.toml:
-# GIST_ID = "a1b2c3d4..."
-# (opcional) GITHUB_TOKEN = "ghp_..."
-GIST_ID = st.secrets.get("GIST_ID", "")
-GIST_TOKEN = st.secrets.get("GITHUB_TOKEN", "")
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas as pdfcanvas
 
 # ========= CONSTANTES =========
 TEMPLATE_MAIN = "NAVLOG_FORM.pdf"
@@ -46,6 +32,9 @@ ROUND_FUEL_L   = 1.0      # 1 L
 
 CP_TICK_HALF = 0.38
 NBSP_THIN = "&#8239;"  # U+202F fino para kt/ft/nm/L
+
+# ficheiro dentro do Gist onde guardamos as rotas tipo
+GIST_FILENAME = "navlog_routes.json"
 
 # Paleta para áreas
 ASPACE_COLOR     = "#FFD54A"
@@ -433,10 +422,11 @@ ens("preset_selected", [])
 ens("use_leg_filter", False)
 ens("leg_filter_ids", [])
 
-# rotas padrão (Gist)
-ens("saved_routes", [])           # [{"name":..., "wps":[...]}]
-ens("selected_route_name", "")
-ens("routes_loaded_from_gist", False)
+# estado para rotas tipo em Gist
+ens("github_token", "")
+ens("github_gist_id", "")
+ens("routes_catalog", [])
+ens("routes_loaded_ok", False)
 
 # ========= FORM GLOBAL =========
 with st.form("globals"):
@@ -619,7 +609,6 @@ if st.session_state.db_points is None:
         "code": "RASQ",
         "name": "RASQUETE BRIDGE",
         "sector": "Montargil / Barragem de Montargil",
-        # Coordenadas aproximadas — ajusta se tiveres as oficiais
         "lat": 39.0538,
         "lon": -8.1762,
         "alt": 0.0,
@@ -712,7 +701,7 @@ def ensure_wp_ids():
 ensure_wp_ids()
 
 def make_unique_name(name: str) -> str:
-    # agora não acrescenta “#2”, “#3”… deixa o nome exatamente como foi escrito
+    # não acrescenta “#2”, “#3”… deixa o nome exatamente como foi escrito
     return str(name)
 
 def new_wp_dict(name, lat, lon, alt, src=None):
@@ -739,9 +728,14 @@ def new_wp_dict(name, lat, lon, alt, src=None):
 def append_wp(name, lat, lon, alt, src=None):
     st.session_state.wps.append(new_wp_dict(name, lat, lon, alt, src))
 
-# ========= ROTAS PADRÃO — helpers (Gist) =========
+# ========= SERIALIZAÇÃO ROTAS TIPO (só esqueleto) =========
 def _serialize_wp_for_route(wp: dict) -> dict:
-    """Só guarda o esqueleto da rota (sem vento/tempos)."""
+    """
+    Guarda só o esqueleto da rota (sem vento/tempos):
+    - name / lat / lon / alt
+    - stop_min (para manter STOPs como parte da rota tipo)
+    - vor_pref / vor_ident (para VOR FIXED em massa)
+    """
     return {
         "name": wp["name"],
         "lat":  float(wp["lat"]),
@@ -753,7 +747,9 @@ def _serialize_wp_for_route(wp: dict) -> dict:
     }
 
 def _deserialize_wp_for_route(data: dict) -> dict:
-    """Reconstrói o WP; vento será SEMPRE o global definido no dia."""
+    """
+    Reconstrói o WP com new_wp_dict: vento vem sempre do vento global atual.
+    """
     base = new_wp_dict(
         data.get("name", "WP"),
         float(data.get("lat", 0.0)),
@@ -761,80 +757,87 @@ def _deserialize_wp_for_route(data: dict) -> dict:
         float(data.get("alt", 0.0)),
     )
     base["stop_min"]  = float(data.get("stop_min", 0.0))
-    base["wind_from"] = int(st.session_state.wind_from)
-    base["wind_kt"]   = int(st.session_state.wind_kt)
     base["vor_pref"]  = data.get("vor_pref", "AUTO")
     base["vor_ident"] = data.get("vor_ident", "")
     return base
 
-def _find_route_by_name(routes, name):
-    for r in routes:
-        if r.get("name") == name:
-            return r
-    return None
+# ========= GIST HELPERS =========
+def _get_github_headers():
+    """
+    Procura token em st.secrets["GITHUB_TOKEN"] ou em st.session_state.github_token.
+    """
+    token = None
+    try:
+        if hasattr(st, "secrets") and "GITHUB_TOKEN" in st.secrets:
+            token = st.secrets["GITHUB_TOKEN"]
+    except Exception:
+        token = None
+    if not token:
+        token = st.session_state.github_token.strip() or None
+    if not token:
+        return None
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
 
 def _load_routes_from_gist():
-    """Lê automaticamente o Gist configurado em st.secrets."""
-    if not GIST_ID:
-        return None, "GIST_ID não definido em st.secrets."
+    gist_id = st.session_state.github_gist_id.strip()
+    headers = _get_github_headers()
+    if not gist_id or not headers:
+        st.warning("Define o Gist ID e o token GitHub para usar rotas tipo.")
+        return
+    url = f"https://api.github.com/gists/{gist_id}"
     try:
-        headers = {}
-        if GIST_TOKEN:
-            headers["Authorization"] = f"token {GIST_TOKEN}"
-        r = requests.get(f"{GITHUB_API}/gists/{GIST_ID}", headers=headers, timeout=10)
-        if r.status_code != 200:
-            return None, f"Erro HTTP {r.status_code} ao ler Gist."
-        data = r.json()
-        files = data.get("files") or {}
-        if not files:
-            return [], None  # Gist vazio → lista vazia
-        first_file = next(iter(files.values()))
-        content = first_file.get("content", "") or ""
-        try:
-            obj = json.loads(content)
-        except Exception:
-            return None, "Conteúdo do Gist não é JSON válido."
-        routes = obj.get("routes", [])
-        if not isinstance(routes, list):
-            return None, "Formato inesperado (esperava 'routes': [...])."
-        return routes, None
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            st.error(f"Falha ao ler Gist ({resp.status_code}). Confere o ID / permissões.")
+            return
+        data = resp.json()
+        files = data.get("files", {}) or {}
+        content = ""
+        if GIST_FILENAME in files:
+            content = files[GIST_FILENAME].get("content", "")
+        elif files:
+            # fallback: primeiro ficheiro
+            first_file = next(iter(files.values()))
+            content = first_file.get("content", "")
+        routes = []
+        if content:
+            parsed = json.loads(content)
+            if isinstance(parsed, dict) and "routes" in parsed:
+                routes = parsed["routes"]
+            elif isinstance(parsed, list):
+                routes = parsed
+        st.session_state.routes_catalog = routes or []
+        st.session_state.routes_loaded_ok = True
+        st.success(f"{len(st.session_state.routes_catalog)} rota(s) carregadas do Gist.")
     except Exception as e:
-        return None, f"Exceção ao ler Gist: {e}"
+        st.error(f"Erro ao ler Gist: {e}")
 
-def _save_routes_to_gist(routes):
-    """Grava as rotas no Gist (se houver GIST_ID)."""
-    if not GIST_ID:
-        return False, "GIST_ID não definido em st.secrets."
-    try:
-        headers = {"Accept": "application/vnd.github+json"}
-        if GIST_TOKEN:
-            headers["Authorization"] = f"token {GIST_TOKEN}"
-        payload = {
-            "files": {
-                "routes.json": {
-                    "content": json.dumps({"routes": routes}, indent=2, ensure_ascii=False)
-                }
+def _save_routes_to_gist(routes: list) -> bool:
+    gist_id = st.session_state.github_gist_id.strip()
+    headers = _get_github_headers()
+    if not gist_id or not headers:
+        st.warning("Define o Gist ID e o token GitHub para guardar rotas.")
+        return False
+    url = f"https://api.github.com/gists/{gist_id}"
+    payload = {
+        "files": {
+            GIST_FILENAME: {
+                "content": json.dumps({"routes": routes}, indent=2, ensure_ascii=False)
             }
         }
-        r = requests.patch(f"{GITHUB_API}/gists/{GIST_ID}", headers=headers, data=json.dumps(payload), timeout=10)
-        if r.status_code not in (200, 201):
-            return False, f"Erro HTTP {r.status_code} ao gravar Gist."
-        return True, None
+    }
+    try:
+        resp = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=10)
+        if resp.status_code not in (200, 201):
+            st.error(f"Falha ao escrever Gist ({resp.status_code}).")
+            return False
+        return True
     except Exception as e:
-        return False, f"Exceção ao gravar Gist: {e}"
-
-# Carregar automaticamente as rotas do Gist na primeira vez
-if not st.session_state.routes_loaded_from_gist:
-    if GIST_ID:
-        routes, err = _load_routes_from_gist()
-        if routes is not None:
-            st.session_state.saved_routes = routes
-        if err:
-            st.info(f"Rotas padrão: {err}")
-        st.session_state.routes_loaded_from_gist = True
-    else:
-        st.session_state.saved_routes = []
-        st.session_state.routes_loaded_from_gist = True
+        st.error(f"Erro ao escrever Gist: {e}")
+        return False
 
 # ========= ABAS =========
 tab_csv, tab_map, tab_fpl = st.tabs(["🔎 Pesquisar CSV", "🗺️ Adicionar no mapa", "✈️ Flight Plan"])
@@ -974,8 +977,82 @@ with st.expander("🛡 Espaço aéreo / restrições"):
 
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
-# ========= EDITOR WPs =========
+# ========= EDITOR WPs & ROTAS TIPO (GIST) =========
 ensure_wp_ids()
+
+# --- UI Rotas tipo (Gist) ---
+with st.expander("📁 Rotas tipo (Gist)", expanded=False):
+    st.caption("Guarda / carrega rotas padrão num Gist do GitHub (só o esqueleto: WPs/altitudes/STOP/VOR).")
+
+    c1, c2 = st.columns([2,3])
+    with c1:
+        st.session_state.github_gist_id = st.text_input(
+            "Gist ID",
+            st.session_state.github_gist_id,
+            help="ID do Gist (parte depois de https://gist.github.com/…/)."
+        )
+    with c2:
+        st.session_state.github_token = st.text_input(
+            "GitHub Token (PAT)",
+            st.session_state.github_token,
+            type="password",
+            help="PAT com acesso a gists (ou usa st.secrets['GITHUB_TOKEN'])."
+        )
+
+    c3, c4 = st.columns([1,1])
+    with c3:
+        if st.button("🔄 Ler rotas do Gist"):
+            _load_routes_from_gist()
+    with c4:
+        route_name_input = st.text_input("Nome para guardar rota atual", key="route_name_save")
+        if st.button("💾 Guardar rota atual", key="btn_save_route"):
+            if not st.session_state.wps:
+                st.warning("Não há WPs na rota atual para guardar.")
+            elif not route_name_input.strip():
+                st.warning("Indica um nome para a rota.")
+            else:
+                routes = list(st.session_state.routes_catalog or [])
+                payload_wps = [_serialize_wp_for_route(w) for w in st.session_state.wps]
+                new_route = {
+                    "name": route_name_input.strip(),
+                    "created_utc": dt.datetime.utcnow().isoformat()+"Z",
+                    "wps": payload_wps,
+                }
+                updated = False
+                for idx, r in enumerate(routes):
+                    if str(r.get("name","")).lower() == route_name_input.strip().lower():
+                        routes[idx] = new_route
+                        updated = True
+                        break
+                if not updated:
+                    routes.append(new_route)
+                if _save_routes_to_gist(routes):
+                    st.session_state.routes_catalog = routes
+                    st.success(f"Rota «{route_name_input.strip()}» guardada no Gist.")
+
+    st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+
+    if st.session_state.routes_catalog:
+        names = [r.get("name","(sem nome)") for r in st.session_state.routes_catalog]
+        sel_name = st.selectbox("Rotas disponíveis", names, key="route_sel_name")
+        if st.button("📥 Carregar rota selecionada", key="btn_load_route"):
+            idx = names.index(sel_name)
+            r = st.session_state.routes_catalog[idx]
+            wps_raw = r.get("wps", [])
+            loaded_wps = [_deserialize_wp_for_route(w) for w in wps_raw]
+            if loaded_wps:
+                st.session_state.wps = loaded_wps
+                st.session_state.route_nodes = []
+                st.session_state.legs = []
+                st.success(f"Rota «{sel_name}» carregada. Gera a rota novamente para calcular tempos/vento.")
+            else:
+                st.warning("Rota sem WPs válidos no Gist.")
+    else:
+        st.caption("Nenhuma rota carregada ainda. Usa «Ler rotas do Gist» ou «Guardar rota atual».")
+
+st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+
+# --- editor WPs normal ---
 remove_id = None
 move_up_id = None
 move_down_id = None
@@ -1008,7 +1085,7 @@ if st.session_state.wps:
                 wind_from_i = w.get("wind_from", st.session_state.wind_from)
                 wind_kt_i   = w.get("wind_kt",   st.session_state.wind_kt)
 
-            # guardar (sem UI de VOR — fica tudo por VOR em massa)
+            # guardar
             st.session_state.wps[i] = {
                 "id": w["id"],
                 "name":name,
@@ -1047,72 +1124,6 @@ if move_down_id is not None:
 # aplicar remoção
 if remove_id is not None:
     st.session_state.wps = [w for w in st.session_state.wps if w["id"] != remove_id]
-
-# ========= ROTAS PADRÃO (UI) =========
-st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
-with st.expander("📚 Rotas padrão (esqueleto, carregadas de Gist)", expanded=False):
-    st.caption("Rotas lidas automaticamente do Gist definido em st.secrets (GIST_ID).")
-
-    # --- Guardar rota atual ---
-    cr1, cr2 = st.columns([3,1])
-    with cr1:
-        default_name = st.session_state.selected_route_name or ""
-        new_route_name = st.text_input("Nome da rota atual para guardar", default_name)
-    with cr2:
-        if st.button("💾 Guardar rota atual (só esqueleto)"):
-            if not st.session_state.wps or len(st.session_state.wps) < 2:
-                st.warning("Precisas de pelo menos 2 WPs para guardar uma rota.")
-            else:
-                nm = new_route_name.strip() or f"Rota {len(st.session_state.saved_routes)+1}"
-                route_wps = [_serialize_wp_for_route(w) for w in st.session_state.wps]
-                existing = _find_route_by_name(st.session_state.saved_routes, nm)
-                if existing:
-                    existing["wps"] = route_wps
-                else:
-                    st.session_state.saved_routes.append({"name": nm, "wps": route_wps})
-                st.session_state.selected_route_name = nm
-
-                ok, err = _save_routes_to_gist(st.session_state.saved_routes)
-                if ok:
-                    st.success(f"Rota '{nm}' guardada e sincronizada com o Gist.")
-                else:
-                    st.warning(f"Rota guardada localmente, mas falhou escrever no Gist: {err}")
-
-    # --- Lista de rotas guardadas ---
-    if st.session_state.saved_routes:
-        names = [r.get("name","(sem nome)") for r in st.session_state.saved_routes]
-        try:
-            idx_sel = names.index(st.session_state.selected_route_name) if st.session_state.selected_route_name in names else 0
-        except ValueError:
-            idx_sel = 0
-
-        sel_name = st.selectbox("Rotas guardadas", names, index=idx_sel)
-        st.session_state.selected_route_name = sel_name
-
-        ca1, ca2 = st.columns([1,1])
-        with ca1:
-            if st.button("📥 Carregar rota selecionada (substitui WPs atuais)"):
-                r = _find_route_by_name(st.session_state.saved_routes, sel_name)
-                if not r:
-                    st.error("Rota não encontrada.")
-                else:
-                    st.session_state.wps = [_deserialize_wp_for_route(wd) for wd in r.get("wps",[])]
-                    ensure_wp_ids()
-                    st.session_state.route_nodes = []
-                    st.session_state.legs = []
-                    st.success(f"Rota '{sel_name}' carregada. Agora define vento/var e carrega em «Gerar/Atualizar rota».")
-        with ca2:
-            if st.button("🗑️ Apagar rota selecionada"):
-                st.session_state.saved_routes = [r for r in st.session_state.saved_routes if r.get("name") != sel_name]
-                if st.session_state.selected_route_name == sel_name:
-                    st.session_state.selected_route_name = ""
-                ok, err = _save_routes_to_gist(st.session_state.saved_routes)
-                if ok:
-                    st.success("Rota removida e Gist atualizado.")
-                else:
-                    st.warning(f"Rota removida localmente, mas falhou atualizar o Gist: {err}")
-    else:
-        st.info("Ainda não há rotas guardadas no Gist.")
 
 # ========= VOR EM MASSA =========
 if st.session_state.wps:
@@ -1989,7 +2000,6 @@ def _choose_vor_for_point(P):
     """
     nm = str(P.get("name","")).upper()
     if nm.startswith("TOC ") or nm.startswith("TOD "):
-        # não preencher VOR para TOC/TOD
         return None
 
     if P.get("vor_pref") == "FIXED":
@@ -2152,12 +2162,89 @@ def _build_payload_cont(all_legs, start_idx, *, alt_info=None, alt_choice=None):
         })
     return d
 
+# ========= PDF ESQUELETO LEGS =========
+def _make_skeleton_pdf(legs, filename="NAVLOG_SKELETON.pdf"):
+    """
+    Gera um PDF simples com uma linha por leg:
+    #, FROM, TO, MH, RADIAL, ETE, ALT_CHANGE
+    Usa os valores já calculados (vento do dia, tempos, etc.).
+    """
+    c = pdfcanvas.Canvas(filename, pagesize=A4)
+    width, height = A4
+    margin_x = 40
+    y = height - 50
+
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(margin_x, y, "NAVLOG – Esqueleto de Legs")
+    y -= 20
+    c.setFont("Helvetica", 9)
+    c.drawString(margin_x, y, f"Gerado em {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    y -= 30
+
+    # header
+    c.setFont("Helvetica-Bold", 10)
+    cols = ["#", "FROM", "TO", "MH", "RADIAL", "ETE", "ALT"]
+    col_x = [margin_x, margin_x+25, margin_x+120, margin_x+260, margin_x+310, margin_x+380, margin_x+430]
+    for cx, text in zip(col_x, cols):
+        c.drawString(cx, y, text)
+    y -= 14
+    c.setFont("Helvetica", 9)
+
+    def draw_row(idx, L, y_pos):
+        A, B = L["A"], L["B"]
+        from_name = str(A["name"])
+        to_name   = str(B["name"])
+        mh = f"{int(round(L['MH'])):03d}" if L["profile"] != "STOP" else ""
+
+        # radial no ponto B, se houver VOR associado / AUTO
+        radial_s = ""
+        try:
+            vor = _choose_vor_for_point(B)
+            if vor and L["profile"] != "STOP":
+                radial = fmt_radial_distance_from(vor, B["lat"], B["lon"])
+                radial_s = f"{vor['ident']} {radial}"
+        except Exception:
+            radial_s = ""
+
+        ete_s = _pdf_mmss(L["time_sec"])
+
+        if L["profile"] == "STOP":
+            alt_s = f"{int(round(A['alt']))} ft STOP"
+        elif abs(B["alt"]-A["alt"]) < 1e-3:
+            alt_s = f"{int(round(A['alt']))} ft LEVEL"
+        else:
+            arrow = "↑" if B["alt"]>A["alt"] else "↓"
+            alt_s = f"{int(round(A['alt']))}→{int(round(B['alt']))} ft {arrow}"
+
+        values = [str(idx), from_name, to_name, mh, radial_s, ete_s, alt_s]
+        for cx, val in zip(col_x, values):
+            c.drawString(cx, y_pos, str(val)[:30])
+
+    row_height = 12
+    for idx, L in enumerate(legs, start=1):
+        if y < 60:
+            c.showPage()
+            y = height - 50
+            c.setFont("Helvetica-Bold", 10)
+            for cx, text in zip(col_x, cols):
+                c.drawString(cx, y, text)
+            y -= 14
+            c.setFont("Helvetica", 9)
+        draw_row(idx, L, y)
+        y -= row_height
+
+    c.showPage()
+    c.save()
+    return filename
+
 # ========= BOTÕES PDF =========
-cX, cY = st.columns([1,1])
+cX, cY, cZ = st.columns([1,1,1])
 with cX:
     make_pdfs = st.button("Gerar PDF(s) NAVLOG", type="primary", use_container_width=True)
 with cY:
-    st.caption("Principal até 22 legs; continuação se exceder.")
+    make_skel_pdf = st.button("Gerar PDF esqueleto legs", use_container_width=True)
+with cZ:
+    st.caption("Principal até 22 legs; continuação + esqueleto de legs.")
 
 if make_pdfs:
     if not st.session_state.legs:
@@ -2203,5 +2290,17 @@ if make_pdfs:
                     use_container_width=True
                 )
 
+if make_skel_pdf:
+    if not st.session_state.legs:
+        st.error("Gera primeiro a rota para ter legs.")
+    else:
+        fname = _make_skeleton_pdf(st.session_state.legs, "NAVLOG_SKELETON.pdf")
+        with open(fname, "rb") as f:
+            st.download_button(
+                "⬇️ NAVLOG – Esqueleto (legs)",
+                f.read(),
+                file_name="NAVLOG_SKELETON.pdf",
+                use_container_width=True
+            )
 
 
