@@ -594,8 +594,6 @@ if st.session_state.db_points is None:
         ignore_index=True
     ).dropna(subset=["lat","lon"]).reset_index(drop=True)
 
-    base_db = pd.concat([base_db, pd.DataFrame(extra_rows)], ignore_index=True)
-
     st.session_state.db_points = base_db.dropna(subset=["lat","lon"]).reset_index(drop=True)
 
 db = st.session_state.db_points
