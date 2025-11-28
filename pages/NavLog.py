@@ -594,15 +594,6 @@ if st.session_state.db_points is None:
         ignore_index=True
     ).dropna(subset=["lat","lon"]).reset_index(drop=True)
 
-    extra_rows = [{
-        "src": "LOC",
-        "code": "RASQ",
-        "name": "RASQUETE BRIDGE",
-        "sector": "Montargil / Barragem de Montargil",
-        "lat": 39.0538,
-        "lon": -8.1762,
-        "alt": 0.0,
-    }]
     base_db = pd.concat([base_db, pd.DataFrame(extra_rows)], ignore_index=True)
 
     st.session_state.db_points = base_db.dropna(subset=["lat","lon"]).reset_index(drop=True)
