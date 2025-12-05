@@ -1,4 +1,11 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.2 (fix TODA/LDA)
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.2
+# Changes in this version:
+# - Aerodromes restricted to "Approved Airfields" list from RVP.MD.02.07_AprovedAirfieldsEd.1Rev.1.pdf
+# - AERODROMES_DB updated (coords, elevation, runways, lengths, headings)
+# - Cascais runway length set to 1400 m from Approved Airfields list
+# - Uses Open-Meteo for forecast (QNH via pressure_msl)
+# - Rounding tweaks, no semicolons
+#
 # Requirements:
 #   streamlit
 #   requests
@@ -83,6 +90,8 @@ AC = {
 }
 
 # Aerodromes restricted to Approved Airfields list
+# lat/lon approximate published coordinates
+# runway headings are approximate QFU, TODA/LDA from approved lengths
 AERODROMES_DB = {
     "LEBZ": {
         "name": "Badajoz",
@@ -188,6 +197,7 @@ AERODROMES_DB = {
         "name": "Cascais",
         "lat": 38.7256, "lon": -9.3553, "elev_ft": 326.0,
         "runways": [
+            # Approved list gives 1400 m
             {"id": "17", "qfu": 170.0, "toda": 1400.0, "lda": 1400.0, "slope_pc": 0.0, "paved": True},
             {"id": "35", "qfu": 350.0, "toda": 1400.0, "lda": 1400.0, "slope_pc": 0.0, "paved": True},
         ],
@@ -429,32 +439,46 @@ def hw_chip_class(hw):
 
 def to_corrections_takeoff(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     gr = float(ground_roll)
+
+    # wind correction
     if headwind_kt >= 0:
         gr -= 5.0 * headwind_kt
     else:
         gr += 15.0 * abs(headwind_kt)
+
+    # surface correction
     if paved:
         gr *= 0.90
+
+    # slope correction (uphill positive)
     slope_pc = clamp(slope_pc, -5.0, 5.0)
     gr *= (1.0 + 0.07 * slope_pc)
+
     return max(gr, 0.0)
 
 
 def ldg_corrections(ground_roll, headwind_kt, paved=False, slope_pc=0.0):
     gr = float(ground_roll)
+
+    # wind correction
     if headwind_kt >= 0:
         gr -= 4.0 * headwind_kt
     else:
         gr += 13.0 * abs(headwind_kt)
+
+    # surface correction
     if paved:
         gr *= 0.90
+
+    # slope correction (uphill positive)
     slope_pc = clamp(slope_pc, -5.0, 5.0)
     gr *= (1.0 - 0.03 * slope_pc)
+
     return max(gr, 0.0)
 
 
 # -----------------------------
-# Forecast provider (Open-Meteo)
+# Forecast provider (Open-Meteo) – usa pressure_msl (QNH)
 # -----------------------------
 OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -556,7 +580,7 @@ def om_unpack_at(resp, idx):
         return None
 
     speed_ms = sqrt(u * u + v * v)
-    dir_deg = (degrees(atan2(u, v)) + 180.0) % 360.0
+    dir_deg = (degrees(atan2(u, v)) + 180.0) % 360.0  # direção FROM
     speed_kt = speed_ms * 1.94384
 
     temp_val = getv("temp-surface")
@@ -935,13 +959,11 @@ with tab_aero:
 
     for i, leg in enumerate(st.session_state.legs):
         role = leg.get("role", ["Departure", "Arrival", "Alternate"][i])
-        prev_icao = leg.get("icao")
-
         c1, c2 = st.columns([0.45, 0.55])
 
         with c1:
             icao_options = sorted(AERODROMES_DB.keys())
-            default_icao = prev_icao or icao_options[0]
+            default_icao = leg.get("icao", icao_options[0])
 
             icao = st.selectbox(
                 f"{role} – Aerodrome (ICAO)",
@@ -952,15 +974,14 @@ with tab_aero:
                 key=f"icao_{i}",
             )
 
-            # se o ICAO mudou, atualizamos leg + TODA/LDA e forçamos rerun
-            if prev_icao != icao:
-                st.session_state.legs[i]["icao"] = icao
-                ad_new = AERODROMES_DB[icao]
-                st.session_state[f"toda_{i}"] = float(ad_new["runways"][0]["toda"])
-                st.session_state[f"lda_{i}"] = float(ad_new["runways"][0]["lda"])
-                st.rerun()
-
             ad = AERODROMES_DB[icao]
+
+            # Reset TODA/LDA quando o aeródromo muda
+            icao_state_key = f"last_icao_{i}"
+            if st.session_state.get(icao_state_key) != icao:
+                st.session_state[icao_state_key] = icao
+                st.session_state[f"toda_{i}"] = float(ad["runways"][0]["toda"])
+                st.session_state[f"lda_{i}"] = float(ad["runways"][0]["lda"])
 
             st.write(
                 f"**{ad['name']}**  \n"
@@ -1013,18 +1034,14 @@ with tab_aero:
             toda_av = st.number_input(
                 "TODA available (m)",
                 min_value=0.0,
-                value=st.session_state.get(
-                    f"toda_{i}", float(ad["runways"][0]["toda"])
-                ),
+                value=st.session_state.get(f"toda_{i}", float(ad["runways"][0]["toda"])),
                 step=1.0,
                 key=f"toda_{i}",
             )
             lda_av = st.number_input(
                 "LDA available (m)",
                 min_value=0.0,
-                value=st.session_state.get(
-                    f"lda_{i}", float(ad["runways"][0]["lda"])
-                ),
+                value=st.session_state.get(f"lda_{i}", float(ad["runways"][0]["lda"])),
                 step=1.0,
                 key=f"lda_{i}",
             )
@@ -1052,6 +1069,10 @@ with tab_aero:
             total_weight_for_perf,
         )
 
+        # Percentagens recalculadas com TODA/LDA "available"
+        pct_todr_av = (best["to_50"] / toda_av * 100) if toda_av > 0 else 0.0
+        pct_ldr_av = (best["ldg_50"] / lda_av * 100) if lda_av > 0 else 0.0
+
         feas = "✅" if best["feasible"] else "⚠️"
         xw_chip_cls, _cwcol = xw_class(best["xw_abs"])
 
@@ -1062,10 +1083,12 @@ with tab_aero:
             f"<span class='chip'>LDA {lda_av:.0f} m</span>"
             f"<span class='{hw_chip_class(best['hw_comp'])}'>HW {best['hw_comp']:.0f} kt</span>"
             f"<span class='{xw_chip_cls}'>XW {best['xw_side']} {best['xw_abs']:.0f} kt</span> "
-            f"<span class='chip'>TO % {best['pct_todr']:.0f}</span>"
-            f"<span class='chip'>LD % {best['pct_ldr']:.0f}</span> {feas}",
+            f"<span class='chip'>TO % {pct_todr_av:.0f}</span>"
+            f"<span class='chip'>LD % {pct_ldr_av:.0f}</span> {feas}",
             unsafe_allow_html=True,
         )
+
+        st.session_state.legs[i] = {"role": role, "icao": icao}
 
         perf_rows.append({
             "role": role,
@@ -1094,8 +1117,8 @@ with tab_aero:
             "xw_abs": best["xw_abs"],
             "xw_side": best["xw_side"],
             "feasible": best["feasible"],
-            "pct_todr": best["pct_todr"],
-            "pct_ldr": best["pct_ldr"],
+            "pct_todr": pct_todr_av,
+            "pct_ldr": pct_ldr_av,
             "roc": best["roc"],
             "vy": best["vy"],
         })
@@ -1301,10 +1324,11 @@ with tab_wb:
     }
 
 
-# ---- 4) Fuel planning — DETALHADO ----
+# ---- 4) Fuel planning — DETALHADO apenas ----
 with tab_perf:
     st.markdown("### Fuel Planning — Detalhado (EASA-like)")
 
+    # Consumo e fuel que vem do M&B
     RATE_LPH = st.number_input(
         "Débito (L/h)",
         min_value=10.0,
@@ -1314,6 +1338,7 @@ with tab_perf:
     )
     fuel_l_mb = st.session_state.get("_wb", {}).get("fuel_l", 0.0)
 
+    # Entradas detalhadas
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         taxi_min = st.number_input(
@@ -1365,13 +1390,16 @@ with tab_perf:
     def fmt_l(v):
         return f"{v:.1f} L" if abs(v - round(v)) > 1e-9 else f"{int(round(v))} L"
 
+    # Trip = 2+3+4
     enrt_min_eff = enrt_h * 60 + enrt_min
     trip_min = climb_min + enrt_min_eff + desc_min
     trip_l = l_from_min(trip_min)
 
+    # (6) Contingency 5% do (5)
     cont_min = int(round(0.05 * trip_min))
     cont_l = round(0.05 * trip_l, 1)
 
+    # Litros de cada bloco
     taxi_l = l_from_min(taxi_min)
     climb_l = l_from_min(climb_min)
     enrt_l = l_from_min(enrt_min_eff)
@@ -1379,15 +1407,19 @@ with tab_perf:
     alt_l = l_from_min(alt_min)
     reserve_l = l_from_min(reserve_min)
 
+    # (9) Required Ramp = 1 + 5 + 6 + 7 + 8
     req_ramp = round(taxi_l + trip_l + cont_l + alt_l + reserve_l, 1)
     req_ramp_min = taxi_min + trip_min + cont_min + alt_min + reserve_min
 
+    # (10) Extra — auto para bater com M&B
     extra_l = max(0.0, round(fuel_l_mb - req_ramp, 1))
     extra_min = int(round((extra_l / RATE_LPH) * 60))
 
+    # (11) Total Ramp = 9 + 10
     total_ramp = round(req_ramp + extra_l, 1)
     total_ramp_min = req_ramp_min + extra_min
 
+    # Quadro/Resumo
     st.markdown("#### Quadro (1)–(11)")
     rows = [
         ("(1) Start-up & Taxi", taxi_min, taxi_l),
@@ -1398,7 +1430,11 @@ with tab_perf:
         ("(6) Contingency 5% (5)", cont_min, cont_l),
         ("(7) Alternate", alt_min, alt_l),
         ("(8) Reserve 45 min.", reserve_min, reserve_l),
-        ("(9) Required Ramp Fuel (1 + 5 + 6 + 7 + 8)", req_ramp_min, req_ramp),
+        (
+            "(9) Required Ramp Fuel (1 + 5 + 6 + 7 + 8)",
+            req_ramp_min,
+            req_ramp,
+        ),
         ("(10) Extra (auto p/ bater M&B)", extra_min, extra_l),
         ("(11) Total Ramp Fuel (9 + 10)", total_ramp_min, total_ramp),
         ("Fuel carregado (M&B)", 0, fuel_l_mb),
@@ -1416,6 +1452,7 @@ with tab_perf:
 
     st.markdown("".join(html), unsafe_allow_html=True)
 
+    # Guardar para o PDF
     st.session_state["_fuel"] = {
         "policy": "Detailed",
         "trip_l": trip_l,
@@ -1447,6 +1484,8 @@ with tab_pdf:
     )
     st.caption(f"Date: **{date_str}** (definido na 1ª aba)")
 
+    roles = {"Departure": "Dep", "Arrival": "Arr", "Alternate": "Alt"}
+
     def read_pdf_bytes(paths) -> bytes:
         for path_str in paths:
             p = Path(path_str)
@@ -1460,6 +1499,7 @@ with tab_pdf:
         names = set()
         reader = PdfReader(io.BytesIO(template_bytes))
 
+        # via get_fields
         try:
             fd = reader.get_fields()
             if fd:
@@ -1467,6 +1507,7 @@ with tab_pdf:
         except Exception:
             pass
 
+        # brute force annots
         try:
             for page in reader.pages:
                 if "/Annots" in page:
@@ -1520,6 +1561,7 @@ with tab_pdf:
         fuel = st.session_state.get("_fuel", {})
         perf_rows = st.session_state.get("_perf_rows", [])
 
+        # Base / M&B
         put_any(named_map, fieldset, "Aircraf_Reg", reg or "")
         put_any(named_map, fieldset, "Date", date_str)
 
@@ -1584,6 +1626,7 @@ with tab_pdf:
         )
         put_any(named_map, fieldset, "CG", f"{wb.get('cg',0.0):.3f}")
 
+        # Per-leg (Departure / Arrival / Alternate)
         by_role = {r["role"]: r for r in perf_rows} if perf_rows else {}
         for role, suf in {"Departure": "Dep", "Arrival": "Arr", "Alternate": "Alt"}.items():
             r = by_role.get(role)
@@ -1667,6 +1710,8 @@ with tab_pdf:
                 f"{int(round(r.get('roc', 0)))}",
             )
 
+        # Fuel block (PDF wants times + liters)
+        # We keep fixed 20 L/h to compute block times -> consistent with on-screen table
         def L_from_min(m):
             return int(round(20.0 * ((m or 0) / 60.0)))
 
@@ -1848,4 +1893,3 @@ with tab_pdf:
 
     except Exception as e:
         st.error(f"Cannot prepare PDF mapping: {e}")
-
