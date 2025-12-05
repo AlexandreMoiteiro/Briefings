@@ -1,10 +1,11 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.2
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.2 (patched)
 # Changes in this version:
 # - Aerodromes restricted to "Approved Airfields" list from RVP.MD.02.07_AprovedAirfieldsEd.1Rev.1.pdf
 # - AERODROMES_DB updated (coords, elevation, runways, lengths, headings)
 # - Cascais runway length set to 1400 m from Approved Airfields list
 # - Uses Open-Meteo for forecast (QNH via pressure_msl)
 # - Rounding tweaks, no semicolons
+# - FIX: TODA/LDA actualizam quando se muda o aeródromo (por leg)
 #
 # Requirements:
 #   streamlit
@@ -959,6 +960,9 @@ with tab_aero:
 
     for i, leg in enumerate(st.session_state.legs):
         role = leg.get("role", ["Departure", "Arrival", "Alternate"][i])
+        # ICAO anterior guardado na session_state (antes de ler widget)
+        prev_icao = leg.get("icao")
+
         c1, c2 = st.columns([0.45, 0.55])
 
         with c1:
@@ -1024,17 +1028,26 @@ with tab_aero:
                 key=f"slope_{i}",
             )
 
+            # --- FIX: reset de TODA/LDA quando o ICAO muda ---
+            if prev_icao is None or prev_icao != icao:
+                st.session_state[f"toda_{i}"] = float(ad["runways"][0]["toda"])
+                st.session_state[f"lda_{i}"] = float(ad["runways"][0]["lda"])
+
             toda_av = st.number_input(
                 "TODA available (m)",
                 min_value=0.0,
-                value=float(ad["runways"][0]["toda"]),
+                value=st.session_state.get(
+                    f"toda_{i}", float(ad["runways"][0]["toda"])
+                ),
                 step=1.0,
                 key=f"toda_{i}",
             )
             lda_av = st.number_input(
                 "LDA available (m)",
                 min_value=0.0,
-                value=float(ad["runways"][0]["lda"]),
+                value=st.session_state.get(
+                    f"lda_{i}", float(ad["runways"][0]["lda"])
+                ),
                 step=1.0,
                 key=f"lda_{i}",
             )
@@ -1068,8 +1081,8 @@ with tab_aero:
         st.markdown(
             f"🧭 **Selected runway:** {best['id']} "
             f"<span class='chip'>QFU {best['qfu']:.0f}°</span>"
-            f"<span class='chip'>TODA {best['toda_av']:.0f} m</span>"
-            f"<span class='chip'>LDA {best['lda_av']:.0f} m</span>"
+            f"<span class='chip'>TODA {toda_av:.0f} m</span>"
+            f"<span class='chip'>LDA {lda_av:.0f} m</span>"
             f"<span class='{hw_chip_class(best['hw_comp'])}'>HW {best['hw_comp']:.0f} kt</span>"
             f"<span class='{xw_chip_cls}'>XW {best['xw_side']} {best['xw_abs']:.0f} kt</span> "
             f"<span class='chip'>TO % {best['pct_todr']:.0f}</span>"
@@ -1077,6 +1090,7 @@ with tab_aero:
             unsafe_allow_html=True,
         )
 
+        # actualiza leg em uso
         st.session_state.legs[i] = {"role": role, "icao": icao}
 
         perf_rows.append({
@@ -1882,3 +1896,4 @@ with tab_pdf:
 
     except Exception as e:
         st.error(f"Cannot prepare PDF mapping: {e}")
+
