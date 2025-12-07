@@ -12,6 +12,31 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# ---------- CSS para fullscreen-ish ----------
+st.markdown("""
+<style>
+/* tirar header e reduzir padding */
+header[data-testid="stHeader"] {display: none;}
+main .block-container {
+    padding-top: 0rem;
+    padding-bottom: 0rem;
+    padding-left: 0rem;
+    padding-right: 0rem;
+}
+
+/* fundo escuro */
+body, .stApp {
+    background-color: #020617;
+}
+
+/* tirar margens do iframe do folium */
+.stApp iframe, .stApp .stMarkdown iframe {
+    width: 100% !important;
+    border: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ---------- Helpers ----------
 def dms_to_dd(token: str, is_lon=False):
     token = str(token).strip()
@@ -92,7 +117,7 @@ def parse_localidades(df: pd.DataFrame) -> pd.DataFrame:
             })
     return pd.DataFrame(rows).dropna(subset=["lat","lon"])
 
-# ---------- VOR DB (mesmo esquema do NAVLOG) ----------
+# ---------- VOR DB ----------
 VOR_CSV = "NAVAIDS_VOR.csv"
 
 def _load_vor_db(path: str) -> pd.DataFrame:
@@ -110,7 +135,6 @@ def _load_vor_db(path: str) -> pd.DataFrame:
         except Exception:
             pass
 
-    # Fallback simples
     fallback = [
         ("CAS", "Cascais DVOR/DME", 114.30, 38.7483, -9.3619),
         ("ESP", "Espichel DVOR/DME", 112.50, 38.4242, -9.1856),
@@ -147,7 +171,7 @@ m = folium.Map(
     prefer_canvas=True,
 )
 
-# Base: OpenTopoMap
+# Base OpenTopoMap
 folium.TileLayer(
     "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
     attr="© OpenTopoMap",
@@ -155,7 +179,7 @@ folium.TileLayer(
     control=False,
 ).add_to(m)
 
-# Overlay openAIP (igual NAVLOG)
+# Overlay openAIP
 openaip_token = (
     getattr(st, "secrets", {}).get("OPENAIP_KEY")
     if hasattr(st, "secrets") else None
@@ -176,7 +200,7 @@ if openaip_token:
         max_zoom=20,
     ).add_to(m)
 
-# ---------- Localidades (sempre todas) ----------
+# ---------- Localidades ----------
 if not loc_df.empty:
     cluster_loc = MarkerCluster(
         name="Localidades",
@@ -197,10 +221,20 @@ if not loc_df.empty:
         Lat: {lat}<br/>
         Lon: {lon}
         """
+
+        # LABEL: chip branco com texto escuro e sombra → mais legível
         label_html = f"""
-        <div style="font-size:11px;font-weight:600;color:#fff;
-        background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:4px;
-        border:1px solid rgba(255,255,255,0.35);backdrop-filter:blur(1px);">
+        <div style="
+            font-size:11px;
+            font-weight:700;
+            color:#111827;
+            background:rgba(255,255,255,0.92);
+            padding:2px 6px;
+            border-radius:4px;
+            border:1px solid rgba(15,23,42,0.35);
+            box-shadow:0 1px 3px rgba(0,0,0,0.35);
+            white-space:nowrap;
+        ">
             {code}
         </div>
         """
@@ -273,7 +307,7 @@ if not vor_db.empty:
         ).add_to(cluster_vor)
     cluster_vor.add_to(m)
 
-# ---------- Mostrar mapa (único elemento da página) ----------
+# ---------- Mostrar mapa ----------
 folium.LayerControl(collapsed=False).add_to(m)
-st_folium(m, width=None, height=800)
+st_folium(m, width=None, height=900)
 
