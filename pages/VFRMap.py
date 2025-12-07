@@ -7,63 +7,10 @@ import re, os
 
 # ---------- Page config ----------
 st.set_page_config(
-    page_title="Portugal VFR — Localidades + AD/HEL/ULM",
+    page_title="Portugal VFR — Mapa",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
-# ---------- Custom CSS ----------
-st.markdown("""
-<style>
-body {
-    background: #f3f4f6;
-}
-.main-block {
-    background: #ffffff;
-    border-radius: 18px;
-    padding: 16px 18px 12px 18px;
-    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
-    margin-bottom: 16px;
-}
-h1.title-header {
-    font-size: 2rem;
-    margin-bottom: 0.2rem;
-}
-.subtitle {
-    opacity: 0.9;
-    margin-top: 0px;
-    margin-bottom: 18px;
-    font-size: 0.95rem;
-    color: #6b7280;
-}
-.chip-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 4px;
-}
-.chip {
-    font-size: 0.78rem;
-    padding: 3px 8px;
-    border-radius: 999px;
-    background: #f3f4f6;
-    border: 1px solid #e5e7eb;
-    color: #4b5563;
-}
-.stApp iframe, .stApp .stMarkdown iframe {
-    opacity: 1 !important;
-    filter: none !important;
-}
-.leaflet-pane, .leaflet-top, .leaflet-bottom {
-    opacity: 1 !important;
-    filter: none !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ---------- Header ----------
-st.markdown("<div class='main-block'>", unsafe_allow_html=True)
-st.markdown("<h1 class='title-header'>Portugal VFR — Localidades + AD/HEL/ULM</h1>", unsafe_allow_html=True)
 
 # ---------- Helpers ----------
 def dms_to_dd(token: str, is_lon=False):
@@ -145,7 +92,7 @@ def parse_localidades(df: pd.DataFrame) -> pd.DataFrame:
             })
     return pd.DataFrame(rows).dropna(subset=["lat","lon"])
 
-# ---------- VOR DB (igual ao NAVLOG) ----------
+# ---------- VOR DB (mesmo esquema do NAVLOG) ----------
 VOR_CSV = "NAVAIDS_VOR.csv"
 
 def _load_vor_db(path: str) -> pd.DataFrame:
@@ -163,7 +110,7 @@ def _load_vor_db(path: str) -> pd.DataFrame:
         except Exception:
             pass
 
-    # Fallback básico se o CSV não existir
+    # Fallback simples
     fallback = [
         ("CAS", "Cascais DVOR/DME", 114.30, 38.7483, -9.3619),
         ("ESP", "Espichel DVOR/DME", 112.50, 38.4242, -9.1856),
@@ -184,65 +131,10 @@ vor_db = _load_vor_db(VOR_CSV)
 ad_df = parse_ad(pd.read_csv("AD-HEL-ULM.csv"))
 loc_df = parse_localidades(pd.read_csv("Localidades-Nova-versao-230223.csv"))
 
-# ---------- Controls ----------
-col1, col2, col3, col4 = st.columns([1,1,1,3])
-with col1:
-    show_ad = st.checkbox("Aeródromos", value=True)
-with col2:
-    show_loc = st.checkbox("Localidades", value=True)
-with col3:
-    show_vor = st.checkbox("VOR", value=True)
-with col4:
-    query = st.text_input(
-        "🔍 Filtrar (código/ident/nome/cidade)",
-        "",
-        placeholder="Ex: ABRAN, LP0078, Porto..."
-    )
-
-def apply_filters(ad_df, loc_df, q):
-    if q:
-        tq = q.lower().strip()
-        ad_df = ad_df[ad_df.apply(
-            lambda r: tq in str(r['name']).lower()
-                      or tq in str(r.get('ident','')).lower()
-                      or tq in str(r.get('city','')).lower(),
-            axis=1
-        )]
-        loc_df = loc_df[loc_df.apply(
-            lambda r: tq in str(r['name']).lower()
-                      or tq in str(r.get('code','')).lower()
-                      or tq in str(r.get('sector','')).lower(),
-            axis=1
-        )]
-    return ad_df, loc_df
-
-ad_f, loc_f = apply_filters(ad_df, loc_df, query)
-
-# Pequeno resumo em "chips" + fecha header
-st.markdown("<div class='chip-row'>", unsafe_allow_html=True)
-st.markdown(
-    f"<div class='chip'>AD/HEL/ULM totais: <b>{len(ad_df)}</b></div>",
-    unsafe_allow_html=True
-)
-st.markdown(
-    f"<div class='chip'>Localidades totais: <b>{len(loc_df)}</b></div>",
-    unsafe_allow_html=True
-)
-st.markdown(
-    f"<div class='chip'>Filtro → AD: <b>{len(ad_f)}</b> | Loc: <b>{len(loc_f)}</b></div>",
-    unsafe_allow_html=True
-)
-st.markdown(
-    f"<div class='chip'>VOR carregados: <b>{len(vor_db)}</b></div>",
-    unsafe_allow_html=True
-)
-st.markdown("</div>", unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)  # fecha main-block
-
 # ---------- Map Center ----------
-if len(ad_f) + len(loc_f) > 0:
-    mean_lat = pd.concat([ad_f["lat"], loc_f["lat"]]).mean()
-    mean_lon = pd.concat([ad_f["lon"], loc_f["lon"]]).mean()
+if len(ad_df) + len(loc_df) > 0:
+    mean_lat = pd.concat([ad_df["lat"], loc_df["lat"]]).mean()
+    mean_lon = pd.concat([ad_df["lon"], loc_df["lon"]]).mean()
 else:
     mean_lat, mean_lon = 39.5, -8.0
 
@@ -255,7 +147,7 @@ m = folium.Map(
     prefer_canvas=True,
 )
 
-# Base única: OpenTopoMap (tal como no NAVLOG)
+# Base: OpenTopoMap
 folium.TileLayer(
     "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
     attr="© OpenTopoMap",
@@ -263,11 +155,11 @@ folium.TileLayer(
     control=False,
 ).add_to(m)
 
-# ---------- Overlay openAIP (igual ao NAVLOG) ----------
+# Overlay openAIP (igual NAVLOG)
 openaip_token = (
     getattr(st, "secrets", {}).get("OPENAIP_KEY")
     if hasattr(st, "secrets") else None
-) or os.getenv("OPENAIP_KEY", "e849257999aa8ed820c3a6f7eb40f84e")  # mesmo fallback do NAVLOG
+) or os.getenv("OPENAIP_KEY", "e849257999aa8ed820c3a6f7eb40f84e")
 
 if openaip_token:
     folium.TileLayer(
@@ -284,14 +176,14 @@ if openaip_token:
         max_zoom=20,
     ).add_to(m)
 
-# ---------- Localidades ----------
-if show_loc and not loc_f.empty:
+# ---------- Localidades (sempre todas) ----------
+if not loc_df.empty:
     cluster_loc = MarkerCluster(
         name="Localidades",
         show=True,
         disableClusteringAtZoom=10
     )
-    for _, r in loc_f.iterrows():
+    for _, r in loc_df.iterrows():
         code = r.get("code") or "—"
         name = r.get("name", "")
         sector = r.get("sector", "")
@@ -305,94 +197,8 @@ if show_loc and not loc_f.empty:
         Lat: {lat}<br/>
         Lon: {lon}
         """
-
         label_html = f"""
         <div style="font-size:11px;font-weight:600;color:#fff;
-        background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:4px;
-        border:1px solid rgba(255,255,255,0.35);backdrop-filter:blur(1px);">
-            {code}
-        </div>
-        """
-
-        folium.Marker(
-            location=[r["lat"], r["lon"]],
-            icon=folium.DivIcon(html=label_html),
-            tooltip=tooltip_html
-        ).add_to(cluster_loc)
-    cluster_loc.add_to(m)
-
-# ---------- AD/HEL/ULM ----------
-if show_ad and not ad_f.empty:
-    cluster_ad = MarkerCluster(
-        name="AD/HEL/ULM",
-        show=True,
-        disableClusteringAtZoom=10
-    )
-    for _, r in ad_f.iterrows():
-        ident = r.get("ident", "—")
-        name = r.get("name", "")
-        city = r.get("city", "")
-        lat = round(r["lat"], 5)
-        lon = round(r["lon"], 5)
-
-        tooltip_html = f"""
-        <b>{ident}</b><br/>
-        Nome: {name}<br/>
-        Cidade: {city}<br/>
-        Lat: {lat}<br/>
-        Lon: {lon}
-        """
-
-        folium.Marker(
-            location=[r["lat"], r["lon"]],
-            icon=folium.Icon(icon="plane", prefix="fa", color="gray"),
-            tooltip=tooltip_html
-        ).add_to(cluster_ad)
-    cluster_ad.add_to(m)
-
-# ---------- VOR ----------
-if show_vor and not vor_db.empty:
-    cluster_vor = MarkerCluster(
-        name="VOR",
-        show=True,
-        disableClusteringAtZoom=9
-    )
-    for _, r in vor_db.iterrows():
-        ident = r.get("ident", "")
-        name = r.get("name", "")
-        freq = r.get("freq_mhz", "")
-        lat = float(r["lat"])
-        lon = float(r["lon"])
-
-        tooltip_html = f"""
-        <b>{ident}</b><br/>
-        {name}<br/>
-        {freq:.2f} MHz<br/>
-        Lat: {lat:.5f}<br/>
-        Lon: {lon:.5f}
-        """
-
-        folium.CircleMarker(
-            location=[lat, lon],
-            radius=5,
-            color="#e11d48",
-            fill=True,
-            fill_opacity=0.9,
-            tooltip=tooltip_html,
-        ).add_to(cluster_vor)
-    cluster_vor.add_to(m)
-
-# ---------- Display map ----------
-folium.LayerControl(collapsed=False).add_to(m)
-st_folium(m, width=None, height=720)
-
-# ---------- Footer ----------
-if len(ad_f) == 0 and len(loc_f) == 0:
-    st.info("🔍 Nenhum resultado encontrado com esse filtro.")
-else:
-    st.caption(
-        f"📍 Total carregado: {len(ad_df)} AD/HEL/ULM, {len(loc_df)} Localidades. "
-        f"Filtro ativo → AD: {len(ad_f)} | Localidades: {len(loc_f)}."
-    )
+        b
 
 
