@@ -3,7 +3,7 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import MarkerCluster
-import re
+import re, os
 
 # ---------- Page config ----------
 st.set_page_config(page_title="Portugal VFR — Localidades + AD/HEL/ULM", layout="wide")
@@ -110,11 +110,40 @@ with col2:
 with col3:
     query = st.text_input("🔍 Filtrar (código/ident/nome/cidade)", "", placeholder="Ex: ABRAN, LP0078, Porto...")
 
+# Controlo da base do mapa + openAIP (estilo NAVLOG)
+mcol1, mcol2, mcol3 = st.columns([2,2,2])
+with mcol1:
+    map_base = st.selectbox(
+        "Base do mapa",
+        ["OpenTopoMap (VFR-ish)", "OSM Standard", "Terrain Hillshade"],
+        index=0,
+    )
+with mcol2:
+    show_openaip = st.checkbox("Overlay openAIP", value=True)
+with mcol3:
+    openaip_alpha = st.slider("Transparência openAIP", 0.0, 1.0, 0.6, 0.05)
+
+# API key openAIP (secrets ou env var)
+openaip_token = (
+    getattr(st, "secrets", {}).get("OPENAIP_KEY")
+    if hasattr(st, "secrets") else None
+) or os.getenv("OPENAIP_KEY", "")
+
 def apply_filters(ad_df, loc_df, q):
     if q:
         tq = q.lower().strip()
-        ad_df = ad_df[ad_df.apply(lambda r: tq in str(r['name']).lower() or tq in str(r.get('ident','')).lower() or tq in str(r.get('city','')).lower(), axis=1)]
-        loc_df = loc_df[loc_df.apply(lambda r: tq in str(r['name']).lower() or tq in str(r.get('code','')).lower() or tq in str(r.get('sector','')).lower(), axis=1)]
+        ad_df = ad_df[ad_df.apply(
+            lambda r: tq in str(r['name']).lower()
+                      or tq in str(r.get('ident','')).lower()
+                      or tq in str(r.get('city','')).lower(),
+            axis=1
+        )]
+        loc_df = loc_df[loc_df.apply(
+            lambda r: tq in str(r['name']).lower()
+                      or tq in str(r.get('code','')).lower()
+                      or tq in str(r.get('sector','')).lower(),
+            axis=1
+        )]
     return ad_df, loc_df
 
 ad_f, loc_f = apply_filters(ad_df, loc_df, query)
@@ -126,11 +155,53 @@ if len(ad_f) + len(loc_f) > 0:
 else:
     mean_lat, mean_lon = 39.5, -8.0
 
-# ---------- Folium Map ----------
-m = folium.Map(location=[mean_lat, mean_lon], zoom_start=6, tiles=None, control_scale=True)
-sat_tiles = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-sat_attr = "Tiles © Esri, USDA, USGS, AeroGRID, IGN"
-folium.TileLayer(tiles=sat_tiles, attr=sat_attr, name="Satélite", control=False, opacity=1).add_to(m)
+# ---------- Folium Map (estilo NAVLOG) ----------
+m = folium.Map(
+    location=[mean_lat, mean_lon],
+    zoom_start=7,
+    tiles=None,
+    control_scale=True,
+    prefer_canvas=True,
+)
+
+# Base tiles
+if map_base == "OpenTopoMap (VFR-ish)":
+    folium.TileLayer(
+        "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attr="© OpenTopoMap",
+        name="OpenTopoMap",
+        control=False,
+    ).add_to(m)
+elif map_base == "OSM Standard":
+    folium.TileLayer(
+        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        attr="© OpenStreetMap",
+        name="OSM Standard",
+        control=False,
+    ).add_to(m)
+elif map_base == "Terrain Hillshade":
+    folium.TileLayer(
+        "https://services.arcgisonline.com/ArcGIS/rest/services/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+        attr="© Esri World Hillshade",
+        name="Terrain Hillshade",
+        control=False,
+    ).add_to(m)
+
+# Overlay openAIP (igual ao outro app)
+if show_openaip and openaip_token:
+    folium.TileLayer(
+        tiles=(
+            "https://{s}.api.tiles.openaip.net/api/data/openaip/"
+            "{z}/{x}/{y}.png?apiKey=" + openaip_token
+        ),
+        attr="© openAIP",
+        name="openAIP (VFR data)",
+        overlay=True,
+        control=True,
+        subdomains="abc",
+        opacity=float(openaip_alpha),
+        max_zoom=20,
+    ).add_to(m)
 
 # ---------- Localidades ----------
 if show_loc and not loc_f.empty:
@@ -189,15 +260,17 @@ if show_ad and not ad_f.empty:
     cluster_ad.add_to(m)
 
 # ---------- Display map ----------
-folium.LayerControl(collapsed=True).add_to(m)
+folium.LayerControl(collapsed=False).add_to(m)
 st_folium(m, width=None, height=720)
 
 # ---------- Footer ----------
 if len(ad_f) == 0 and len(loc_f) == 0:
     st.info("🔍 Nenhum resultado encontrado com esse filtro.")
 else:
-    st.caption(f"📍 Total carregado: {len(ad_df)} AD/HEL/ULM, {len(loc_df)} Localidades. Filtro ativo → AD: {len(ad_f)} | Localidades: {len(loc_f)}.")
-
+    st.caption(
+        f"📍 Total carregado: {len(ad_df)} AD/HEL/ULM, {len(loc_df)} Localidades. "
+        f"Filtro ativo → AD: {len(ad_f)} | Localidades: {len(loc_f)}."
+    )
 
 
 
