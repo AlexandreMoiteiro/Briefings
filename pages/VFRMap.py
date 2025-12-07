@@ -199,6 +199,81 @@ if not loc_df.empty:
         """
         label_html = f"""
         <div style="font-size:11px;font-weight:600;color:#fff;
-        b
+        background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:4px;
+        border:1px solid rgba(255,255,255,0.35);backdrop-filter:blur(1px);">
+            {code}
+        </div>
+        """
 
+        folium.Marker(
+            location=[r["lat"], r["lon"]],
+            icon=folium.DivIcon(html=label_html),
+            tooltip=tooltip_html
+        ).add_to(cluster_loc)
+    cluster_loc.add_to(m)
+
+# ---------- AD/HEL/ULM ----------
+if not ad_df.empty:
+    cluster_ad = MarkerCluster(
+        name="AD/HEL/ULM",
+        show=True,
+        disableClusteringAtZoom=10
+    )
+    for _, r in ad_df.iterrows():
+        ident = r.get("ident", "—")
+        name = r.get("name", "")
+        city = r.get("city", "")
+        lat = round(r["lat"], 5)
+        lon = round(r["lon"], 5)
+
+        tooltip_html = f"""
+        <b>{ident}</b><br/>
+        Nome: {name}<br/>
+        Cidade: {city}<br/>
+        Lat: {lat}<br/>
+        Lon: {lon}
+        """
+
+        folium.Marker(
+            location=[r["lat"], r["lon"]],
+            icon=folium.Icon(icon="plane", prefix="fa", color="gray"),
+            tooltip=tooltip_html
+        ).add_to(cluster_ad)
+    cluster_ad.add_to(m)
+
+# ---------- VOR ----------
+if not vor_db.empty:
+    cluster_vor = MarkerCluster(
+        name="VOR",
+        show=True,
+        disableClusteringAtZoom=9
+    )
+    for _, r in vor_db.iterrows():
+        ident = r.get("ident", "")
+        name = r.get("name", "")
+        freq = r.get("freq_mhz", "")
+        lat = float(r["lat"])
+        lon = float(r["lon"])
+
+        tooltip_html = f"""
+        <b>{ident}</b><br/>
+        {name}<br/>
+        {freq:.2f} MHz<br/>
+        Lat: {lat:.5f}<br/>
+        Lon: {lon:.5f}
+        """
+
+        folium.CircleMarker(
+            location=[lat, lon],
+            radius=5,
+            color="#e11d48",
+            fill=True,
+            fill_opacity=0.9,
+            tooltip=tooltip_html,
+        ).add_to(cluster_vor)
+    cluster_vor.add_to(m)
+
+# ---------- Mostrar mapa (único elemento da página) ----------
+folium.LayerControl(collapsed=False).add_to(m)
+st_folium(m, width=None, height=800)
 
