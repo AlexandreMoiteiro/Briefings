@@ -1,10 +1,10 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.2
-# Changes in this version:
-# - Aerodromes restricted to "Approved Airfields" list from RVP.MD.02.07_AprovedAirfieldsEd.1Rev.1.pdf
-# - AERODROMES_DB updated (coords, elevation, runways, lengths, headings)
-# - Cascais runway length set to 1400 m from Approved Airfields list
-# - Uses Open-Meteo for forecast (QNH via pressure_msl)
-# - Rounding tweaks, no semicolons
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.3
+# Changes vs v8.2 (principais):
+# - Melhorado o bloco de "Fetch forecast for all legs":
+#   • Sem st.rerun() (permitindo ver mensagens de sucesso/erro)
+#   • Contagem de pernas atualizadas / com erro
+#   • Mensagens claras por aeródromo
+# - Pequeno ajuste em om_point_forecast para devolver params em caso de erro (útil para debug)
 #
 # Requirements:
 #   streamlit
@@ -505,7 +505,11 @@ def om_point_forecast(lat, lon, start_date_iso, end_date_iso):
     try:
         r = requests.get(OPENMETEO_URL, params=params, timeout=20)
         if r.status_code != 200:
-            return {"error": f"HTTP {r.status_code}", "detail": r.text}
+            return {
+                "error": f"HTTP {r.status_code}",
+                "detail": r.text,
+                "params": params,
+            }
 
         data = r.json()
         h = data.get("hourly", {})
@@ -552,7 +556,7 @@ def om_point_forecast(lat, lon, start_date_iso, end_date_iso):
             "pressure-surface": press_pa,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": str(e), "params": params}
 
 
 def om_list_hours(resp):
@@ -909,51 +913,70 @@ with tab_aero:
             target_time,
         ).replace(tzinfo=dt.timezone.utc)
 
+    # ---- Botão de fetch melhorado ----
     _, c_fetch2 = st.columns([0.6, 0.4])
     with c_fetch2:
         if st.button("Fetch forecast for all legs", type="primary"):
+            ok_count = 0
+            err_count = 0
+
             for idx, leg in enumerate(st.session_state.legs):
                 icao = leg["icao"]
                 ad = AERODROMES_DB[icao]
 
                 start_iso = st.session_state.flight_date.strftime("%Y-%m-%d")
-                end_iso = start_iso
+                end_iso = start_iso  # 1 dia chega para a maioria dos casos
 
                 resp = om_point_forecast(ad["lat"], ad["lon"], start_iso, end_iso)
                 if "error" in resp:
                     st.error(
                         f"{icao}: Forecast error: {resp.get('error')} {resp.get('detail','')}"
                     )
+                    err_count += 1
+                    continue
+
+                hours = om_list_hours(resp)
+                if not hours:
+                    st.warning(f"{icao}: Forecast returned no hours.")
+                    err_count += 1
                     continue
 
                 st.session_state.forecast[idx] = resp
-                hours = om_list_hours(resp)
                 st.session_state.hours[idx] = hours
 
-                if hours:
-                    target = st.session_state.forecast_target_utc
-                    nearest_idx, _ = min(
-                        hours,
-                        key=lambda h: abs(h[1] - target),
-                    )
-                    st.session_state.hour_idx[idx] = nearest_idx
+                # escolher a hora mais próxima do target
+                target = st.session_state.forecast_target_utc
+                nearest_idx, nearest_time = min(
+                    hours,
+                    key=lambda h: abs(h[1] - target),
+                )
+                st.session_state.hour_idx[idx] = nearest_idx
 
-                    met = om_unpack_at(resp, nearest_idx)
-                    if met:
-                        st.session_state.met[idx]["temp"] = int(met["temp"]) if met["temp"] is not None else st.session_state.met[idx]["temp"]
-                        st.session_state.met[idx]["qnh"] = int(met["qnh"]) if met["qnh"] is not None else st.session_state.met[idx]["qnh"]
-                        st.session_state.met[idx]["wind_dir"] = int(met["wind_dir"]) if met["wind_dir"] is not None else st.session_state.met[idx]["wind_dir"]
-                        st.session_state.met[idx]["wind_kt"] = int(met["wind_kt"]) if met["wind_kt"] is not None else st.session_state.met[idx]["wind_kt"]
+                met = om_unpack_at(resp, nearest_idx)
+                if met:
+                    # atualizar MET em session_state
+                    st.session_state.met[idx]["temp"] = int(met["temp"]) if met["temp"] is not None else st.session_state.met[idx]["temp"]
+                    st.session_state.met[idx]["qnh"] = int(met["qnh"]) if met["qnh"] is not None else st.session_state.met[idx]["qnh"]
+                    st.session_state.met[idx]["wind_dir"] = int(met["wind_dir"]) if met["wind_dir"] is not None else st.session_state.met[idx]["wind_dir"]
+                    st.session_state.met[idx]["wind_kt"] = int(met["wind_kt"]) if met["wind_kt"] is not None else st.session_state.met[idx]["wind_kt"]
 
-                        st.session_state[f"temp_{idx}"] = float(st.session_state.met[idx]["temp"])
-                        st.session_state[f"qnh_{idx}"] = float(st.session_state.met[idx]["qnh"])
-                        st.session_state[f"wdir_{idx}"] = float(st.session_state.met[idx]["wind_dir"])
-                        st.session_state[f"wspd_{idx}"] = float(st.session_state.met[idx]["wind_kt"])
+                    # refletir nos inputs numéricos
+                    st.session_state[f"temp_{idx}"] = float(st.session_state.met[idx]["temp"])
+                    st.session_state[f"qnh_{idx}"] = float(st.session_state.met[idx]["qnh"])
+                    st.session_state[f"wdir_{idx}"] = float(st.session_state.met[idx]["wind_dir"])
+                    st.session_state[f"wspd_{idx}"] = float(st.session_state.met[idx]["wind_kt"])
+
+                    ok_count += 1
                 else:
-                    st.warning(f"{icao}: No hours returned by provider.")
+                    st.warning(f"{icao}: Could not unpack MET for selected hour.")
+                    err_count += 1
 
-            st.success("Forecast applied to all legs.")
-            st.rerun()
+            if ok_count and not err_count:
+                st.success(f"Forecast updated for all legs ({ok_count}/3).")
+            elif ok_count:
+                st.warning(f"Forecast updated for {ok_count} leg(s), {err_count} with errors.")
+            else:
+                st.error("Could not update forecast for any leg.")
 
     perf_rows = []
 
@@ -1073,7 +1096,10 @@ with tab_aero:
         pct_todr_av = (best["to_50"] / toda_av * 100) if toda_av > 0 else 0.0
         pct_ldr_av = (best["ldg_50"] / lda_av * 100) if lda_av > 0 else 0.0
 
-        feas = "✅" if best["feasible"] else "⚠️"
+        # Feasibility com base em TODA/LDA disponíveis
+        tod_ok_av = best["to_50"] <= toda_av
+        ldg_ok_av = best["ldg_50"] <= lda_av
+        feas = "✅" if tod_ok_av and ldg_ok_av else "⚠️"
         xw_chip_cls, _cwcol = xw_class(best["xw_abs"])
 
         st.markdown(
@@ -1116,7 +1142,7 @@ with tab_aero:
             "hw_comp": best["hw_comp"],
             "xw_abs": best["xw_abs"],
             "xw_side": best["xw_side"],
-            "feasible": best["feasible"],
+            "feasible": tod_ok_av and ldg_ok_av,
             "pct_todr": pct_todr_av,
             "pct_ldr": pct_ldr_av,
             "roc": best["roc"],
@@ -1419,6 +1445,13 @@ with tab_perf:
     total_ramp = round(req_ramp + extra_l, 1)
     total_ramp_min = req_ramp_min + extra_min
 
+    # Aviso de insuficiência de fuel
+    if fuel_l_mb < req_ramp:
+        st.error(
+            f"Fuel insuficiente: carregado {fuel_l_mb:.1f} L, "
+            f"requerido {req_ramp:.1f} L."
+        )
+
     # Quadro/Resumo
     st.markdown("#### Quadro (1)–(11)")
     rows = [
@@ -1455,6 +1488,7 @@ with tab_perf:
     # Guardar para o PDF
     st.session_state["_fuel"] = {
         "policy": "Detailed",
+        "rate_lph": RATE_LPH,
         "trip_l": trip_l,
         "cont_l": cont_l,
         "req_ramp": req_ramp,
@@ -1710,13 +1744,13 @@ with tab_pdf:
                 f"{int(round(r.get('roc', 0)))}",
             )
 
-        # Fuel block (PDF wants times + liters)
-        # We keep fixed 20 L/h to compute block times -> consistent with on-screen table
+        # Fuel block (PDF quer tempos + litros)
+        rate_pdf = float(fuel.get("rate_lph", 20.0))
+
         def L_from_min(m):
-            return int(round(20.0 * ((m or 0) / 60.0)))
+            return int(round(rate_pdf * ((m or 0) / 60.0)))
 
         taxi_min_pdf = int(round(fuel.get("taxi_min", 0)))
-        trip_min_pdf = int(round((fuel.get("trip_l", 0) / 20.0) * 60))
         climb_min_pdf = int(round(fuel.get("climb_min", 0)))
         enrt_min_pdf = int(round(fuel.get("enrt_min", 0)))
         desc_min_pdf = int(round(fuel.get("desc_min", 0)))
@@ -1724,6 +1758,7 @@ with tab_pdf:
         alt_min_pdf = int(round(fuel.get("alt_min", 0)))
         reserve_min_pdf = int(round(fuel.get("reserve_min", 45)))
 
+        trip_min_pdf = int(round(fuel.get("trip_l", 0) / rate_pdf * 60))
         extra_l_pdf = int(round(fuel.get("extra_l", 0)))
         req_ramp_pdf = int(round(fuel.get("req_ramp", 0)))
         total_ramp_pdf = int(round(fuel.get("total_ramp", 0)))
@@ -1849,7 +1884,7 @@ with tab_pdf:
             named_map,
             fieldset,
             "Extra_T",
-            fmt_hm(int(round((extra_l_pdf/20.0) * 60))),
+            fmt_hm(int(round((extra_l_pdf/rate_pdf) * 60))),
         )
         put_any(
             named_map,
