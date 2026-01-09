@@ -190,7 +190,6 @@ AERODROMES_DB = {
         "name": "Cascais",
         "lat": 38.7256, "lon": -9.3553, "elev_ft": 326.0,
         "runways": [
-            # Approved list gives 1400 m
             {"id": "17", "qfu": 170.0, "toda": 1400.0, "lda": 1400.0, "slope_pc": 0.0, "paved": True},
             {"id": "35", "qfu": 350.0, "toda": 1400.0, "lda": 1400.0, "slope_pc": 0.0, "paved": True},
         ],
@@ -1547,7 +1546,7 @@ with tab_pdf:
 
         return names
 
-    # ---- FIX: put_any força sempre string ----
+    # ---- put_any: força sempre string ----
     def put_any(out: dict, fieldset: set, keys, value):
         if isinstance(keys, str):
             keys = [keys]
@@ -1555,7 +1554,7 @@ with tab_pdf:
             if k in fieldset:
                 out[k] = "" if value is None else str(value)
 
-    # ---- FIX: fill_pdf converte todos os valores para string (safe_fields) ----
+    # ---- fill_pdf: normaliza tudo para bytes, evita .encode em ints ----
     def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
         reader = PdfReader(io.BytesIO(template_bytes))
         writer = PdfWriter()
@@ -1574,14 +1573,28 @@ with tab_pdf:
         except Exception:
             pass
 
-        # conversão final de segurança: tudo string
-        safe_fields = {
-            k: ("" if v is None else str(v))
-            for k, v in fields.items()
-        }
+        # Normalizar keys e valores para tipos seguros
+        norm_fields = {}
+        debug_issues = []
+        for k, v in fields.items():
+            if not isinstance(k, str):
+                debug_issues.append(f"Field name not str: {k!r} ({type(k)})")
+                k2 = str(k)
+            else:
+                k2 = k
+
+            if isinstance(v, bytes):
+                v2 = v
+            else:
+                v2 = str(v).encode("latin-1", errors="replace")
+
+            norm_fields[k2] = v2
+
+        if debug_issues:
+            st.write("PDF field type issues:", debug_issues)
 
         for page in writer.pages:
-            writer.update_page_form_field_values(page, safe_fields)
+            writer.update_page_form_field_values(page, norm_fields)
 
         bio = io.BytesIO()
         writer.write(bio)
