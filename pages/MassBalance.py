@@ -1561,25 +1561,8 @@ with tab_pdf:
             if k in fieldset:
                 out[k] = value
 
-    # --------- fill_pdf corrigida para forçar todos os valores a str ----------
+    # 🔧 CORRIGIDO: garantir que todos os valores são strings para pypdf 4.x
     def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
-        """
-        Preenche o PDF assegurando que todos os valores dos campos são strings,
-        evitando erros do tipo `'int' object has no attribute 'encode'`
-        nas versões recentes do pypdf.
-        """
-        # Normalizar dicionário de campos: chaves e valores como str
-        safe_fields = {}
-        for k, v in fields.items():
-            key_str = str(k)
-            if v is None:
-                val_str = ""
-            elif isinstance(v, str):
-                val_str = v
-            else:
-                val_str = str(v)
-            safe_fields[key_str] = val_str
-
         reader = PdfReader(io.BytesIO(template_bytes))
         writer = PdfWriter()
         for page in reader.pages:
@@ -1597,13 +1580,20 @@ with tab_pdf:
         except Exception:
             pass
 
+        # SANITIZE: tudo para string (ou "" se None)
+        safe_fields = {}
+        for k, v in fields.items():
+            if v is None:
+                safe_fields[k] = ""
+            else:
+                safe_fields[k] = str(v)
+
         for page in writer.pages:
             writer.update_page_form_field_values(page, safe_fields)
 
         bio = io.BytesIO()
         writer.write(bio)
         return bio.getvalue()
-    # -------------------------------------------------------------------------
 
     try:
         template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
