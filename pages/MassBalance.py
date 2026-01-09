@@ -361,7 +361,7 @@ def bilinear(pa, temp, table, key):
     v11 = table[p1][key][t1]
 
     v0 = interp1(t, t0, t1, v00, v01)
-    v1 = interp1(pa_c, p0, p1, v0, v1)
+    v1 = interp1(t, t0, t1, v10, v11)
     return interp1(pa_c, p0, p1, v0, v1)
 
 
@@ -391,7 +391,7 @@ def roc_interp(pa, temp, weight):
         v11 = tab[p1][t1]
 
         v0 = interp1(t, t0, t1, v00, v01)
-        v1 = interp1(pa_c, p0, p1, v0, v1)
+        v1 = interp1(t, t0, t1, v10, v11)
         return interp1(pa_c, p0, p1, v0, v1)
 
     if w <= 600:
@@ -1561,18 +1561,17 @@ with tab_pdf:
             if k in fieldset:
                 out[k] = value
 
-    # ---------- FUNÇÃO CORRIGIDA: forçar todos os campos a str ----------
+    # --------- fill_pdf corrigida para forçar todos os valores a str ----------
     def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
         """
-        Preenche o PDF assegurando que todos os valores de campos são strings,
-        para evitar erros do tipo `'int' object has no attribute 'encode'`
-        com pypdf 6.x.
+        Preenche o PDF assegurando que todos os valores dos campos são strings,
+        evitando erros do tipo `'int' object has no attribute 'encode'`
+        nas versões recentes do pypdf.
         """
-        # Garantir que todos os valores são strings simples
+        # Normalizar dicionário de campos: chaves e valores como str
         safe_fields = {}
         for k, v in fields.items():
             key_str = str(k)
-            # Se for None, substituímos por string vazia
             if v is None:
                 val_str = ""
             elif isinstance(v, str):
@@ -1604,7 +1603,7 @@ with tab_pdf:
         bio = io.BytesIO()
         writer.write(bio)
         return bio.getvalue()
-    # -------------------------------------------------------------------
+    # -------------------------------------------------------------------------
 
     try:
         template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
