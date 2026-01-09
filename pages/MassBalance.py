@@ -1,11 +1,4 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.3
-# Changes vs v8.2 (principais):
-# - Melhorado o bloco de "Fetch forecast for all legs":
-#   • Sem st.rerun() (permitindo ver mensagens de sucesso/erro)
-#   • Contagem de pernas atualizadas / com erro
-#   • Mensagens claras por aeródromo
-# - Pequeno ajuste em om_point_forecast para devolver params em caso de erro (útil para debug)
-#
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.3 (fix int.encode error)
 # Requirements:
 #   streamlit
 #   requests
@@ -1554,13 +1547,15 @@ with tab_pdf:
 
         return names
 
-    def put_any(out: dict, fieldset: set, keys, value: str):
+    # ---- FIX: put_any força sempre string ----
+    def put_any(out: dict, fieldset: set, keys, value):
         if isinstance(keys, str):
             keys = [keys]
         for k in keys:
             if k in fieldset:
-                out[k] = value
+                out[k] = "" if value is None else str(value)
 
+    # ---- FIX: fill_pdf converte todos os valores para string (safe_fields) ----
     def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
         reader = PdfReader(io.BytesIO(template_bytes))
         writer = PdfWriter()
@@ -1579,8 +1574,14 @@ with tab_pdf:
         except Exception:
             pass
 
+        # conversão final de segurança: tudo string
+        safe_fields = {
+            k: ("" if v is None else str(v))
+            for k, v in fields.items()
+        }
+
         for page in writer.pages:
-            writer.update_page_form_field_values(page, fields)
+            writer.update_page_form_field_values(page, safe_fields)
 
         bio = io.BytesIO()
         writer.write(bio)
