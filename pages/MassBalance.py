@@ -1561,7 +1561,6 @@ with tab_pdf:
             if k in fieldset:
                 out[k] = value
 
-    # 🔧 CORRIGIDO: garantir que todos os valores são strings para pypdf 4.x
     def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
         reader = PdfReader(io.BytesIO(template_bytes))
         writer = PdfWriter()
@@ -1580,16 +1579,8 @@ with tab_pdf:
         except Exception:
             pass
 
-        # SANITIZE: tudo para string (ou "" se None)
-        safe_fields = {}
-        for k, v in fields.items():
-            if v is None:
-                safe_fields[k] = ""
-            else:
-                safe_fields[k] = str(v)
-
         for page in writer.pages:
-            writer.update_page_form_field_values(page, safe_fields)
+            writer.update_page_form_field_values(page, fields)
 
         bio = io.BytesIO()
         writer.write(bio)
