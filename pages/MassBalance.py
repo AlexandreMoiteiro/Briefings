@@ -1,4 +1,11 @@
-# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.3 (fix int.encode error)
+# Streamlit app – Tecnam P2008 (M&B + Performance) – v8.3
+# Changes vs v8.2 (principais):
+# - Melhorado o bloco de "Fetch forecast for all legs":
+#   • Sem st.rerun() (permitindo ver mensagens de sucesso/erro)
+#   • Contagem de pernas atualizadas / com erro
+#   • Mensagens claras por aeródromo
+# - Pequeno ajuste em om_point_forecast para devolver params em caso de erro (útil para debug)
+#
 # Requirements:
 #   streamlit
 #   requests
@@ -190,6 +197,7 @@ AERODROMES_DB = {
         "name": "Cascais",
         "lat": 38.7256, "lon": -9.3553, "elev_ft": 326.0,
         "runways": [
+            # Approved list gives 1400 m
             {"id": "17", "qfu": 170.0, "toda": 1400.0, "lda": 1400.0, "slope_pc": 0.0, "paved": True},
             {"id": "35", "qfu": 350.0, "toda": 1400.0, "lda": 1400.0, "slope_pc": 0.0, "paved": True},
         ],
@@ -353,7 +361,7 @@ def bilinear(pa, temp, table, key):
     v11 = table[p1][key][t1]
 
     v0 = interp1(t, t0, t1, v00, v01)
-    v1 = interp1(t, t0, t1, v10, v11)
+    v1 = interp1(pa_c, p0, p1, v0, v1)
     return interp1(pa_c, p0, p1, v0, v1)
 
 
@@ -383,7 +391,7 @@ def roc_interp(pa, temp, weight):
         v11 = tab[p1][t1]
 
         v0 = interp1(t, t0, t1, v00, v01)
-        v1 = interp1(t, t0, t1, v10, v11)
+        v1 = interp1(pa_c, p0, p1, v0, v1)
         return interp1(pa_c, p0, p1, v0, v1)
 
     if w <= 600:
@@ -1546,16 +1554,33 @@ with tab_pdf:
 
         return names
 
-    # ---- put_any: força sempre string ----
-    def put_any(out: dict, fieldset: set, keys, value):
+    def put_any(out: dict, fieldset: set, keys, value: str):
         if isinstance(keys, str):
             keys = [keys]
         for k in keys:
             if k in fieldset:
-                out[k] = "" if value is None else str(value)
+                out[k] = value
 
-    # ---- fill_pdf: normaliza tudo para bytes, evita .encode em ints ----
+    # ---------- FUNÇÃO CORRIGIDA: forçar todos os campos a str ----------
     def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
+        """
+        Preenche o PDF assegurando que todos os valores de campos são strings,
+        para evitar erros do tipo `'int' object has no attribute 'encode'`
+        com pypdf 6.x.
+        """
+        # Garantir que todos os valores são strings simples
+        safe_fields = {}
+        for k, v in fields.items():
+            key_str = str(k)
+            # Se for None, substituímos por string vazia
+            if v is None:
+                val_str = ""
+            elif isinstance(v, str):
+                val_str = v
+            else:
+                val_str = str(v)
+            safe_fields[key_str] = val_str
+
         reader = PdfReader(io.BytesIO(template_bytes))
         writer = PdfWriter()
         for page in reader.pages:
@@ -1573,32 +1598,13 @@ with tab_pdf:
         except Exception:
             pass
 
-        # Normalizar keys e valores para tipos seguros
-        norm_fields = {}
-        debug_issues = []
-        for k, v in fields.items():
-            if not isinstance(k, str):
-                debug_issues.append(f"Field name not str: {k!r} ({type(k)})")
-                k2 = str(k)
-            else:
-                k2 = k
-
-            if isinstance(v, bytes):
-                v2 = v
-            else:
-                v2 = str(v).encode("latin-1", errors="replace")
-
-            norm_fields[k2] = v2
-
-        if debug_issues:
-            st.write("PDF field type issues:", debug_issues)
-
         for page in writer.pages:
-            writer.update_page_form_field_values(page, norm_fields)
+            writer.update_page_form_field_values(page, safe_fields)
 
         bio = io.BytesIO()
         writer.write(bio)
         return bio.getvalue()
+    # -------------------------------------------------------------------
 
     try:
         template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
