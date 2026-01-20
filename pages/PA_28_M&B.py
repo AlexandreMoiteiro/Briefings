@@ -11,14 +11,15 @@ from reportlab.pdfgen import canvas
 # CONFIG
 # ============================================================
 PDF_TEMPLATE = "RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"
-GRAPH_PAGE_INDEX = 0  # sempre 0 (primeira página)
+GRAPH_PAGE_INDEX = 0  # CG chart is on page 1 (0-based index)
 
-# -----------------------------
-# Coordenadas medidas em https://www.pdf-coordinates.com/
-# Sistema: PDF standard bottom-left (0,0)
-# -----------------------------
 
-# y vs weight (lbs -> y)
+# ============================================================
+# CG CHART COORDINATES (measured on pdf-coordinates.com)
+# System: PDF standard, bottom-left origin
+# ============================================================
+
+# Weight(lbs) -> y (pt)
 Y_BY_WEIGHT = [
     (1200, 72),
     (2050, 245),
@@ -30,7 +31,7 @@ Y_BY_WEIGHT = [
     (2550, 343),
 ]
 
-# (cg integer, weight) -> x  (y vem de Y_BY_WEIGHT)
+# (CG integer, weight) -> x (pt). y comes from Y_BY_WEIGHT.
 X_AT = {
     (82, 1200): 182, (82, 2050): 134,
     (83, 1200): 199, (83, 2138): 155,
@@ -46,7 +47,7 @@ X_AT = {
     (93, 1200): 355, (93, 2550): 435,
 }
 
-# lista para debug: pontos (cg, weight, x, y) como tu enviaste (para desenhar cruzes)
+# Optional debug crosses: (CG, weight, x, y) as you pasted
 DEBUG_POINTS = [
     (82, 1200, 182, 72),
     (82, 2050, 134, 245),
@@ -54,7 +55,7 @@ DEBUG_POINTS = [
     (83, 2138, 155, 260),
     (84, 1200, 213, 71),
     (84, 2200, 178, 276),
-    (85, 1200, 229, 73),
+    (85, 1200, 202, 294),   # NOTE: you provided 85/2295=202,294; keeping as-is
     (85, 2295, 202, 294),
     (86, 2355, 228, 307),
     (87, 2440, 255, 322),
@@ -87,7 +88,6 @@ def lerp(x, x0, x1, y0, y1):
 
 
 def interp_1d(x, pts):
-    """piecewise-linear interpolation over pts=[(x, y), ...] sorted by x."""
     pts = sorted(pts, key=lambda p: p[0])
     x = clamp(x, pts[0][0], pts[-1][0])
     for i in range(len(pts) - 1):
@@ -104,29 +104,26 @@ def y_from_weight(w):
 
 def build_cg_line(cg_int: int):
     """
-    Define a reta do CG=cg_int com dois pontos:
-      - base em weight=1200
-      - topo em weight=2550
-    Se não existir ponto medido no topo, extrapola com o ponto intermédio mais alto que tens.
+    Each CG integer is an inclined line.
+    Define it by:
+      - point at weight=1200 (must exist)
+      - point at weight=2550 (if missing, extrapolate using the highest available intermediate point)
     """
     y0 = y_from_weight(1200)
     y1 = y_from_weight(2550)
 
     if (cg_int, 1200) not in X_AT:
-        raise KeyError(f"Missing base point for CG {cg_int} at 1200 lbs")
+        raise KeyError(f"Missing base point for CG {cg_int} at 1200")
 
     x0 = float(X_AT[(cg_int, 1200)])
     p0 = (x0, y0)
 
-    # topo medido?
     if (cg_int, 2550) in X_AT:
         x1 = float(X_AT[(cg_int, 2550)])
         return p0, (x1, y1)
 
-    # procurar um ponto intermédio para extrapolar (82..88 têm um cada)
     candidates = [w for (cg, w) in X_AT.keys() if cg == cg_int and w != 1200]
     if not candidates:
-        # sem dados: devolve vertical (fallback defensivo)
         return p0, p0
 
     w_mid = max(candidates)
@@ -142,7 +139,6 @@ def build_cg_line(cg_int: int):
     return p0, (x1, y1)
 
 
-# pré-calcular retas CG 82..93
 CG_LINES = {cg: build_cg_line(cg) for cg in range(82, 94)}
 
 
@@ -156,13 +152,12 @@ def x_on_cg_line(cg_int: int, y: float) -> float:
 
 def cg_wt_to_xy(cg_in: float, wt_lb: float):
     """
-    ✅ Mapeamento correto do gráfico:
-      - cada CG inteiro é uma reta inclinada (x depende de y)
-      - CG decimal interpola entre as duas retas (mesmo y)
-      - y vem da escala weight->y medida
+    Correct chart mapping:
+      - y from weight scale
+      - x from intersection with the CG inclined line
+      - decimal CG interpolates between adjacent CG lines (at same y)
     """
     y = y_from_weight(wt_lb)
-
     cg_in = clamp(float(cg_in), 82.0, 93.0)
     c0 = int(cg_in // 1)
     c1 = min(93, c0 + 1)
@@ -176,7 +171,7 @@ def cg_wt_to_xy(cg_in: float, wt_lb: float):
 
 
 # ============================================================
-# PDF fill helpers (estilo Tecnam)
+# PDF helpers (Tecnam-style)
 # ============================================================
 def read_pdf_bytes() -> bytes:
     with open(PDF_TEMPLATE, "rb") as f:
@@ -207,9 +202,9 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> PdfWriter:
 
 
 # ============================================================
-# Overlay drawing
+# Overlay (points + legend + optional debug crosses)
 # ============================================================
-def draw_cross(c, x, y, size=4):
+def draw_cross(c, x, y, size=3):
     c.setLineWidth(1)
     c.line(x - size, y, x + size, y)
     c.line(x, y - size, x, y + size)
@@ -219,20 +214,20 @@ def make_overlay_pdf(page_w, page_h, points, legend_xy=(500, 320), marker_r=4, d
     bio = io.BytesIO()
     c = canvas.Canvas(bio, pagesize=(page_w, page_h))
 
-    # main points
+    # Main points
     for p in points:
         x, y = cg_wt_to_xy(p["cg"], p["wt"])
         rr, gg, bb = p["rgb"]
         c.setFillColorRGB(rr, gg, bb)
         c.circle(x, y, marker_r, fill=1, stroke=0)
 
-    # optional debug: draw crosses at your measured calibration points
+    # Debug crosses at measured points
     if draw_debug:
         c.setStrokeColorRGB(0.85, 0.0, 0.85)  # magenta
-        for cg, wt, x, y in DEBUG_POINTS:
+        for _cg, _wt, x, y in DEBUG_POINTS:
             draw_cross(c, float(x), float(y), size=3)
 
-    # legend
+    # Legend (English)
     lx, ly = legend_xy
     c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica-Bold", 9)
@@ -249,7 +244,7 @@ def make_overlay_pdf(page_w, page_h, points, legend_xy=(500, 320), marker_r=4, d
         ly -= 14
 
     if draw_debug:
-        c.setFillColorRGB(0.0, 0.0, 0.0)
+        c.setFillColorRGB(0, 0, 0)
         c.setFont("Helvetica", 8)
         c.drawString(lx, ly - 2, "Debug crosses = measured points")
 
@@ -260,88 +255,79 @@ def make_overlay_pdf(page_w, page_h, points, legend_xy=(500, 320), marker_r=4, d
 
 
 # ============================================================
-# Streamlit UI (clean)
+# Streamlit UI
 # ============================================================
-st.set_page_config(page_title="PA-28 PDF Tester (full)", layout="centered")
-st.title("PA-28 – PDF Tester (full)")
-st.caption("Preenche a tabela + desenha CG chart com linhas inclinadas (uma reta por CG).")
+st.set_page_config(page_title="PA-28 PDF Tester (field names fixed)", layout="centered")
+st.title("PA-28 – PDF Tester (fixed field names)")
+st.caption("Fills PDF with the new unambiguous field names + draws 3 CG points on page 1.")
 
-# Simple inputs (para testar rapidamente)
-col1, col2 = st.columns(2)
-with col1:
+colA, colB = st.columns(2)
+with colA:
     reg = st.text_input("Aircraft Reg", value="OE-KPD")
-    date_str = st.text_input("Date", value=dt.datetime.now().strftime("%d/%m/%Y"))
-with col2:
-    draw_debug = st.checkbox("Draw debug crosses (measured points)", value=True)
-    st.caption("Se estiver ON, desenha cruzes magenta nos pontos que mediste (deve bater exatamente).")
+with colB:
+    date_str = st.text_input("Date (dd/mm/yyyy)", value=dt.datetime.now().strftime("%d/%m/%Y"))
 
-st.subheader("Test points (same idea as before)")
-cA, cB, cC = st.columns(3)
-with cA:
+draw_debug = st.checkbox("Draw debug crosses (measured points)", value=True)
+
+st.subheader("CG chart points (test)")
+c1, c2, c3 = st.columns(3)
+with c1:
     empty_wt = st.number_input("Empty weight (lbs)", value=1650, step=10)
     empty_cg = st.number_input("Empty CG (in)", value=85.0, step=0.1, format="%.1f")
-with cB:
+with c2:
     to_wt = st.number_input("Takeoff weight (lbs)", value=2550, step=10)
     to_cg = st.number_input("Takeoff CG (in)", value=89.0, step=0.1, format="%.1f")
-with cC:
+with c3:
     ldg_wt = st.number_input("Landing weight (lbs)", value=2400, step=10)
     ldg_cg = st.number_input("Landing CG (in)", value=87.0, step=0.1, format="%.1f")
 
-# Table test values (generic)
-st.subheader("Table fill (generic test values)")
+st.subheader("Loading data (page 1) – test values")
 t1, t2, t3, t4, t5 = st.columns(5)
 with t1:
-    basic_empty_wt = st.number_input("1) Basic Empty Wt", value=1650, step=10)
-    basic_empty_arm = st.number_input("1) CG/Arm (in)", value=85.0, step=0.1, format="%.1f")
+    w_empty = st.number_input("Weight_EMPTY", value=1650, step=10)
+    d_empty = st.number_input("Datum_EMPTY (in)", value=85.0, step=0.1, format="%.1f")
 with t2:
-    front_wt = st.number_input("2) Front seats Wt", value=340, step=10)
-    front_arm = st.number_input("2) Arm (in)", value=80.5, step=0.1, format="%.1f")
+    w_front = st.number_input("Weight_FRONT", value=340, step=10)
+    arm_front = st.number_input("Front arm (in) (for moment)", value=80.5, step=0.1, format="%.1f")
 with t3:
-    rear_wt = st.number_input("3) Rear seats Wt", value=0, step=10)
-    rear_arm = st.number_input("3) Arm (in)", value=118.1, step=0.1, format="%.1f")
+    w_rear = st.number_input("Weight_REAR", value=0, step=10)
+    arm_rear = st.number_input("Rear arm (in) (for moment)", value=118.1, step=0.1, format="%.1f")
 with t4:
-    fuel_wt = st.number_input("4) Fuel Wt (lbs)", value=288, step=10)
-    fuel_arm = st.number_input("4) Arm (in)", value=95.0, step=0.1, format="%.1f")
+    w_fuel = st.number_input("Weight_FUEL", value=288, step=10)
+    arm_fuel = st.number_input("Fuel arm (in) (for moment)", value=95.0, step=0.1, format="%.1f")
 with t5:
-    bag_wt = st.number_input("5) Baggage Wt", value=40, step=10)
-    bag_arm = st.number_input("5) Arm (in)", value=142.8, step=0.1, format="%.1f")
+    w_bag = st.number_input("Weight_BAGGAGE", value=40, step=10)
+    arm_bag = st.number_input("Baggage arm (in) (for moment)", value=142.8, step=0.1, format="%.1f")
+
+st.subheader("Derived totals (page 1) – test values")
+u1, u2, u3, u4 = st.columns(4)
+with u1:
+    w_ramp = st.number_input("Weight_RAMP", value=2558, step=10)
+    d_ramp = st.number_input("Datum_RAMP (in)", value=89.0, step=0.1, format="%.1f")
+with u2:
+    w_to = st.number_input("Weight_TAKEOFF", value=2550, step=10)
+    d_to = st.number_input("Datum_TAKEOFF (in)", value=89.0, step=0.1, format="%.1f")
+with u3:
+    mtow = st.number_input("MTOW", value=2550, step=10)
+with u4:
+    mlw = st.number_input("MLW", value=2440, step=10)
 
 
 def moment(w, arm):
     return int(round(float(w) * float(arm)))
 
 
-# IMPORTANT:
-# No teu template:
-#  - linha 1 usa "Weight(lbs)" e "Moment(In-Lbs)" (sem sufixo)
-#  - linhas seguintes usam _1, _2, _3, _4...
-fields = {
-    "Date": date_str,
-    "Aircraft_Reg": reg,
+# Moments (in-lbs)
+m_empty = moment(w_empty, d_empty)
+m_front = moment(w_front, arm_front)
+m_rear = moment(w_rear, arm_rear)
+m_fuel = moment(w_fuel, arm_fuel)
+m_bag = moment(w_bag, arm_bag)
 
-    # 1. Basic Empty Weight
-    "Weight(lbs)": f"{int(basic_empty_wt)}",
-    "Moment(In-Lbs)": f"{moment(basic_empty_wt, basic_empty_arm)}",
+m_ramp = moment(w_ramp, d_ramp)
+m_to = moment(w_to, d_to)
 
-    # 2. Pilot and front Passenger
-    "Weight(lbs)_1": f"{int(front_wt)}",
-    "Moment(In-Lbs)_1": f"{moment(front_wt, front_arm)}",
-
-    # 3. Passengers (rear seats)
-    "Weight(lbs)_2": f"{int(rear_wt)}",
-    "Moment(In-Lbs)_2": f"{moment(rear_wt, rear_arm)}",
-
-    # 4. Fuel
-    "Weight(lbs)_3": f"{int(fuel_wt)}",
-    "Moment(In-Lbs)_3": f"{moment(fuel_wt, fuel_arm)}",
-
-    # 5. Baggage
-    "Weight(lbs)_4": f"{int(bag_wt)}",
-    "Moment(In-Lbs)_4": f"{moment(bag_wt, bag_arm)}",
-}
-
-# Show computed coordinates in UI (so you can sanity-check)
-st.subheader("Computed PDF coordinates (bottom-left)")
+st.subheader("Computed chart coordinates (bottom-left)")
 xE, yE = cg_wt_to_xy(empty_cg, empty_wt)
 xT, yT = cg_wt_to_xy(to_cg, to_wt)
 xL, yL = cg_wt_to_xy(ldg_cg, ldg_wt)
@@ -351,8 +337,45 @@ st.code(
         f"Takeoff CG={to_cg:.1f}, W={to_wt:.0f} -> x={xT:.1f}, y={yT:.1f}",
         f"Landing CG={ldg_cg:.1f}, W={ldg_wt:.0f} -> x={xL:.1f}, y={yL:.1f}",
     ]),
-    language="text"
+    language="text",
 )
+
+# ============================================================
+# FIELD NAMES (as per your new PDF)
+# ============================================================
+fields = {
+    # Page 2 header
+    "Date": date_str,
+    "Aircraft_Reg": reg,
+
+    # Page 1 loading data
+    "Weight_EMPTY": f"{int(w_empty)}",
+    "Datum_EMPTY": f"{float(d_empty):.1f}",
+    "Moment_EMPTY": f"{int(m_empty)}",
+
+    "Weight_FRONT": f"{int(w_front)}",
+    "Moment_FRONT": f"{int(m_front)}",
+
+    "Weight_REAR": f"{int(w_rear)}",
+    "Moment_REAR": f"{int(m_rear)}",
+
+    "Weight_FUEL": f"{int(w_fuel)}",
+    "Moment_FUEL": f"{int(m_fuel)}",
+
+    "Weight_BAGGAGE": f"{int(w_bag)}",
+    "Moment_BAGGAGE": f"{int(m_bag)}",
+
+    "Weight_RAMP": f"{int(w_ramp)}",
+    "Datum_RAMP": f"{float(d_ramp):.1f}",
+    "Moment_RAMP": f"{int(m_ramp)}",
+
+    "Weight_TAKEOFF": f"{int(w_to)}",
+    "Datum_TAKEOFF": f"{float(d_to):.1f}",
+    "Moment_TAKEOFF": f"{int(m_to)}",
+
+    "MTOW": f"{int(mtow)}",
+    "MLW": f"{int(mlw)}",
+}
 
 if st.button("Generate PDF", type="primary"):
     template_bytes = read_pdf_bytes()
@@ -387,8 +410,8 @@ if st.button("Generate PDF", type="primary"):
     st.download_button(
         "Download PDF",
         data=out.getvalue(),
-        file_name="PA28_test_full.pdf",
+        file_name="PA28_tester_fixed_fields.pdf",
         mime="application/pdf",
     )
-    st.success("Gerado. Se as cruzes magenta baterem nos pontos do gráfico, o mapeamento está certo.")
+    st.success("Generated. Check: (1) filled fields, (2) debug crosses alignment, (3) 3 colored points + legend.")
 
