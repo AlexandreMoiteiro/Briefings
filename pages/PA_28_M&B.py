@@ -1,6 +1,5 @@
 import io
 import datetime as dt
-import numpy as np
 
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
@@ -8,72 +7,105 @@ from pypdf.generic import NameObject
 from reportlab.pdfgen import canvas
 
 
+# =========================
+# CONFIG
+# =========================
 PDF_TEMPLATE = "RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"
+GRAPH_PAGE_INDEX = 0  # sempre 0, como pediste
 
-# Pontos de calibração (CG in / Weight lb / x / y) — os teus
-CAL_POINTS = [
-    (82, 1200, 182, 72),
-    (82, 2050, 134, 245),
-    (84, 2200, 178, 276),
-    (85, 2295, 202, 294),
-    (86, 2355, 228, 307),
-    (87, 2440, 255, 322),
-    (88, 2515, 285, 338),
-    (89, 2550, 315, 343),
-    (93, 2550, 435, 344),
+# --- Coordenadas (do pdf-coordinates.com), bottom-left PDF standard
+# Usamos:
+#  - pontos (CG,1200)->x para base
+#  - pontos (CG,2550)->x para topo
+#  - pontos (weight)->y (usamos a linha CG=82 e topo 2550)
+X_BOTTOM = {  # weight = 1200
+    82: 182, 83: 199, 84: 213, 85: 229,
+    89: 293, 90: 308, 91: 323, 92: 340, 93: 355,
+}
+X_TOP = {  # weight = 2550
+    89: 315, 90: 345, 91: 374, 92: 404, 93: 435,
+}
+
+# y vs weight (pontos que forneceste e que fazem sentido)
+# (usamos os pontos “progressivos” de 2050..2550, e o 1200)
+Y_BY_WEIGHT = [
+    (1200, 72),
+    (2050, 245),
+    (2200, 276),
+    (2295, 294),
+    (2355, 307),
+    (2440, 322),
+    (2515, 338),
+    (2550, 343),
 ]
 
 
-def solve_affine(points):
-    A, bx, by = [], [], []
-    for cg, wt, x, y in points:
-        A.append([cg, wt, 1])
-        bx.append(x)
-        by.append(y)
+# =========================
+# Small math helpers
+# =========================
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-    A = np.array(A, dtype=float)
-    bx = np.array(bx, dtype=float)
-    by = np.array(by, dtype=float)
+def lerp(x, x0, x1, y0, y1):
+    if x1 == x0:
+        return y0
+    t = (x - x0) / (x1 - x0)
+    return y0 + t * (y1 - y0)
 
-    ax = np.linalg.lstsq(A, bx, rcond=None)[0]
-    ay = np.linalg.lstsq(A, by, rcond=None)[0]
-    return ax, ay
+def interp_1d(x, pts):
+    """piecewise-linear interpolation over pts=[(x, y), ...] sorted by x."""
+    pts = sorted(pts, key=lambda p: p[0])
+    x = clamp(x, pts[0][0], pts[-1][0])
+    for i in range(len(pts) - 1):
+        x0, y0 = pts[i]
+        x1, y1 = pts[i + 1]
+        if x0 <= x <= x1:
+            return lerp(x, x0, x1, y0, y1)
+    return pts[-1][1]
 
+def interp_dict_at(d, x):
+    """interpolate integer-key dict at float x"""
+    keys = sorted(d.keys())
+    x = clamp(x, keys[0], keys[-1])
+    k0 = max(k for k in keys if k <= x)
+    k1 = min(k for k in keys if k >= x)
+    return lerp(x, k0, k1, d[k0], d[k1])
 
-AX, AY = solve_affine(CAL_POINTS)
+def cg_wt_to_xy(cg_in, wt_lb):
+    """
+    Mapeamento limpo:
+      1) y = interp(weight->y)
+      2) x_bottom(cg) e x_top(cg) por interpolação em CG
+      3) fração vertical t = (y - y1200)/(y2550 - y1200)
+      4) x = x_bottom + t*(x_top - x_bottom)
+    """
+    y = interp_1d(wt_lb, Y_BY_WEIGHT)
 
+    # bottom x: temos 82..85 e 89..93 (há buraco 86..88); vamos interpolar dentro do alcance disponível
+    xb = interp_dict_at(X_BOTTOM, cg_in)
 
-def cg_wt_to_xy(cg, wt):
-    x = AX[0] * cg + AX[1] * wt + AX[2]
-    y = AY[0] * cg + AY[1] * wt + AY[2]
+    # top x: só temos 89..93; se cg < 89, clamp em 89 (é o que o gráfico faz também na zona de topo esquerdo)
+    xt = interp_dict_at(X_TOP, cg_in)
+
+    y1200 = interp_1d(1200, Y_BY_WEIGHT)
+    y2550 = interp_1d(2550, Y_BY_WEIGHT)
+    t = 0.0 if y2550 == y1200 else (y - y1200) / (y2550 - y1200)
+    t = clamp(t, 0.0, 1.0)
+
+    x = xb + t * (xt - xb)
     return float(x), float(y)
 
 
+# =========================
+# PDF helpers (igual filosofia Tecnam)
+# =========================
 def read_pdf_bytes():
     with open(PDF_TEMPLATE, "rb") as f:
         return f.read()
 
-
-def detect_graph_page(reader: PdfReader) -> int:
-    """
-    Tenta encontrar a página do gráfico por texto.
-    Se falhar (texto como imagem), devolve 0.
-    """
-    needles = ["C.G. ENVELOPE", "C.G. LOCATION", "WEIGHT", "NORMAL CATEGORY"]
-    for i, p in enumerate(reader.pages):
-        try:
-            txt = (p.extract_text() or "").upper()
-        except Exception:
-            txt = ""
-        if txt and any(n in txt for n in needles):
-            return i
-    return 0
-
-
-def fill_pdf_form(template_bytes: bytes, fields: dict) -> PdfWriter:
+def fill_pdf(template_bytes: bytes, fields: dict) -> PdfWriter:
     reader = PdfReader(io.BytesIO(template_bytes))
     writer = PdfWriter()
-
     for page in reader.pages:
         writer.add_page(page)
 
@@ -92,33 +124,28 @@ def fill_pdf_form(template_bytes: bytes, fields: dict) -> PdfWriter:
 
     return writer
 
-
-def make_overlay_pdf(page_w, page_h, points, legend_xy=(460, 360), marker_r=4):
+def overlay_points(page_w, page_h, points, legend_xy=(500, 320), r=4):
     bio = io.BytesIO()
     c = canvas.Canvas(bio, pagesize=(page_w, page_h))
 
-    # markers + labels
+    # pontos
     for p in points:
         x, y = cg_wt_to_xy(p["cg"], p["wt"])
-        r, g, b = p["rgb"]
-        c.setFillColorRGB(r, g, b)
-        c.circle(x, y, marker_r, fill=1, stroke=0)
+        rr, gg, bb = p["rgb"]
+        c.setFillColorRGB(rr, gg, bb)
+        c.circle(x, y, r, fill=1, stroke=0)
 
-        c.setFillColorRGB(0, 0, 0)
-        c.setFont("Helvetica", 8)
-        c.drawString(x + marker_r + 2, y - 3, p["label"])
-
-    # legend
+    # legenda (English)
     lx, ly = legend_xy
     c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica-Bold", 9)
     c.drawString(lx, ly, "Legend")
-    ly -= 12
+    ly -= 14
 
     c.setFont("Helvetica", 9)
     for p in points:
-        r, g, b = p["rgb"]
-        c.setFillColorRGB(r, g, b)
+        rr, gg, bb = p["rgb"]
+        c.setFillColorRGB(rr, gg, bb)
         c.rect(lx, ly - 7, 10, 10, fill=1, stroke=0)
         c.setFillColorRGB(0, 0, 0)
         c.drawString(lx + 14, ly - 5, p["label"])
@@ -130,51 +157,65 @@ def make_overlay_pdf(page_w, page_h, points, legend_xy=(460, 360), marker_r=4):
     return bio.read()
 
 
-# ---------------- UI ----------------
-st.set_page_config(page_title="PA-28 PDF Tester (Clean)", layout="centered")
-st.title("PA-28 – PDF Tester (Clean)")
-st.caption("Agora desenha no sítio certo: página do gráfico auto-detetada (fallback = página 1).")
+# =========================
+# Streamlit UI (clean)
+# =========================
+st.set_page_config(page_title="PA-28 PDF Tester (Clean v3)", layout="centered")
+st.title("PA-28 – PDF Tester (Clean v3)")
+st.caption("Preenche campos certos + desenha 3 pontos no CG chart (página 0).")
 
-template_bytes = read_pdf_bytes()
-reader = PdfReader(io.BytesIO(template_bytes))
-
-graph_page_index = detect_graph_page(reader)
-st.write(f"Graph page index (0-based): **{graph_page_index}**")
-
-# Valores genéricos (só teste)
+# valores genéricos só para teste visual
 EMPTY_WT, EMPTY_CG = 1650, 85.0
-TO_WT, TO_CG = 2550, 86.0
-LDG_WT, LDG_CG = 2400, 85.7
+FRONT_WT, FRONT_ARM = 340, 80.5
+REAR_WT, REAR_ARM = 0, 118.1
+FUEL_WT, FUEL_ARM = 288, 95.0
+BAG_WT, BAG_ARM = 40, 142.8
 
-# Preenchimento mínimo só para confirmar campos
+# takeoff/landing para o gráfico (só exemplo)
+TO_WT, TO_CG = 2550, 89.0
+LDG_WT, LDG_CG = 2400, 87.0
+
+def moment(w, arm):
+    return int(round(w * arm))
+
+# >>>>>> NOMES CERTOS DO PDF <<<<<<
+# Linha 1 (Basic Empty Weight) usa campos SEM sufixo:
+#   Weight(lbs) e Moment(In-Lbs)
+# Linhas seguintes usam _1, _2, _3, _4, _5...
 fields = {
     "Date": dt.datetime.now().strftime("%d/%m/%Y"),
     "Aircraft_Reg": "OE-KPD",
 
-    # ATENÇÃO: este template faz somas internas.
-    # Para testar, mete só linhas 1..5.
-    "Weight(lbs)_1": f"{EMPTY_WT}",
-    "Moment(in-lbs)_1": f"{int(EMPTY_WT * EMPTY_CG)}",
+    # 1. Basic Empty Weight
+    "Weight(lbs)": f"{EMPTY_WT}",
+    "Moment(In-Lbs)": f"{moment(EMPTY_WT, EMPTY_CG)}",
 
-    "Weight(lbs)_2": "340",
-    "Moment(in-lbs)_2": f"{int(340 * 80.5)}",
+    # 2. Pilot and front Passenger
+    "Weight(lbs)_1": f"{FRONT_WT}",
+    "Moment(In-Lbs)_1": f"{moment(FRONT_WT, FRONT_ARM)}",
 
-    "Weight(lbs)_3": "0",
-    "Moment(in-lbs)_3": "0",
+    # 3. Passengers rear seats
+    "Weight(lbs)_2": f"{REAR_WT}",
+    "Moment(In-Lbs)_2": f"{moment(REAR_WT, REAR_ARM)}",
 
-    "Weight(lbs)_4": "288",
-    "Moment(in-lbs)_4": f"{int(288 * 95.0)}",
+    # 4. Fuel
+    "Weight(lbs)_3": f"{FUEL_WT}",
+    "Moment(In-Lbs)_3": f"{moment(FUEL_WT, FUEL_ARM)}",
 
-    "Weight(lbs)_5": "40",
-    "Moment(in-lbs)_5": f"{int(40 * 142.8)}",
+    # 5. Baggage
+    "Weight(lbs)_4": f"{BAG_WT}",
+    "Moment(In-Lbs)_4": f"{moment(BAG_WT, BAG_ARM)}",
 }
 
 if st.button("Generate PDF", type="primary"):
-    writer = fill_pdf_form(template_bytes, fields)
+    template_bytes = read_pdf_bytes()
+    reader = PdfReader(io.BytesIO(template_bytes))
 
-    gp = reader.pages[graph_page_index]
-    pw = float(gp.mediabox.width)
-    ph = float(gp.mediabox.height)
+    writer = fill_pdf(template_bytes, fields)
+
+    p = reader.pages[GRAPH_PAGE_INDEX]
+    pw = float(p.mediabox.width)
+    ph = float(p.mediabox.height)
 
     points = [
         {"label": "Empty",   "cg": EMPTY_CG, "wt": EMPTY_WT, "rgb": (0.10, 0.60, 0.10)},
@@ -182,9 +223,9 @@ if st.button("Generate PDF", type="primary"):
         {"label": "Landing", "cg": LDG_CG,   "wt": LDG_WT,   "rgb": (0.85, 0.20, 0.20)},
     ]
 
-    overlay = make_overlay_pdf(pw, ph, points, legend_xy=(460, 360), marker_r=4)
-    overlay_page = PdfReader(io.BytesIO(overlay)).pages[0]
-    writer.pages[graph_page_index].merge_page(overlay_page)
+    ov = overlay_points(pw, ph, points, legend_xy=(500, 320), r=4)
+    ov_page = PdfReader(io.BytesIO(ov)).pages[0]
+    writer.pages[GRAPH_PAGE_INDEX].merge_page(ov_page)
 
     out = io.BytesIO()
     writer.write(out)
@@ -193,9 +234,7 @@ if st.button("Generate PDF", type="primary"):
     st.download_button(
         "Download PDF",
         data=out.getvalue(),
-        file_name="PA28_test_clean_fixedpage.pdf",
+        file_name="PA28_test_clean_v3.pdf",
         mime="application/pdf",
     )
-    st.success("Gerado. Agora os pontos/legenda estão na página do gráfico certa.")
-
-
+    st.success("PDF gerado (campos certos + gráfico mapeado por interpolação).")
