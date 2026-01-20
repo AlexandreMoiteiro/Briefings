@@ -8,7 +8,21 @@ from pypdf.generic import NameObject
 from reportlab.pdfgen import canvas
 
 
-TEMPLATE_PATH = "/mnt/data/RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"
+# Igual ao Tecnam: só o nome do ficheiro (assumido no root do repo)
+PDF_TEMPLATE_PATHS = [
+    "RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf",
+]
+
+
+def read_pdf_bytes(paths) -> bytes:
+    # Igual ao teu padrão: tenta caminhos e lê o primeiro que existir
+    for path_str in paths:
+        try:
+            with open(path_str, "rb") as f:
+                return f.read()
+        except FileNotFoundError:
+            continue
+    raise FileNotFoundError(f"Template not found in any known path: {paths}")
 
 
 def fill_pdf_form(template_bytes: bytes, fields: dict) -> PdfWriter:
@@ -38,7 +52,10 @@ def cg_to_xy(cg_in, wt_lb, box, cg_rng, wt_rng):
     x0, y0, x1, y1 = box
     cg0, cg1 = cg_rng
     w0, w1 = wt_rng
+
     # clamp
+    if cg1 == cg0 or w1 == w0:
+        return x0, y0
     cg_in = max(min(cg_in, cg1), cg0)
     wt_lb = max(min(wt_lb, w1), w0)
 
@@ -47,18 +64,19 @@ def cg_to_xy(cg_in, wt_lb, box, cg_rng, wt_rng):
     return x, y
 
 
-def make_overlay_pdf(page_w, page_h, *, box, cg_rng, wt_rng, points, legend_xy, marker_r):
+def make_overlay_pdf(page_w, page_h, *, box, cg_rng, wt_rng, points, legend_xy, marker_r, show_box=True):
     """
     points = [{"label":"Empty","cg":..,"wt":..,"rgb":(r,g,b)}, ...]
     """
     bio = io.BytesIO()
     c = canvas.Canvas(bio, pagesize=(page_w, page_h))
 
-    # (opcional) desenhar a bounding box para ajudar no fine-tune
-    c.setLineWidth(1)
-    c.setDash(3, 3)
-    c.rect(box[0], box[1], box[2] - box[0], box[3] - box[1], stroke=1, fill=0)
-    c.setDash()
+    # desenhar a bounding box para ajudar no fine-tune (opcional)
+    if show_box:
+        c.setLineWidth(1)
+        c.setDash(3, 3)
+        c.rect(box[0], box[1], box[2] - box[0], box[3] - box[1], stroke=1, fill=0)
+        c.setDash()
 
     # markers
     for p in points:
@@ -102,13 +120,17 @@ def merge_overlay(writer: PdfWriter, overlay_bytes: bytes, page_index: int):
 st.set_page_config(page_title="PA-28 PDF Chart Tester", layout="wide")
 st.title("PA-28 – PDF Fill + CG Chart Overlay (Tester)")
 
-template_bytes = open(TEMPLATE_PATH, "rb").read()
+template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
 reader0 = PdfReader(io.BytesIO(template_bytes))
-page0 = reader0.pages[0]
+
+# assume gráfico na página 1 (index 0) — podes trocar no selectbox
+page_index = st.selectbox("Chart page index", options=list(range(len(reader0.pages))), index=0)
+
+page0 = reader0.pages[page_index]
 page_w = float(page0.mediabox.width)
 page_h = float(page0.mediabox.height)
 
-st.caption(f"Template: {TEMPLATE_PATH} | Page0 size: {page_w:.0f} x {page_h:.0f}")
+st.caption(f"Template: {PDF_TEMPLATE_PATHS[0]} | Page size: {page_w:.0f} x {page_h:.0f}")
 
 # --- sliders de fine-tune do gráfico
 st.subheader("1) Chart placement (fine-tune)")
@@ -126,9 +148,11 @@ with cC:
     wt_min = st.number_input("WT min (lb)", value=1200.0, step=10.0)
     wt_max = st.number_input("WT max (lb)", value=2600.0, step=10.0)
 
-box = (x0, y0, x1, y1)
+box = (float(x0), float(y0), float(x1), float(y1))
 cg_rng = (float(cg_min), float(cg_max))
 wt_rng = (float(wt_min), float(wt_max))
+
+show_box = st.checkbox("Show dashed box (debug)", value=True)
 
 st.subheader("2) Test points (Empty / Takeoff / Landing)")
 
@@ -144,8 +168,8 @@ with p3:
     ldg_wt = st.number_input("Landing WT (lb)", value=2400.0, step=10.0)
 with p4:
     marker_r = st.slider("Marker radius", 2, 10, 4, 1)
-    legend_x = st.slider("Legend X", 0.0, page_w, x1 + 15.0, 1.0)
-    legend_y = st.slider("Legend Y", 0.0, page_h, y1 - 5.0, 1.0)
+    legend_x = st.slider("Legend X", 0.0, page_w, float(x1) + 15.0, 1.0)
+    legend_y = st.slider("Legend Y", 0.0, page_h, float(y1) - 5.0, 1.0)
 
 points = [
     {"label": "Empty",   "cg": float(empty_cg), "wt": float(empty_wt), "rgb": (0.10, 0.55, 0.10)},
@@ -155,7 +179,8 @@ points = [
 
 st.subheader("3) Generate PDF")
 
-# valores genéricos só para ver “encheu”
+# valores genéricos só para confirmar “enche”
+# (o objetivo aqui é testar o overlay do gráfico)
 fields = {
     "Date": dt.datetime.now().strftime("%d/%m/%Y"),
     "Aircraft_Reg": "OE-KPD",
@@ -181,10 +206,10 @@ if st.button("Generate test PDF", type="primary"):
         points=points,
         legend_xy=(float(legend_x), float(legend_y)),
         marker_r=int(marker_r),
+        show_box=show_box,
     )
 
-    # gráfico está na página 0 (a do chart)
-    merge_overlay(writer, overlay_bytes, page_index=0)
+    merge_overlay(writer, overlay_bytes, page_index=int(page_index))
 
     out = io.BytesIO()
     writer.write(out)
@@ -196,5 +221,4 @@ if st.button("Generate test PDF", type="primary"):
         file_name="PA28_test_chart_overlay.pdf",
         mime="application/pdf",
     )
-    st.success("PDF gerado. Abre e ajusta os sliders até os pontos ficarem no sítio certo.")
-
+    st.success("PDF gerado. Abre, vê onde caem os pontos e afina os sliders (box / ranges / legend).")
