@@ -15,11 +15,10 @@ import pytz
 import requests
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import NameObject
+from pypdf.generic import NameObject, BooleanObject
 
 # reportlab for chart overlay
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
 
 # -----------------------------
 # App setup
@@ -42,6 +41,29 @@ st.markdown(
       .tbl{border-collapse:collapse;width:100%}
       .tbl th{border-bottom:2px solid #cbd0d6;text-align:left;padding:6px}
       .tbl td{border-bottom:1px dashed #e5e7ec;padding:6px}
+
+      /* Dark-mode overrides so text stays visible */
+      @media (prefers-color-scheme: dark) {
+        .hdr{border-bottom:1px solid #374151;}
+        .muted{color:#9ca3af;}
+        .box{
+          background:#111827;
+          border:1px solid #374151;
+          color:#e5e7eb;
+        }
+        .chip{
+          background:#1f2937;
+          color:#e5e7eb;
+        }
+        .tbl th{
+          border-bottom:2px solid #374151;
+          color:#e5e7eb;
+        }
+        .tbl td{
+          border-bottom:1px dashed #374151;
+          color:#e5e7eb;
+        }
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -76,6 +98,16 @@ USG_TO_L = 3.785411784
 # Fuel density (approx for 100LL): 6.0 lb/USG
 FUEL_LB_PER_USG = 6.0
 
+# Aircraft-specific limits requested
+FUEL_USABLE_USG = 48.0
+FUEL_USABLE_L = FUEL_USABLE_USG * USG_TO_L  # ~182 L
+BAGGAGE_MAX_LB = 200.0
+BAGGAGE_MAX_KG = BAGGAGE_MAX_LB / KG_TO_LB  # ~90.7 kg
+
+# "Sanity" caps (anti-typo; real limit is MTOW + CG)
+SANITY_PERSON_MAX_KG = 140.0
+SANITY_REAR_TOTAL_MAX_KG = 220.0  # rear total sanity (not a POH limit)
+
 # PA28 arms (inches aft of datum) – fixed for this sheet
 ARM_FRONT = 80.5
 ARM_REAR = 118.1
@@ -88,7 +120,7 @@ TAXI_ARM = 95.5
 
 # Max weights (from sheet)
 MTOW_LB = 2550.0
-MLW_LB = 2550.0  # (sheet has MLW box; keep same unless you want different)
+MLW_LB = 2550.0
 
 # PDF template (same style as Tecnam: just the filename)
 PDF_TEMPLATE_PATHS = ["RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"]
@@ -97,166 +129,48 @@ PDF_TEMPLATE_PATHS = ["RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"]
 # Aerodromes DB (SAME as Tecnam app)
 # -----------------------------
 AERODROMES_DB = {
-    "LEBZ": {
-        "name": "Badajoz",
-        "lat": 38.8913, "lon": -6.8214, "elev_ft": 608.0,
-        "runways": [
-            {"id": "13", "qfu": 130.0, "toda": 2852.0, "lda": 2852.0},
-            {"id": "31", "qfu": 310.0, "toda": 2852.0, "lda": 2852.0},
-        ],
-    },
-    "LPBR": {
-        "name": "Braga",
-        "lat": 41.5872, "lon": -8.4451, "elev_ft": 243.0,
-        "runways": [
-            {"id": "18", "qfu": 180.0, "toda": 939.0, "lda": 939.0},
-            {"id": "36", "qfu": 360.0, "toda": 939.0, "lda": 939.0},
-        ],
-    },
-    "LPBG": {
-        "name": "Bragança",
-        "lat": 41.8578, "lon": -6.7074, "elev_ft": 2278.0,
-        "runways": [
-            {"id": "02", "qfu": 20.0, "toda": 1700.0, "lda": 1700.0},
-            {"id": "20", "qfu": 200.0, "toda": 1700.0, "lda": 1700.0},
-        ],
-    },
-    "LPCB": {
-        "name": "Castelo Branco",
-        "lat": 39.8483, "lon": -7.4417, "elev_ft": 1251.0,
-        "runways": [
-            {"id": "16", "qfu": 160.0, "toda": 1460.0, "lda": 1460.0},
-            {"id": "34", "qfu": 340.0, "toda": 1460.0, "lda": 1460.0},
-        ],
-    },
-    "LPCO": {
-        "name": "Coimbra",
-        "lat": 40.1582, "lon": -8.4705, "elev_ft": 570.0,
-        "runways": [
-            {"id": "16", "qfu": 160.0, "toda": 923.0, "lda": 923.0},
-            {"id": "34", "qfu": 340.0, "toda": 923.0, "lda": 923.0},
-        ],
-    },
-    "LPEV": {
-        "name": "Évora",
-        "lat": 38.5297, "lon": -7.8919, "elev_ft": 807.0,
-        "runways": [
-            {"id": "01", "qfu": 10.0, "toda": 1300.0, "lda": 1300.0},
-            {"id": "19", "qfu": 190.0, "toda": 1300.0, "lda": 1300.0},
-            {"id": "07", "qfu": 70.0, "toda": 1300.0, "lda": 1300.0},
-            {"id": "25", "qfu": 250.0, "toda": 1300.0, "lda": 1300.0},
-        ],
-    },
-    "LEMG": {
-        "name": "Málaga",
-        "lat": 36.6749, "lon": -4.4991, "elev_ft": 52.0,
-        "runways": [
-            {"id": "12", "qfu": 120.0, "toda": 2750.0, "lda": 2750.0},
-            {"id": "30", "qfu": 300.0, "toda": 2750.0, "lda": 2750.0},
-            {"id": "13", "qfu": 130.0, "toda": 3200.0, "lda": 3200.0},
-            {"id": "31", "qfu": 310.0, "toda": 3200.0, "lda": 3200.0},
-        ],
-    },
-    "LPSO": {
-        "name": "Ponte de Sôr",
-        "lat": 39.2117, "lon": -8.0578, "elev_ft": 390.0,
-        "runways": [
-            {"id": "03", "qfu": 30.0, "toda": 1800.0, "lda": 1800.0},
-            {"id": "21", "qfu": 210.0, "toda": 1800.0, "lda": 1800.0},
-        ],
-    },
-    "LEZL": {
-        "name": "Sevilha",
-        "lat": 37.4180, "lon": -5.8931, "elev_ft": 111.0,
-        "runways": [
-            {"id": "09", "qfu": 90.0, "toda": 3364.0, "lda": 3364.0},
-            {"id": "27", "qfu": 270.0, "toda": 3364.0, "lda": 3364.0},
-        ],
-    },
-    "LEVX": {
-        "name": "Vigo",
-        "lat": 42.2318, "lon": -8.6268, "elev_ft": 856.0,
-        "runways": [
-            {"id": "01", "qfu": 10.0, "toda": 2385.0, "lda": 2385.0},
-            {"id": "19", "qfu": 190.0, "toda": 2385.0, "lda": 2385.0},
-        ],
-    },
-    "LPVR": {
-        "name": "Vila Real",
-        "lat": 41.2743, "lon": -7.7205, "elev_ft": 1832.0,
-        "runways": [
-            {"id": "02", "qfu": 20.0, "toda": 946.0, "lda": 946.0},
-            {"id": "20", "qfu": 200.0, "toda": 946.0, "lda": 946.0},
-        ],
-    },
-    "LPVZ": {
-        "name": "Viseu",
-        "lat": 40.7255, "lon": -7.8890, "elev_ft": 2060.0,
-        "runways": [
-            {"id": "18", "qfu": 180.0, "toda": 1000.0, "lda": 1000.0},
-            {"id": "36", "qfu": 360.0, "toda": 1000.0, "lda": 1000.0},
-        ],
-    },
-    "LPCS": {
-        "name": "Cascais",
-        "lat": 38.7256, "lon": -9.3553, "elev_ft": 326.0,
-        "runways": [
-            {"id": "17", "qfu": 170.0, "toda": 1400.0, "lda": 1400.0},
-            {"id": "35", "qfu": 350.0, "toda": 1400.0, "lda": 1400.0},
-        ],
-    },
-    "LPMT": {
-        "name": "Montijo",
-        "lat": 38.7039, "lon": -9.0350, "elev_ft": 46.0,
-        "runways": [
-            {"id": "07", "qfu": 70.0, "toda": 2448.0, "lda": 2448.0},
-            {"id": "25", "qfu": 250.0, "toda": 2448.0, "lda": 2448.0},
-            {"id": "01", "qfu": 10.0, "toda": 2187.0, "lda": 2187.0},
-            {"id": "19", "qfu": 190.0, "toda": 2187.0, "lda": 2187.0},
-        ],
-    },
-    "LPST": {
-        "name": "Sintra",
-        "lat": 38.8311, "lon": -9.3397, "elev_ft": 441.0,
-        "runways": [
-            {"id": "17", "qfu": 170.0, "toda": 1800.0, "lda": 1800.0},
-            {"id": "35", "qfu": 350.0, "toda": 1800.0, "lda": 1800.0},
-        ],
-    },
-    "LPBJ": {
-        "name": "Beja",
-        "lat": 38.0789, "lon": -7.9322, "elev_ft": 636.0,
-        "runways": [
-            {"id": "01L", "qfu": 10.0, "toda": 2448.0, "lda": 2448.0},
-            {"id": "19R", "qfu": 190.0, "toda": 2448.0, "lda": 2448.0},
-            {"id": "01R", "qfu": 10.0, "toda": 3449.0, "lda": 3449.0},
-            {"id": "19L", "qfu": 190.0, "toda": 3449.0, "lda": 3449.0},
-        ],
-    },
-    "LPFR": {
-        "name": "Faro",
-        "lat": 37.0144, "lon": -7.9658, "elev_ft": 24.0,
-        "runways": [
-            {"id": "10", "qfu": 100.0, "toda": 2490.0, "lda": 2490.0},
-            {"id": "28", "qfu": 280.0, "toda": 2490.0, "lda": 2490.0},
-        ],
-    },
-    "LPPM": {
-        "name": "Portimão",
-        "lat": 37.1493, "lon": -8.58397, "elev_ft": 5.0,
-        "runways": [
-            {"id": "11", "qfu": 110.0, "toda": 860.0, "lda": 860.0},
-            {"id": "29", "qfu": 290.0, "toda": 860.0, "lda": 860.0},
-        ],
-    },
-    "LPPR": {
-        "name": "Porto",
-        "lat": 41.2481, "lon": -8.6811, "elev_ft": 227.0,
-        "runways": [
-            {"id": "17", "qfu": 170.0, "toda": 3480.0, "lda": 3480.0},
-            {"id": "35", "qfu": 350.0, "toda": 3480.0, "lda": 3480.0},
-        ],
-    },
+    "LEBZ": {"name": "Badajoz","lat": 38.8913, "lon": -6.8214, "elev_ft": 608.0,
+        "runways":[{"id":"13","qfu":130.0,"toda":2852.0,"lda":2852.0},{"id":"31","qfu":310.0,"toda":2852.0,"lda":2852.0}]},
+    "LPBR": {"name": "Braga","lat": 41.5872, "lon": -8.4451, "elev_ft": 243.0,
+        "runways":[{"id":"18","qfu":180.0,"toda":939.0,"lda":939.0},{"id":"36","qfu":360.0,"toda":939.0,"lda":939.0}]},
+    "LPBG": {"name": "Bragança","lat": 41.8578, "lon": -6.7074, "elev_ft": 2278.0,
+        "runways":[{"id":"02","qfu":20.0,"toda":1700.0,"lda":1700.0},{"id":"20","qfu":200.0,"toda":1700.0,"lda":1700.0}]},
+    "LPCB": {"name": "Castelo Branco","lat": 39.8483, "lon": -7.4417, "elev_ft": 1251.0,
+        "runways":[{"id":"16","qfu":160.0,"toda":1460.0,"lda":1460.0},{"id":"34","qfu":340.0,"toda":1460.0,"lda":1460.0}]},
+    "LPCO": {"name": "Coimbra","lat": 40.1582, "lon": -8.4705, "elev_ft": 570.0,
+        "runways":[{"id":"16","qfu":160.0,"toda":923.0,"lda":923.0},{"id":"34","qfu":340.0,"toda":923.0,"lda":923.0}]},
+    "LPEV": {"name": "Évora","lat": 38.529722, "lon": -7.891944, "elev_ft": 807.0,
+        "runways":[{"id":"01","qfu":10.0,"toda":1300.0,"lda":1300.0},{"id":"19","qfu":190.0,"toda":1300.0,"lda":1300.0},
+                   {"id":"07","qfu":70.0,"toda":1300.0,"lda":1300.0},{"id":"25","qfu":250.0,"toda":1300.0,"lda":1300.0}]},
+    "LEMG": {"name": "Málaga","lat": 36.6749, "lon": -4.4991, "elev_ft": 52.0,
+        "runways":[{"id":"12","qfu":120.0,"toda":2750.0,"lda":2750.0},{"id":"30","qfu":300.0,"toda":2750.0,"lda":2750.0},
+                   {"id":"13","qfu":130.0,"toda":3200.0,"lda":3200.0},{"id":"31","qfu":310.0,"toda":3200.0,"lda":3200.0}]},
+    "LPSO": {"name": "Ponte de Sôr","lat": 39.211667, "lon": -8.057778, "elev_ft": 390.0,
+        "runways":[{"id":"03","qfu":30.0,"toda":1800.0,"lda":1800.0},{"id":"21","qfu":210.0,"toda":1800.0,"lda":1800.0}]},
+    "LEZL": {"name": "Sevilha","lat": 37.4180, "lon": -5.8931, "elev_ft": 111.0,
+        "runways":[{"id":"09","qfu":90.0,"toda":3364.0,"lda":3364.0},{"id":"27","qfu":270.0,"toda":3364.0,"lda":3364.0}]},
+    "LEVX": {"name": "Vigo","lat": 42.2318, "lon": -8.6268, "elev_ft": 856.0,
+        "runways":[{"id":"01","qfu":10.0,"toda":2385.0,"lda":2385.0},{"id":"19","qfu":190.0,"toda":2385.0,"lda":2385.0}]},
+    "LPVR": {"name": "Vila Real","lat": 41.2743, "lon": -7.7205, "elev_ft": 1832.0,
+        "runways":[{"id":"02","qfu":20.0,"toda":946.0,"lda":946.0},{"id":"20","qfu":200.0,"toda":946.0,"lda":946.0}]},
+    "LPVZ": {"name": "Viseu","lat": 40.7255, "lon": -7.8890, "elev_ft": 2060.0,
+        "runways":[{"id":"18","qfu":180.0,"toda":1000.0,"lda":1000.0},{"id":"36","qfu":360.0,"toda":1000.0,"lda":1000.0}]},
+    "LPCS": {"name": "Cascais","lat": 38.7256, "lon": -9.3553, "elev_ft": 326.0,
+        "runways":[{"id":"17","qfu":170.0,"toda":1400.0,"lda":1400.0},{"id":"35","qfu":350.0,"toda":1400.0,"lda":1400.0}]},
+    "LPMT": {"name": "Montijo","lat": 38.7039, "lon": -9.0350, "elev_ft": 46.0,
+        "runways":[{"id":"07","qfu":70.0,"toda":2448.0,"lda":2448.0},{"id":"25","qfu":250.0,"toda":2448.0,"lda":2448.0},
+                   {"id":"01","qfu":10.0,"toda":2187.0,"lda":2187.0},{"id":"19","qfu":190.0,"toda":2187.0,"lda":2187.0}]},
+    "LPST": {"name": "Sintra","lat": 38.8311, "lon": -9.3397, "elev_ft": 441.0,
+        "runways":[{"id":"17","qfu":170.0,"toda":1800.0,"lda":1800.0},{"id":"35","qfu":350.0,"toda":1800.0,"lda":1800.0}]},
+    "LPBJ": {"name": "Beja","lat": 38.0789, "lon": -7.9322, "elev_ft": 636.0,
+        "runways":[{"id":"01L","qfu":10.0,"toda":2448.0,"lda":2448.0},{"id":"19R","qfu":190.0,"toda":2448.0,"lda":2448.0},
+                   {"id":"01R","qfu":10.0,"toda":3449.0,"lda":3449.0},{"id":"19L","qfu":190.0,"toda":3449.0,"lda":3449.0}]},
+    "LPFR": {"name": "Faro","lat": 37.0144, "lon": -7.9658, "elev_ft": 24.0,
+        "runways":[{"id":"10","qfu":100.0,"toda":2490.0,"lda":2490.0},{"id":"28","qfu":280.0,"toda":2490.0,"lda":2490.0}]},
+    "LPPM": {"name": "Portimão","lat": 37.1493, "lon": -8.58397, "elev_ft": 5.0,
+        "runways":[{"id":"11","qfu":110.0,"toda":860.0,"lda":860.0},{"id":"29","qfu":290.0,"toda":860.0,"lda":860.0}]},
+    "LPPR": {"name": "Porto","lat": 41.2481, "lon": -8.6811, "elev_ft": 227.0,
+        "runways":[{"id":"17","qfu":170.0,"toda":3480.0,"lda":3480.0},{"id":"35","qfu":350.0,"toda":3480.0,"lda":3480.0}]},
 }
 ICAO_OPTIONS = sorted(AERODROMES_DB.keys())
 
@@ -299,8 +213,8 @@ OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"
 @st.cache_data(ttl=900, show_spinner=False)
 def om_point_forecast(lat, lon, start_date_iso, end_date_iso):
     params = {
-        "latitude": round(float(lat), 4),
-        "longitude": round(float(lon), 4),
+        "latitude": round(float(lat), 6),
+        "longitude": round(float(lon), 6),
         "hourly": ",".join([
             "temperature_2m",
             "wind_speed_10m",
@@ -337,7 +251,6 @@ def om_hours(resp):
 
 
 def _u_v_from_dirspd(dir_deg_from, spd_kt):
-    # convert wind FROM (deg) and speed (kt) to u/v (m/s) used for vector mean
     spd_ms = float(spd_kt) * 0.514444
     th = radians(float(dir_deg_from))
     u = -spd_ms * sin(th)
@@ -353,7 +266,6 @@ def _dirspd_from_uv(u, v):
 
 
 def om_mean_met_at(resp, idx, window=1):
-    # vector mean wind for idx-window .. idx+window
     if idx is None:
         return None
     wdir = resp.get("wdir", [])
@@ -415,7 +327,6 @@ def gist_load(token, gist_id):
 
 
 def parse_ew(reg_entry: dict):
-    # accept a few possible key names
     ew = (
         reg_entry.get("ew_lb")
         or reg_entry.get("ew")
@@ -435,7 +346,7 @@ def parse_ew(reg_entry: dict):
 
 
 # -----------------------------
-# PDF utils (same approach as Tecnam)
+# PDF utils
 # -----------------------------
 def read_pdf_bytes(paths) -> bytes:
     from pathlib import Path
@@ -454,7 +365,6 @@ def get_field_names(template_bytes: bytes) -> set:
             names.update(fd.keys())
     except Exception:
         pass
-    # brute annots
     try:
         for page in reader.pages:
             if "/Annots" in page:
@@ -477,7 +387,7 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
         raise RuntimeError("Template PDF has no AcroForm.")
     writer._root_object.update({NameObject("/AcroForm"): root["/AcroForm"]})
     try:
-        writer._root_object["/AcroForm"].update({NameObject("/NeedAppearances"): True})
+        writer._root_object["/AcroForm"].update({NameObject("/NeedAppearances"): BooleanObject(True)})
     except Exception:
         pass
 
@@ -490,7 +400,6 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
 
 # -----------------------------
 # CG chart mapping (page 0) – anchors you provided
-#   each CG integer has: bottom point at 1200 lb and "top" point at max weight for that CG line
 # -----------------------------
 CG_ANCHORS = {
     82: {"w0": 1200, "x0": 182, "y0": 72, "w1": 2050, "x1": 134, "y1": 245},
@@ -520,7 +429,6 @@ def xy_on_cg_line(cg_int: int, weight_lb: float):
     return x, y
 
 def xy_from_cg_weight(cg_in: float, weight_lb: float):
-    # interpolate between nearest integer CG lines
     cg = float(cg_in)
     cg = clamp(cg, 82.0, 93.0)
     lo = int(clamp(int(cg // 1), 82, 93))
@@ -533,11 +441,6 @@ def xy_from_cg_weight(cg_in: float, weight_lb: float):
     return (x0 + frac * (x1 - x0), y0 + frac * (y1 - y0))
 
 def draw_cg_overlay_on_page0(template_bytes: bytes, points):
-    """
-    points: list of dicts:
-      {"label":"Empty","cg":..., "w":..., "rgb":(r,g,b)}  (r,g,b in 0..1)
-    Draws dot + a line (from 1200lb point on that cg line up to the dot), and legend.
-    """
     reader = PdfReader(io.BytesIO(template_bytes))
     page0 = reader.pages[0]
     w_pt = float(page0.mediabox.width)
@@ -546,18 +449,14 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(w_pt, h_pt))
 
-    # dot style
     DOT_R = 5.5
 
-    # draw each line + dot
     for p in points:
         cg = float(p["cg"])
         wlb = float(p["w"])
         r, g, b = p["rgb"]
 
         x_dot, y_dot = xy_from_cg_weight(cg, wlb)
-
-        # baseline point (same cg line at 1200 lb)
         x_base, y_base = xy_from_cg_weight(cg, 1200.0)
 
         c.setStrokeColorRGB(r, g, b)
@@ -595,19 +494,17 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
     overlay_pdf = PdfReader(buf)
     overlay_page = overlay_pdf.pages[0]
 
-    # merge overlay into page 0
     out_writer = PdfWriter()
     for i, p in enumerate(reader.pages):
         if i == 0:
             p.merge_page(overlay_page)
         out_writer.add_page(p)
 
-    # preserve AcroForm so fields still work
     root = reader.trailer["/Root"]
     if "/AcroForm" in root:
         out_writer._root_object.update({NameObject("/AcroForm"): root["/AcroForm"]})
         try:
-            out_writer._root_object["/AcroForm"].update({NameObject("/NeedAppearances"): True})
+            out_writer._root_object["/AcroForm"].update({NameObject("/NeedAppearances"): BooleanObject(True)})
         except Exception:
             pass
 
@@ -678,7 +575,6 @@ with st.sidebar:
                 st.success(f"Loaded {len(st.session_state.fleet)} aircraft.")
 
     if not st.session_state.fleet_loaded and token and gist_id:
-        # autoload once
         data, err = gist_load(token, gist_id)
         if data is not None:
             st.session_state.fleet = data or {}
@@ -703,7 +599,6 @@ with tab1:
         reg = st.selectbox("Aircraft Reg.", regs, index=0)
         st.session_state["reg"] = reg
 
-        # show EW summary
         if reg in st.session_state.fleet:
             ew_lb, ew_mom = parse_ew(st.session_state.fleet[reg])
             ew_kg = ew_lb / KG_TO_LB
@@ -719,7 +614,6 @@ with tab1:
         st.markdown("#### Times (UTC)")
         st.session_state.dep_time_utc = st.time_input("Departure time (UTC)", value=st.session_state.dep_time_utc, step=3600)
         st.session_state.arr_time_utc = st.time_input("Arrival time (UTC)", value=st.session_state.arr_time_utc, step=3600)
-
         st.markdown("<div class='muted'>Alternates use Arrival time.</div>", unsafe_allow_html=True)
 
     with c3:
@@ -732,18 +626,26 @@ with tab1:
 with tab2:
     st.markdown("#### Aerodromes (4 legs) + model weather (vector-mean wind)")
 
-    # fetch weather for all legs
     colA, colB = st.columns([0.6, 0.4])
     with colB:
         if st.button("Fetch weather for all legs", type="primary"):
-            date_iso = st.session_state.flight_date.strftime("%Y-%m-%d")
-            ok, err = 0, 0
+            # Fetch 2 days to cover midnight rollover
+            date0 = st.session_state.flight_date
+            date1 = date0 + dt.timedelta(days=1)
+            start_iso = date0.strftime("%Y-%m-%d")
+            end_iso = date1.strftime("%Y-%m-%d")
 
+            dep_dt = dt.datetime.combine(date0, st.session_state.dep_time_utc).replace(tzinfo=dt.timezone.utc)
+            arr_dt = dt.datetime.combine(date0, st.session_state.arr_time_utc).replace(tzinfo=dt.timezone.utc)
+            if arr_dt <= dep_dt:
+                arr_dt = arr_dt + dt.timedelta(days=1)
+
+            ok, err = 0, 0
             for i, leg in enumerate(st.session_state.legs):
                 icao = leg["icao"]
                 ad = AERODROMES_DB[icao]
 
-                resp = om_point_forecast(ad["lat"], ad["lon"], date_iso, date_iso)
+                resp = om_point_forecast(ad["lat"], ad["lon"], start_iso, end_iso)
                 if "error" in resp:
                     st.error(f"{leg['role']} {icao}: weather error: {resp.get('error')} {resp.get('detail','')}")
                     err += 1
@@ -755,9 +657,7 @@ with tab2:
                     err += 1
                     continue
 
-                # choose target time for this leg
-                t_utc = st.session_state.dep_time_utc if leg["role"] == "DEPARTURE" else st.session_state.arr_time_utc
-                target = dt.datetime.combine(st.session_state.flight_date, t_utc).replace(tzinfo=dt.timezone.utc)
+                target = dep_dt if leg["role"] == "DEPARTURE" else arr_dt
 
                 idx, tsel = min(hours, key=lambda h: abs(h[1] - target))
                 met = om_mean_met_at(resp, idx, window=1)
@@ -766,7 +666,8 @@ with tab2:
                     err += 1
                     continue
 
-                met["label"] = tsel.strftime("%Y-%m-%d %H:00Z")
+                met["label"] = tsel.strftime("%Y-%m-%d %H:%MZ")
+                met["target"] = target.strftime("%Y-%m-%d %H:%MZ")
                 st.session_state.met[i] = met
                 ok += 1
 
@@ -777,7 +678,6 @@ with tab2:
             else:
                 st.error("No legs updated.")
 
-    # legs editor + runway auto
     rows = []
     for i, leg in enumerate(st.session_state.legs):
         role = leg["role"]
@@ -788,15 +688,16 @@ with tab2:
             ad = AERODROMES_DB[icao]
             st.caption(f"{ad['name']} · Elev {ad['elev_ft']:.0f} ft")
         with c2:
-            met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013, "label": ""}
+            met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013, "label": "", "target": ""}
             st.markdown(
                 f"<div class='box'><b>Model</b> {met.get('label','')}<br>"
+                f"<span class='muted'>Target: {met.get('target','')}</span><br>"
                 f"Wind: <b>{met['wind_dir']:03d}/{met['wind_kt']:02d}</b> kt<br>"
                 f"OAT: <b>{met['temp_c']}</b> °C · QNH: <b>{met['qnh_hpa']}</b> hPa</div>",
                 unsafe_allow_html=True,
             )
         with c3:
-            met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013, "label": ""}
+            met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013, "label": "", "target": ""}
             best = choose_best_runway_by_wind(AERODROMES_DB[st.session_state.legs[i]["icao"]], met["wind_dir"], met["wind_kt"])
             rw = best["rw"]
             st.session_state[f"rwy_{role}"] = rw["id"]
@@ -812,7 +713,6 @@ with tab2:
                 unsafe_allow_html=True,
             )
 
-        # performance inputs (manual for now)
         p = st.session_state.perf[i]
         cc1, cc2, cc3 = st.columns([0.22, 0.22, 0.22])
         with cc1:
@@ -823,14 +723,18 @@ with tab2:
             p["roc_fpm"] = st.text_input(f"{role} ROC (ft/min)", value=str(p.get("roc_fpm","")), key=f"roc_{i}")
 
         st.session_state.perf[i] = p
-
         rows.append({"i": i, "role": role, "icao": st.session_state.legs[i]["icao"]})
 
 # -----------------------------
 # 3) Weight & Fuel
 # -----------------------------
 with tab3:
-    st.markdown("#### Weight & Balance (inputs in kg / L)")
+    st.markdown(
+        f"#### Weight & Balance (inputs in kg / L) "
+        f"<span class='chip'>Fuel usable max {FUEL_USABLE_USG:.0f} USG ({FUEL_USABLE_L:.0f} L)</span>"
+        f"<span class='chip'>Baggage max {BAGGAGE_MAX_LB:.0f} lb ({BAGGAGE_MAX_KG:.1f} kg)</span>",
+        unsafe_allow_html=True
+    )
 
     reg = st.session_state.get("reg", "")
     fleet_ok = reg in st.session_state.fleet
@@ -838,11 +742,34 @@ with tab3:
     c1, c2 = st.columns([0.52, 0.48])
 
     with c1:
-        student_kg = st.number_input("Student (kg)", min_value=0.0, value=70.0, step=0.5)
-        instructor_kg = st.number_input("Instructor (kg)", min_value=0.0, value=0.0, step=0.5)
-        rear_pax_kg = st.number_input("Rear passengers total (kg)", min_value=0.0, value=0.0, step=0.5)
-        baggage_kg = st.number_input("Baggage (kg)", min_value=0.0, value=0.0, step=0.5)
-        fuel_l = st.number_input("Fuel (L)", min_value=0.0, value=0.0, step=1.0)
+        # Passenger inputs with anti-typo max (real limit checked dynamically below)
+        student_kg = st.number_input(
+            f"Student (kg) — sanity max {SANITY_PERSON_MAX_KG:.0f}",
+            min_value=0.0, max_value=float(SANITY_PERSON_MAX_KG),
+            value=70.0, step=0.5
+        )
+        instructor_kg = st.number_input(
+            f"Instructor (kg) — sanity max {SANITY_PERSON_MAX_KG:.0f}",
+            min_value=0.0, max_value=float(SANITY_PERSON_MAX_KG),
+            value=0.0, step=0.5
+        )
+        rear_pax_kg = st.number_input(
+            f"Rear passengers total (kg) — sanity max {SANITY_REAR_TOTAL_MAX_KG:.0f}",
+            min_value=0.0, max_value=float(SANITY_REAR_TOTAL_MAX_KG),
+            value=0.0, step=0.5
+        )
+
+        baggage_kg = st.number_input(
+            f"Baggage (kg) — max {BAGGAGE_MAX_KG:.1f}",
+            min_value=0.0, max_value=float(BAGGAGE_MAX_KG),
+            value=0.0, step=0.5
+        )
+
+        fuel_l = st.number_input(
+            f"Fuel (L) — usable max {FUEL_USABLE_L:.0f}",
+            min_value=0.0, max_value=float(FUEL_USABLE_L),
+            value=0.0, step=1.0
+        )
 
         st.markdown("#### Fuel planning (detailed)")
         rate_lph = st.number_input("Consumption (L/h)", min_value=10.0, max_value=40.0, value=20.0, step=0.5)
@@ -888,6 +815,11 @@ with tab3:
     else:
         ew_lb, ew_mom = 0.0, 0.0
 
+    # Dynamic max for TOTAL occupants by MTOW (CG still needs to be OK)
+    remaining_for_people_lb = max(0.0, MTOW_LB - (ew_lb + fuel_lb + bag_lb))
+    remaining_for_people_kg = remaining_for_people_lb / KG_TO_LB
+    people_kg = student_kg + instructor_kg + rear_pax_kg
+
     # moments
     mom_front = front_lb * ARM_FRONT
     mom_rear = rear_lb * ARM_REAR
@@ -902,7 +834,6 @@ with tab3:
     takeoff_m = ramp_m - (TAXI_ALLOW_LB * TAXI_ARM)
     takeoff_cg = (takeoff_m / takeoff_w) if takeoff_w > 0 else 0.0
 
-    # landing: burn trip fuel only (block 5) from takeoff
     burn_usg = trip_l * L_TO_USG
     burn_lb = burn_usg * FUEL_LB_PER_USG
     landing_w = max(0.0, takeoff_w - burn_lb)
@@ -911,6 +842,21 @@ with tab3:
 
     with c2:
         st.markdown("#### Summary")
+
+        st.markdown(
+            f"<div class='box'>"
+            f"<b>Max ocupantes (dinâmico pelo MTOW)</b>: {remaining_for_people_lb:.0f} lb ({remaining_for_people_kg:.1f} kg)<br>"
+            f"<span class='muted'>Com fuel+bagagem atuais. Ainda tens de cumprir CG.</span>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+        if people_kg > remaining_for_people_kg + 1e-6:
+            st.error(
+                f"Ocupantes total = {people_kg:.1f} kg > máximo agora pelo MTOW = {remaining_for_people_kg:.1f} kg "
+                f"(com fuel+bagagem atuais)."
+            )
+
         st.markdown(
             f"<div class='box'>"
             f"<b>Ramp</b>: {ramp_w:.0f} lb ({ramp_w/KG_TO_LB:.0f} kg) · CG {ramp_cg:.1f} in<br>"
@@ -934,7 +880,6 @@ with tab3:
             unsafe_allow_html=True
         )
 
-        # fuel planning table
         st.markdown("#### Fuel planning (for PDF)")
         rows = [
             ("Start-up & Taxi", taxi_min, taxi_l),
@@ -958,7 +903,6 @@ with tab3:
         html.append("</table>")
         st.markdown("".join(html), unsafe_allow_html=True)
 
-    # store for PDF
     st.session_state["_wb"] = {
         "ew_lb": ew_lb, "ew_mom": ew_mom,
         "front_lb": front_lb, "rear_lb": rear_lb, "bag_lb": bag_lb, "fuel_lb": fuel_lb,
@@ -994,28 +938,21 @@ with tab4:
         reg = st.session_state.get("reg", "")
         date_str = st.session_state.flight_date.strftime("%d/%m/%Y")
 
-        # Build fields dict using EXACT field names detected in your updated PDF
         f = {}
 
         def put(name, value):
             if name in fieldset:
                 f[name] = value
 
-        # --- header
         put("Date", date_str)
 
-        # some PDFs have aircraft reg field; yours may not be a form field. If it exists, fill it.
         for candidate in ["Aircraft_Reg", "Aircraft_Reg.", "Aircraft_Reg__", "Aircraft_Reg_", "Aircraft_Reg__1", "Aircraft_Reg__2", "Aircraft_Reg__3", "Aircraft_Reg__4"]:
             if candidate in fieldset:
                 put(candidate, reg)
 
-        # --- Loading data (page 0)
-        # weights in lb with kg in parentheses; moments in in-lb (int)
         def w_str(lb):
             kg = lb / KG_TO_LB
             return f"{lb:.0f} ({kg:.0f}kg)"
-
-        put("Weight(lbs)", "")  # leave if present; usually label field
 
         put("Weight_FRONT", w_str(wb.get("front_lb", 0.0)))
         put("Moment_FRONT", f"{(wb.get('front_lb',0.0) * ARM_FRONT):.0f}")
@@ -1023,7 +960,6 @@ with tab4:
         put("Weight_REAR", w_str(wb.get("rear_lb", 0.0)))
         put("Moment_REAR", f"{(wb.get('rear_lb',0.0) * ARM_REAR):.0f}")
 
-        # fuel: show in USG with liters
         fuel_usg = wb.get("fuel_usg", 0.0)
         fuel_l = wb.get("fuel_l", 0.0)
         fuel_lb = wb.get("fuel_lb", 0.0)
@@ -1033,15 +969,11 @@ with tab4:
         put("Weight_BAGGAGE", w_str(wb.get("bag_lb", 0.0)))
         put("Moment_BAGGAGE", f"{(wb.get('bag_lb',0.0) * ARM_BAGGAGE):.0f}")
 
-        # empty
-        put("Datum_EMPTY", f"{wb.get('ramp_cg',0.0):.1f}")  # not really "empty" cg; but field exists; keep empty CG only if you want
         put("Moment_EMPTY", f"{wb.get('ew_mom',0.0):.0f}")
-        # weight empty isn't a field in your PDF; it’s text on sheet. If it exists, fill it:
         for nm in ["Weight_EMPTY", "Basic_Empty_Weight", "Weight_BASIC_EMPTY", "Weight_EMPTY_WEIGHT"]:
             if nm in fieldset:
                 put(nm, w_str(wb.get("ew_lb", 0.0)))
 
-        # ramp / takeoff
         put("Weight_RAMP", w_str(wb.get("ramp_w", 0.0)))
         put("Moment_RAMP", f"{wb.get('ramp_m',0.0):.0f}")
         put("Datum_RAMP", f"{wb.get('ramp_cg',0.0):.1f}")
@@ -1050,15 +982,6 @@ with tab4:
         put("Moment_TAKEOFF", f"{wb.get('takeoff_m',0.0):.0f}")
         put("Datum_TAKEOFF", f"{wb.get('takeoff_cg',0.0):.1f}")
 
-        # MTOW / MLW boxes if they are fields
-        for nm in ["MTOW", "MTOW:", "MTOW__", "MTOW__1"]:
-            if nm in fieldset:
-                put(nm, f"{MTOW_LB:.0f}")
-        for nm in ["MLW", "MLW:", "MLW__", "MLW__1"]:
-            if nm in fieldset:
-                put(nm, f"{MLW_LB:.0f}")
-
-        # --- Airfield blocks (page 1) (4 legs)
         def pa_da(elev_ft, qnh_hpa, oat_c):
             pa_ft = float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
             isa = 15.0 - 2.0 * (float(elev_ft) / 1000.0)
@@ -1073,7 +996,6 @@ with tab4:
             best = choose_best_runway_by_wind(ad, met["wind_dir"], met["wind_kt"])
             rw = best["rw"]
 
-            # field suffixes are EXACT in your PDF: DEPARTURE / ARRIVAL / ALTERNATE_1 / ALTERNATE_2
             suf = role
 
             put(f"Airfield_{suf}", icao)
@@ -1084,7 +1006,6 @@ with tab4:
             put(f"Wind_{suf}", f"{met['wind_dir']:03d}/{met['wind_kt']:02d}")
 
             pa_ft, da_ft = pa_da(ad["elev_ft"], met["qnh_hpa"], met["temp_c"])
-            # note: departure field name in your PDF has a typo "Pressure_Alt _DEPARTURE" (space)
             if f"Pressure_Alt_{suf}" in fieldset:
                 put(f"Pressure_Alt_{suf}", f"{pa_ft:.0f}")
             elif suf == "DEPARTURE" and "Pressure_Alt _DEPARTURE" in fieldset:
@@ -1094,13 +1015,11 @@ with tab4:
             put(f"TODA_{suf}", f"{rw['toda']:.0f}")
             put(f"LDA_{suf}", f"{rw['lda']:.0f}")
 
-            # Manual performance inputs (if you fill them in UI)
             p = st.session_state.perf[i]
             put(f"TODR_{suf}", str(p.get("todr_m","")))
             put(f"LDR_{suf}", str(p.get("ldr_m","")))
             put(f"ROC_{suf}", str(p.get("roc_fpm","")))
 
-        # --- Fuel planning fields (USG with liters in parentheses)
         def fuel_str(liters):
             usg = liters * L_TO_USG
             return f"{usg:.1f} ({liters:.1f}L)"
@@ -1138,24 +1057,20 @@ with tab4:
         put("Total_TIME", fmt_hm(int(fuel.get("total_min", 0))))
         put("Total_FUEL", fuel_str(float(fuel.get("total_l", 0.0))))
 
-        # Fill fields first (keeps appearance) then overlay chart on page 0
         base_filled = fill_pdf(template_bytes, f)
 
-        # Points for chart: Empty / Takeoff / Landing
-        # For "Empty" point use EW only (empty weight & CG from moment/weight)
         ew_lb = wb.get("ew_lb", 0.0)
         ew_mom = wb.get("ew_mom", 0.0)
         ew_cg = (ew_mom / ew_lb) if ew_lb > 0 else 82.0
 
         chart_points = [
-            {"label": "Empty",   "cg": ew_cg,                    "w": ew_lb,                "rgb": (0.10, 0.60, 0.15)},
-            {"label": "Takeoff", "cg": wb.get("takeoff_cg", 0),  "w": wb.get("takeoff_w",0),"rgb": (0.10, 0.30, 0.85)},
-            {"label": "Landing", "cg": wb.get("landing_cg", 0),  "w": wb.get("landing_w",0),"rgb": (0.85, 0.15, 0.15)},
+            {"label": "Empty",   "cg": ew_cg,                    "w": ew_lb,                 "rgb": (0.10, 0.60, 0.15)},
+            {"label": "Takeoff", "cg": wb.get("takeoff_cg", 0),  "w": wb.get("takeoff_w",0), "rgb": (0.10, 0.30, 0.85)},
+            {"label": "Landing", "cg": wb.get("landing_cg", 0),  "w": wb.get("landing_w",0), "rgb": (0.85, 0.15, 0.15)},
         ]
 
         final_pdf = draw_cg_overlay_on_page0(base_filled, chart_points)
 
-        # Download
         mission = ascii_safe(st.session_state.get("mission_no", "")).strip().replace(" ", "_")
         mission_part = f"{mission}_" if mission else ""
         out_name = f"{mission_part}{reg}_PA28_MB_Perf.pdf"
