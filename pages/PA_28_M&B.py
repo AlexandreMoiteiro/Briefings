@@ -1,15 +1,21 @@
 # Streamlit app – Piper PA28 Archer III (Sevenair) – M&B + Weather + PDF fill + CG chart
-# Includes fixes:
-# - MTOW/MLW fill in PDF (tries multiple field-name variants)
-# - 182 L shows as 48.0 USG (sheet-based L<->USG conversion: 182/48)
-# - Fuel consumption input in USG/h (default 10.0 USG/h)
+# Fixes included (requested):
+# - MTOW/MLW constants kept at 2550/2550 (POH), and filled into PDF (tries common field-name variants)
+# - 182 L displays as 48.0 USG (force when FULL, avoids 48.1)
+# - Consumption default corresponds to 10 USG/h (≈ 37.9 L/h)
 # - Start-up_and_Taxi_FUEL no longer zero (taxi_l stored in session_state["_fuel"])
+# - Summary shows Empty + Takeoff + Landing
+# - Removed "Debug: show detected field names"
+# - Alternate default time = 60 min
 # - PDF NeedAppearances uses BooleanObject(True)
-# - Dark mode readability
-# - W&B limits: Fuel max 182.0 L, Baggage max 90.0 kg, defaults fuel full / student 50 / instructor 80 / baggage 5
-# - Weather fetch logic as described + runway selection by wind
-# - OurAirports live DB + overrides for LPSO/LPEV
-# - CG chart plots ONLY Empty / Takeoff / Landing (no Ramp)
+# - Dark mode boxes readable
+# - W&B input limits: Fuel max 182.0 L, Baggage max 90.0 kg, Fuel default FULL, Student 50 / Instructor 80 / Baggage 5
+# - Weather fetch: DEP uses dep_time_utc; ARR uses arr_time_utc; ALT1/ALT2 use arr_time_utc + 1 hour
+# - Wind dir rounded to nearest 10°, vector-mean wind around target hour (idx±1)
+# - Aerodromes DB built live from OurAirports + overrides for LPSO/LPEV
+# - Auto runway by wind (max headwind then min crosswind)
+# - PDF fields: supports 4-column sheet naming (DEPARTURE / ARRIVAL / ALTERNATE_1 / ALTERNATE_2)
+# - CG chart: plots ONLY Empty / Takeoff / Landing (no Ramp)
 
 import io
 import csv
@@ -85,26 +91,20 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
-# -----------------------------
-# Units / constants
-# -----------------------------
 KG_TO_LB = 2.2046226218
-
-# Sheet maxima
-FUEL_USABLE_USG = 48.0
-FUEL_USABLE_L = 182.0          # force sheet value
-BAGGAGE_MAX_KG = 90.0
-BAGGAGE_MAX_LB = BAGGAGE_MAX_KG * KG_TO_LB
-
-# IMPORTANT FIX: sheet-based conversion so 182 L == 48.0 USG exactly
-L_PER_USG_SHEET = FUEL_USABLE_L / FUEL_USABLE_USG  # 182/48 = 3.791666...
-USG_TO_L = L_PER_USG_SHEET
-L_TO_USG = 1.0 / L_PER_USG_SHEET
+L_TO_USG = 1.0 / 3.785411784
+USG_TO_L = 3.785411784
 
 # Fuel density (approx for 100LL): 6.0 lb/USG
 FUEL_LB_PER_USG = 6.0
 
-# PA28 arms (inches aft of datum)
+# Sheet maxima (as you wanted)
+FUEL_USABLE_USG = 48.0
+FUEL_USABLE_L = 182.0          # force sheet value (not 181.70…)
+BAGGAGE_MAX_KG = 90.0          # you asked 90 (not 90.7)
+BAGGAGE_MAX_LB = BAGGAGE_MAX_KG * KG_TO_LB
+
+# PA28 arms (inches aft of datum) – fixed for this sheet
 ARM_FRONT = 80.5
 ARM_REAR = 118.1
 ARM_FUEL = 95.0
@@ -114,7 +114,7 @@ ARM_BAGGAGE = 142.8
 TAXI_ALLOW_LB = 8.0
 TAXI_ARM = 95.5
 
-# Max weights (from sheet)
+# Max weights (from POH and your sheet)
 MTOW_LB = 2550.0
 MLW_LB = 2550.0
 
@@ -122,7 +122,7 @@ MLW_LB = 2550.0
 PDF_TEMPLATE_PATHS = ["RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"]
 
 # -----------------------------
-# Aerodromes DB (OurAirports) + overrides
+# Aerodromes DB (live from OurAirports) + overrides you required
 # -----------------------------
 OURAIRPORTS_AIRPORTS_CSV = "https://ourairports.com/data/airports.csv"
 OURAIRPORTS_RUNWAYS_CSV = "https://ourairports.com/data/runways.csv"
@@ -211,6 +211,7 @@ def build_aerodromes_db(icaos):
             le_hdg = _to_float(rw.get("le_heading_degT"), None)
             he_hdg = _to_float(rw.get("he_heading_degT"), None)
 
+            # fallbacks if dataset headings missing
             if le_hdg is None:
                 le_hdg = _rw_ident_to_qfu_deg(le_ident)
             if he_hdg is None:
@@ -223,7 +224,8 @@ def build_aerodromes_db(icaos):
 
         db[icao] = {"name": name, "lat": lat, "lon": lon, "elev_ft": elev_ft, "runways": runways}
 
-    # Overrides required
+    # ---- Overrides you explicitly required (exact QFU etc.)
+    # LPSO: RWY03/21 headings 026/206, length 1800m
     if "LPSO" in db:
         db["LPSO"]["name"] = "Ponte de Sôr"
         db["LPSO"]["runways"] = [
@@ -231,6 +233,7 @@ def build_aerodromes_db(icaos):
             {"id": "21", "qfu": 206.0, "toda": 1800.0, "lda": 1800.0},
         ]
 
+    # LPEV: remove 04/18; keep 01/19 and 07/25 (headings commonly published 006/186 and 074/254)
     if "LPEV" in db:
         db["LPEV"]["name"] = "Évora"
         keep = {"01","19","07","25"}
@@ -469,7 +472,7 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     return out.getvalue()
 
 # -----------------------------
-# CG chart mapping (page 0) – anchors
+# CG chart mapping (page 0) – anchors you provided
 # -----------------------------
 CG_ANCHORS = {
     82: {"w0": 1200, "x0": 182, "y0": 72, "w1": 2050, "x1": 134, "y1": 245},
@@ -511,6 +514,11 @@ def xy_from_cg_weight(cg_in: float, weight_lb: float):
     return (x0 + frac * (x1 - x0), y0 + frac * (y1 - y0))
 
 def draw_cg_overlay_on_page0(template_bytes: bytes, points):
+    """
+    points: list of dicts:
+      {"label":"Empty","cg":..., "w":..., "rgb":(r,g,b)}  (r,g,b in 0..1)
+    Draws dot + a line (from 1200lb point on that cg line up to the dot), and legend.
+    """
     reader = PdfReader(io.BytesIO(template_bytes))
     page0 = reader.pages[0]
     w_pt = float(page0.mediabox.width)
@@ -518,6 +526,7 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(w_pt, h_pt))
+
     DOT_R = 5.5
 
     for p in points:
@@ -535,6 +544,7 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
         c.setFillColorRGB(r, g, b)
         c.circle(x_dot, y_dot, DOT_R, fill=1, stroke=0)
 
+    # legend
     legend_x = 500
     legend_y = 300
     c.setFillColorRGB(0, 0, 0)
@@ -582,7 +592,7 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
     return out.getvalue()
 
 # -----------------------------
-# Session defaults (4 legs)
+# Session defaults (4 legs: dep, arr, alt1, alt2)
 # -----------------------------
 DEFAULT_LEGS = [
     {"role": "DEPARTURE",   "icao": "LPSO"},
@@ -612,6 +622,7 @@ if "fleet_loaded" not in st.session_state:
 if "flight_date" not in st.session_state:
     st.session_state.flight_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).date()
 
+# Default times only (user can change; no forced dep+1 logic beyond initial default)
 if "dep_time_utc" not in st.session_state:
     st.session_state.dep_time_utc = (dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)).time()
 if "arr_time_utc" not in st.session_state:
@@ -665,9 +676,11 @@ with tab1:
         if reg in st.session_state.fleet:
             ew_lb, ew_mom = parse_ew(st.session_state.fleet[reg])
             ew_kg = ew_lb / KG_TO_LB
+            ew_cg = (ew_mom / ew_lb) if ew_lb > 0 else 0.0
             st.markdown(
                 f"<div class='box'><b>Empty Weight</b>: {ew_lb:.0f} lb ({ew_kg:.0f} kg)<br>"
-                f"<b>Empty Moment</b>: {ew_mom:.0f} in-lb</div>",
+                f"<b>Empty Moment</b>: {ew_mom:.0f} in-lb<br>"
+                f"<b>Empty CG</b>: {ew_cg:.1f} in</div>",
                 unsafe_allow_html=True
             )
         else:
@@ -807,16 +820,20 @@ with tab3:
 
         st.markdown("#### Fuel planning (detailed)")
 
-        # FIX: Consumption in USG/h, default 10 USG/h
-        rate_usgph = st.number_input("Consumption (USG/h)", min_value=5.0, max_value=20.0, value=10.0, step=0.1)
-        rate_lph = rate_usgph * USG_TO_L
+        # FIX: default matches 10 USG/h = 37.854 L/h
+        DEFAULT_USGPH = 10.0
+        DEFAULT_LPH = DEFAULT_USGPH * USG_TO_L
+        rate_lph = st.number_input("Consumption (L/h)", min_value=10.0, max_value=60.0, value=float(round(DEFAULT_LPH, 1)), step=0.5)
+        st.caption("Reference: 10 USG/h ≈ 37.9 L/h")
 
         taxi_min = st.number_input("(1) Start-up & Taxi (min)", min_value=0, value=15, step=1)
         climb_min = st.number_input("(2) Climb (min)", min_value=0, value=10, step=1)
         enrt_h = st.number_input("(3) Enroute (h)", min_value=0, value=1, step=1)
         enrt_min = st.number_input("(3) Enroute (min)", min_value=0, value=0, step=5)
         desc_min = st.number_input("(4) Descent (min)", min_value=0, value=10, step=1)
-        alt_min = st.number_input("(7) Alternate (min)", min_value=0, value=45, step=5)
+
+        # FIX: alternate default now 60 min
+        alt_min = st.number_input("(7) Alternate (min)", min_value=0, value=60, step=5)
         reserve_min = 45
 
     def l_from_min(mins, rate=rate_lph):
@@ -850,13 +867,18 @@ with tab3:
     rear_lb = rear_pax_kg * KG_TO_LB
     bag_lb = baggage_kg * KG_TO_LB
 
-    fuel_usg = fuel_l * L_TO_USG  # FIX: sheet-based conversion => 182 L = 48.0 USG
+    fuel_usg = fuel_l * L_TO_USG
+    # FIX: force FULL to be exactly 48.0 USG
+    if abs(fuel_l - FUEL_USABLE_L) < 0.5:
+        fuel_usg = FUEL_USABLE_USG
     fuel_lb = fuel_usg * FUEL_LB_PER_USG
 
     if fleet_ok:
         ew_lb, ew_mom = parse_ew(st.session_state.fleet[reg])
     else:
         ew_lb, ew_mom = 0.0, 0.0
+
+    ew_cg = (ew_mom / ew_lb) if ew_lb > 0 else 0.0
 
     # moments
     mom_front = front_lb * ARM_FRONT
@@ -883,6 +905,7 @@ with tab3:
         st.markdown("#### Summary")
         st.markdown(
             f"<div class='box'>"
+            f"<b>Empty</b>: {ew_lb:.0f} lb ({ew_lb/KG_TO_LB:.0f} kg) · CG {ew_cg:.1f} in<br>"
             f"<b>Takeoff</b>: {takeoff_w:.0f} lb ({takeoff_w/KG_TO_LB:.0f} kg) · CG {takeoff_cg:.1f} in<br>"
             f"<b>Landing</b>: {landing_w:.0f} lb ({landing_w/KG_TO_LB:.0f} kg) · CG {landing_cg:.1f} in"
             f"</div>",
@@ -920,7 +943,10 @@ with tab3:
         ]
         html = ["<table class='tbl'><tr><th>Item</th><th>Time</th><th>Fuel</th></tr>"]
         for name, mins, liters in rows:
-            usg = liters * L_TO_USG
+            if name == "Fuel loaded" and abs(liters - FUEL_USABLE_L) < 0.5:
+                usg = FUEL_USABLE_USG
+            else:
+                usg = liters * L_TO_USG
             t = fmt_hm(mins) if mins else "—"
             html.append(f"<tr><td>{name}</td><td>{t}</td><td>{usg:.1f} USG ({liters:.1f} L)</td></tr>")
         html.append("</table>")
@@ -936,9 +962,8 @@ with tab3:
         "fuel_l": fuel_l, "fuel_usg": fuel_usg,
     }
 
-    # FIX: include taxi_l so Start-up_and_Taxi_FUEL is not zero
+    # FIX: store taxi_l so Start-up_and_Taxi_FUEL is not zero
     st.session_state["_fuel"] = {
-        "rate_usgph": rate_usgph,
         "rate_lph": rate_lph,
 
         "taxi_min": taxi_min, "taxi_l": taxi_l,
@@ -976,25 +1001,17 @@ with tab4:
             if name in fieldset:
                 f[name] = value
 
-        # FIX: convenience helper to try multiple possible field names
-        def put_any(candidates, value):
-            for n in candidates:
-                if n in fieldset:
-                    f[n] = value
-                    return True
-            return False
-
         # --- header
         put("Date", date_str)
         for candidate in ["Aircraft_Reg", "Aircraft_Reg.", "Aircraft Reg.", "Aircraft_Reg__", "Aircraft_Reg_"]:
             if candidate in fieldset:
                 put(candidate, reg)
 
-        # FIX: fill MTOW / MLW (will only write if names exist in the PDF)
-        mtow_str = f"{MTOW_LB:.0f} lb ({MTOW_LB / KG_TO_LB:.0f} kg)"
-        mlw_str  = f"{MLW_LB:.0f} lb ({MLW_LB / KG_TO_LB:.0f} kg)"
-        put_any(["MTOW", "MTOW_LB", "Max_Takeoff_Weight", "Maximum_Takeoff_Weight", "Max_Takeoff_Wt"], mtow_str)
-        put_any(["MLW", "MLW_LB", "Max_Landing_Weight", "Maximum_Landing_Weight", "Max_Landing_Wt"], mlw_str)
+        # --- Fill MTOW / MLW (no optional extras)
+        for nm in ["MTOW", "MTOW_LB", "Max_Takeoff_Weight", "Maximum_Takeoff_Weight", "MaxTakeoffWeight", "Max_Takeoff_Wt"]:
+            put(nm, f"{MTOW_LB:.0f}")
+        for nm in ["MLW", "MLW_LB", "Max_Landing_Weight", "Maximum_Landing_Weight", "MaxLandingWeight", "Max_Landing_Wt"]:
+            put(nm, f"{MLW_LB:.0f}")
 
         # --- Loading data (page 0)
         def w_str(lb):
@@ -1002,9 +1019,9 @@ with tab4:
             return f"{lb:.0f} ({kg:.0f}kg)"
 
         def fuel_w_str(fuel_lb, fuel_usg, fuel_l):
-            # FIX: USG shown with 1 decimal but 182 L will now be exactly 48.0
             return f"{fuel_lb:.0f} ({fuel_usg:.1f}USG/{fuel_l:.0f}L)"
 
+        # empty
         ew_lb = wb.get("ew_lb", 0.0)
         ew_mom = wb.get("ew_mom", 0.0)
         ew_cg = (ew_mom / ew_lb) if ew_lb > 0 else 82.0
@@ -1028,6 +1045,7 @@ with tab4:
         put("Weight_BAGGAGE", w_str(wb.get("bag_lb", 0.0)))
         put("Moment_BAGGAGE", f"{(wb.get('bag_lb',0.0) * ARM_BAGGAGE):.0f}")
 
+        # ramp / takeoff boxes (ok to fill)
         put("Weight_RAMP", w_str(wb.get("ramp_w", 0.0)))
         put("Moment_RAMP", f"{wb.get('ramp_m',0.0):.0f}")
         put("Datum_RAMP", f"{wb.get('ramp_cg',0.0):.1f}")
@@ -1049,7 +1067,7 @@ with tab4:
         targets = [dep_target, arr_target, alt_target, alt_target]
 
         for i, leg in enumerate(st.session_state.legs):
-            role = leg["role"]
+            role = leg["role"]  # DEPARTURE / ARRIVAL / ALTERNATE_1 / ALTERNATE_2
             icao = leg["icao"]
             ad = AERODROMES_DB.get(icao, None)
             if not ad:
@@ -1062,7 +1080,6 @@ with tab4:
             rw = best["rw"]
 
             suf = role
-
             put(f"Airfield_{suf}", icao)
             put(f"RWY_QFU_{suf}", f"{rw['qfu']:.0f}")
             put(f"Elevation_{suf}", f"{ad['elev_ft']:.0f}")
@@ -1081,15 +1098,16 @@ with tab4:
             put(f"TODA_{suf}", f"{rw['toda']:.0f}")
             put(f"LDA_{suf}", f"{rw['lda']:.0f}")
 
-        # --- Fuel planning fields
+        # --- Fuel planning fields (USG with liters in parentheses)
         def fuel_str(liters):
-            usg = liters * L_TO_USG
-            # Optional: if essentially full, force 48.0 exactly
-            if abs(liters - FUEL_USABLE_L) < 0.6:
-                usg = FUEL_USABLE_USG
+            liters = float(liters)
+            # FIX: when full, show exactly 48.0 USG
+            if abs(liters - float(FUEL_USABLE_L)) < 0.5:
+                usg = float(FUEL_USABLE_USG)
+            else:
+                usg = liters * L_TO_USG
             return f"{usg:.1f} ({liters:.1f}L)"
 
-        # FIX: taxi_l now stored, so this will not be zero anymore
         put("Start-up_and_Taxi_TIME", fmt_hm(int(fuel.get("taxi_min", 0))))
         put("Start-up_and_Taxi_FUEL", fuel_str(float(fuel.get("taxi_l", 0.0))))
 
@@ -1146,8 +1164,6 @@ with tab4:
             type="primary",
         )
 
-        with st.expander("Debug: show detected field names"):
-            st.write(sorted(list(fieldset)))
-
     except Exception as e:
         st.error(f"PDF error: {e}")
+
