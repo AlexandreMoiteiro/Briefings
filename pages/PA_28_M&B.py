@@ -1,46 +1,47 @@
-# app.py — PA28 Archer III (Sevenair) — M&B + Weather + Performance + PDF
+# app.py — PA28 Archer III (Sevenair)
+# M&B + Weather + Performance (from charts in folder) + PDF fill + CG + Final PDF (SBS first page)
+#
+# Requisitos:
+#   pip install streamlit requests pytz pypdf reportlab pillow pymupdf numpy
+#
 # Execução:
-#   pip install streamlit requests pytz pypdf reportlab pymupdf pillow numpy
 #   streamlit run app.py
 #
-# Assets esperados (na mesma pasta):
-#   - RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf   (template M&B)
-#   - takeoff: to_ground_roll.jpg + to_ground_roll.json
-#   - landing: ldg_ground_roll.pdf + ldg_ground_roll.json
-#   - climb:   climb_perf.jpg + climb_perf.json
-#
-# Opcional (Fleet via Gist):
-#   - st.secrets["GITHUB_GIST_TOKEN"]
-#   - st.secrets["GITHUB_GIST_ID_PA28"]
+# Ficheiros na mesma pasta:
+#   RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf
+#   to_ground_roll.jpg          + to_ground_roll.json
+#   climb_perf.jpg              + climb_perf.json
+#   ldg_ground_roll.pdf         + ldg_ground_roll.json
+
+from __future__ import annotations
 
 import io
 import csv
 import json
+import math
 import unicodedata
 import datetime as dt
-from math import cos, sin, radians, sqrt, atan2, degrees
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pytz
 import requests
-import numpy as np
 import streamlit as st
 
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, BooleanObject
 
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.utils import ImageReader
 
 
-# =========================================================
+# =========================
 # App setup
-# =========================================================
+# =========================
 st.set_page_config(
     page_title="PA28 — M&B + Weather + Performance + PDF",
     layout="wide",
@@ -55,12 +56,10 @@ st.markdown(
       .chip{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef2f7;margin-left:8px;font-size:.85rem}
       .ok{color:#1d8533}.warn{color:#d8aa22}.bad{color:#c21c1c}
       .muted{color:#6b7280;font-size:.9rem}
-      .box{background:#f8fafc;border:1px solid #e5e7ec;border-radius:12px;padding:12px;border-radius:12px}
+      .box{background:#f8fafc;border:1px solid #e5e7ec;border-radius:12px;padding:12px}
       .tbl{border-collapse:collapse;width:100%}
       .tbl th{border-bottom:2px solid #cbd0d6;text-align:left;padding:6px}
       .tbl td{border-bottom:1px dashed #e5e7ec;padding:6px}
-
-      /* Dark mode readability */
       @media (prefers-color-scheme: dark) {
         .hdr{border-bottom:1px solid #374151;}
         .muted{color:#9ca3af;}
@@ -77,13 +76,56 @@ st.markdown(
 st.markdown('<div class="hdr">Piper PA28 Archer III — M&B + Weather + Performance + PDF</div>', unsafe_allow_html=True)
 
 
-# =========================================================
-# Helpers
-# =========================================================
+# =========================
+# Constants
+# =========================
+KG_TO_LB = 2.2046226218
+L_TO_USG = 1.0 / 3.785411784
+USG_TO_L = 3.785411784
+FT_TO_M = 0.3048
+
+# Fuel density (approx for 100LL): 6.0 lb/USG
+FUEL_LB_PER_USG = 6.0
+
+# Sheet maxima (as requested)
+FUEL_USABLE_USG = 48.0
+FUEL_USABLE_L = 182.0
+BAGGAGE_MAX_KG = 90.0
+BAGGAGE_MAX_LB = BAGGAGE_MAX_KG * KG_TO_LB
+
+# PA28 arms (inches aft of datum)
+ARM_FRONT = 80.5
+ARM_REAR = 118.1
+ARM_FUEL = 95.0
+ARM_BAGGAGE = 142.8
+
+# Taxi/runup allowance
+TAXI_ALLOW_LB = 8.0
+TAXI_ARM = 95.5
+
+# Max weights (POH)
+MTOW_LB = 2550.0
+MLW_LB = 2550.0
+
+# PDF template
+PDF_TEMPLATE_PATHS = ["RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"]
+
+# Raster / export defaults (fixed; no user clutter)
+SBS_DPI = 500
+LANDING_BG_ZOOM = 2.3  # fixed — no “Landing PDF zoom” control
+
+
+# =========================
+# Small helpers
+# =========================
 def ascii_safe(text):
     if not isinstance(text, str):
         return str(text)
     return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
 
 def fmt_hm(total_min: int) -> str:
@@ -95,13 +137,31 @@ def fmt_hm(total_min: int) -> str:
     return f"{h}h" if m == 0 else f"{h}h{m:02d}min"
 
 
-def clamp(v, lo, hi):
-    return max(lo, min(hi, v))
+def fmt_m_and_pct(dist_m: float, avail_m: float) -> str:
+    """
+    Para PDF: escreve em metros com percentagem de pista usada:
+      "410 (23%)"
+    """
+    dist_m = float(dist_m or 0.0)
+    avail_m = float(avail_m or 0.0)
+    if dist_m <= 0:
+        return ""
+    if avail_m > 0:
+        pct = int(round((dist_m / avail_m) * 100.0))
+        return f"{dist_m:.0f} ({pct}%)"
+    return f"{dist_m:.0f}"
 
 
-def _here(name: str) -> Optional[Path]:
-    p = Path(name)
-    return p if p.exists() else None
+# =========================
+# Aerodromes DB (OurAirports) + overrides
+# =========================
+OURAIRPORTS_AIRPORTS_CSV = "https://ourairports.com/data/airports.csv"
+OURAIRPORTS_RUNWAYS_CSV = "https://ourairports.com/data/runways.csv"
+
+ICAO_SET = sorted({
+    "LEBZ","LPBR","LPBG","LPCB","LPCO","LPEV","LEMG","LPSO","LEZL","LEVX","LPVR","LPVZ","LPCS",
+    "LPMT","LPST","LPBJ","LPFR","LPPM","LPPR"
+})
 
 
 def _to_float(x, default=None):
@@ -115,18 +175,7 @@ def _ft_to_m(ft):
     return float(ft) * 0.3048
 
 
-def _m_to_ft(m):
-    return float(m) / 0.3048
-
-
 def _rw_ident_to_qfu_deg(ident: str):
-    """
-    Best-effort heading from runway designator:
-      "21" -> 210
-      "03" -> 30
-      "16L" -> 160
-      "36" -> 360
-    """
     if not ident:
         return None
     ident = ident.strip().upper()
@@ -147,52 +196,6 @@ def _rw_ident_to_qfu_deg(ident: str):
     return 360.0 if q == 0 else float(q)
 
 
-# =========================================================
-# Constants / PA28 data
-# =========================================================
-KG_TO_LB = 2.2046226218
-L_TO_USG = 1.0 / 3.785411784
-USG_TO_L = 3.785411784
-
-FUEL_LB_PER_USG = 6.0
-
-FUEL_USABLE_USG = 48.0
-FUEL_USABLE_L = 182.0
-BAGGAGE_MAX_KG = 90.0
-BAGGAGE_MAX_LB = BAGGAGE_MAX_KG * KG_TO_LB
-
-ARM_FRONT = 80.5
-ARM_REAR = 118.1
-ARM_FUEL = 95.0
-ARM_BAGGAGE = 142.8
-
-TAXI_ALLOW_LB = 8.0
-TAXI_ARM = 95.5
-
-MTOW_LB = 2550.0
-MLW_LB = 2550.0
-
-PDF_TEMPLATE_PATHS = ["RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"]
-
-# Side-by-side (fixo como pediste)
-SBS_DPI = 500
-SBS_ALIGN = "height"
-SBS_GAP_PX = 0
-SBS_BG = (255, 255, 255)
-SBS_SHARPEN = True
-
-
-# =========================================================
-# OurAirports DB + overrides
-# =========================================================
-OURAIRPORTS_AIRPORTS_CSV = "https://ourairports.com/data/airports.csv"
-OURAIRPORTS_RUNWAYS_CSV = "https://ourairports.com/data/runways.csv"
-
-ICAO_SET = sorted({
-    "LEBZ","LPBR","LPBG","LPCB","LPCO","LPEV","LEMG","LPSO","LEZL","LEVX","LPVR","LPVZ","LPCS","LPMT",
-    "LPST","LPBJ","LPFR","LPPM","LPPR"
-})
-
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
 def load_ourairports_csvs():
     def fetch_csv(url):
@@ -205,8 +208,9 @@ def load_ourairports_csvs():
 
 def build_aerodromes_db(icaos):
     airports_rows, runways_rows = load_ourairports_csvs()
+
     a_by_ident = {a.get("ident"): a for a in airports_rows if a.get("ident")}
-    r_by_ident = {}
+    r_by_ident: Dict[str, List[dict]] = {}
     for r in runways_rows:
         ident = r.get("airport_ident")
         if ident:
@@ -247,8 +251,7 @@ def build_aerodromes_db(icaos):
 
         db[icao] = {"name": name, "lat": lat, "lon": lon, "elev_ft": elev_ft, "runways": runways}
 
-    # OVERRIDES
-    # LPSO: RWY03/21 headings 026/206, length 1800m
+    # Overrides (mantidos)
     if "LPSO" in db:
         db["LPSO"]["name"] = "Ponte de Sôr"
         db["LPSO"]["runways"] = [
@@ -256,7 +259,6 @@ def build_aerodromes_db(icaos):
             {"id": "21", "qfu": 206.0, "toda": 1800.0, "lda": 1800.0},
         ]
 
-    # LPEV: manter 01/19 e 07/25 (remover antigas tipo 04/18)
     if "LPEV" in db:
         db["LPEV"]["name"] = "Évora"
         keep = {"01","19","07","25"}
@@ -282,13 +284,14 @@ AERODROMES_DB = build_aerodromes_db(ICAO_SET)
 ICAO_OPTIONS = sorted(AERODROMES_DB.keys())
 
 
-# =========================================================
-# Wind/runway helpers
-# =========================================================
+# =========================
+# Wind / runway helpers
+# =========================
 def wind_components(qfu_deg, wind_dir_deg, wind_speed_kt):
+    # wind_dir is FROM
     diff = ((wind_dir_deg - qfu_deg + 180) % 360) - 180
-    hw = wind_speed_kt * cos(radians(diff))
-    cw = wind_speed_kt * sin(radians(diff))
+    hw = wind_speed_kt * math.cos(math.radians(diff))
+    cw = wind_speed_kt * math.sin(math.radians(diff))
     side = "R" if cw > 0 else ("L" if cw < 0 else "")
     return hw, abs(cw), side
 
@@ -313,9 +316,9 @@ def round_wind_dir_10(d):
     return 360 if v == 0 else v
 
 
-# =========================================================
+# =========================
 # Weather (Open-Meteo)
-# =========================================================
+# =========================
 OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -349,6 +352,7 @@ def om_point_forecast(lat, lon, start_date_iso, end_date_iso):
         "qnh":  h.get("pressure_msl", []) or [],
     }
 
+
 def om_hours(resp):
     out = []
     for i, t in enumerate(resp.get("time", []) or []):
@@ -356,18 +360,21 @@ def om_hours(resp):
         out.append((i, dtu))
     return out
 
+
 def _u_v_from_dirspd(dir_deg_from, spd_kt):
     spd_ms = float(spd_kt) * 0.514444
-    th = radians(float(dir_deg_from))
-    u = -spd_ms * sin(th)
-    v = -spd_ms * cos(th)
+    th = math.radians(float(dir_deg_from))
+    u = -spd_ms * math.sin(th)
+    v = -spd_ms * math.cos(th)
     return u, v
 
+
 def _dirspd_from_uv(u, v):
-    spd_ms = sqrt(u*u + v*v)
-    dir_deg = (degrees(atan2(u, v)) + 180.0) % 360.0  # FROM
+    spd_ms = math.sqrt(u*u + v*v)
+    dir_deg = (math.degrees(math.atan2(u, v)) + 180.0) % 360.0  # FROM
     spd_kt = spd_ms * 1.94384
     return dir_deg, spd_kt
+
 
 def om_mean_met_at(resp, idx, window=1):
     if idx is None:
@@ -405,57 +412,16 @@ def om_mean_met_at(resp, idx, window=1):
     }
 
 
-# =========================================================
-# Fleet via GitHub Gist (EW + Moment)
-# =========================================================
-GIST_FILE = "sevenair_pa28_fleet.json"
-
-def gist_headers(token):
-    return {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github+json",
-        "Content-Type": "application/json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-def gist_load(token, gist_id):
-    r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=gist_headers(token), timeout=20)
-    if r.status_code != 200:
-        return None, f"GitHub error {r.status_code}: {r.text}"
-    data = r.json()
-    files = data.get("files", {}) or {}
-    if GIST_FILE not in files or files[GIST_FILE].get("content") is None:
-        return None, f"Gist file '{GIST_FILE}' not found."
-    return json.loads(files[GIST_FILE]["content"]), None
-
-def parse_ew(reg_entry: dict):
-    ew = (
-        reg_entry.get("ew_lb")
-        or reg_entry.get("ew")
-        or reg_entry.get("empty_weight_lb")
-        or reg_entry.get("empty_weight")
-        or 0.0
-    )
-    mom = (
-        reg_entry.get("ew_moment_inlb")
-        or reg_entry.get("ew_moment")
-        or reg_entry.get("ewm")
-        or reg_entry.get("empty_moment_inlb")
-        or reg_entry.get("empty_moment")
-        or 0.0
-    )
-    return float(ew), float(mom)
-
-
-# =========================================================
-# PDF utils (fields, fill)
-# =========================================================
+# =========================
+# PDF utils (fill + NeedAppearances)
+# =========================
 def read_pdf_bytes(paths) -> bytes:
     for path_str in paths:
         p = Path(path_str)
         if p.exists():
             return p.read_bytes()
     raise FileNotFoundError(f"Template not found: {paths}")
+
 
 def get_field_names(template_bytes: bytes) -> set:
     names = set()
@@ -476,6 +442,7 @@ def get_field_names(template_bytes: bytes) -> set:
     except Exception:
         pass
     return names
+
 
 def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     reader = PdfReader(io.BytesIO(template_bytes))
@@ -500,9 +467,9 @@ def fill_pdf(template_bytes: bytes, fields: dict) -> bytes:
     return out.getvalue()
 
 
-# =========================================================
-# CG overlay (page 0) — anchors
-# =========================================================
+# =========================
+# CG overlay (page 0)
+# =========================
 CG_ANCHORS = {
     82: {"w0": 1200, "x0": 182, "y0": 72, "w1": 2050, "x1": 134, "y1": 245},
     83: {"w0": 1200, "x0": 199, "y0": 72, "w1": 2138, "x1": 155, "y1": 260},
@@ -518,6 +485,7 @@ CG_ANCHORS = {
     93: {"w0": 1200, "x0": 355, "y0": 72, "w1": 2550, "x1": 435, "y1": 344},
 }
 
+
 def xy_on_cg_line(cg_int: int, weight_lb: float):
     a = CG_ANCHORS[int(cg_int)]
     w0, x0, y0 = a["w0"], a["x0"], a["y0"]
@@ -530,6 +498,7 @@ def xy_on_cg_line(cg_int: int, weight_lb: float):
     y = y0 + t * (y1 - y0)
     return x, y
 
+
 def xy_from_cg_weight(cg_in: float, weight_lb: float):
     cg = float(cg_in)
     cg = clamp(cg, 82.0, 93.0)
@@ -541,6 +510,7 @@ def xy_from_cg_weight(cg_in: float, weight_lb: float):
     x1, y1 = xy_on_cg_line(hi, weight_lb)
     frac = (cg - lo) / (hi - lo)
     return (x0 + frac * (x1 - x0), y0 + frac * (y1 - y0))
+
 
 def draw_cg_overlay_on_page0(template_bytes: bytes, points):
     reader = PdfReader(io.BytesIO(template_bytes))
@@ -615,9 +585,99 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
     return out.getvalue()
 
 
-# =========================================================
-# Performance solver assets + math (takeoff/landing/climb)
-# =========================================================
+# =========================
+# “SBS image” page from filled PDF (2 pages side-by-side)
+# =========================
+def _preprocess_pdf_for_raster(pdf_bytes: bytes) -> bytes:
+    try:
+        with pymupdf.open(stream=pdf_bytes, filetype="pdf") as d:
+            changed = False
+            for page in d:
+                try:
+                    widgets = page.widgets()
+                    if widgets:
+                        for w in widgets:
+                            w.update()
+                            changed = True
+                except Exception:
+                    pass
+            if changed:
+                return d.tobytes(deflate=True, garbage=3)
+    except Exception:
+        pass
+    return pdf_bytes
+
+
+def _pixmap_to_pil(pix: pymupdf.Pixmap, bg=(255, 255, 255)) -> Image.Image:
+    if pix.alpha:
+        img = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
+        bg_img = Image.new("RGB", img.size, bg)
+        bg_img.paste(img, mask=img.split()[3])
+        return bg_img
+    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+
+def render_pdf_page(pdf_bytes: bytes, page_index: int, dpi: int, bg=(255, 255, 255)) -> Image.Image:
+    zoom = dpi / 72.0
+    mat = pymupdf.Matrix(zoom, zoom)
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+        if page_index >= doc.page_count:
+            raise IndexError("Page out of range")
+        page = doc.load_page(page_index)
+        pix = page.get_pixmap(matrix=mat, alpha=False, annots=True, colorspace=pymupdf.csRGB)
+        return _pixmap_to_pil(pix, bg=bg)
+
+
+def merge_side_by_side(img_left: Image.Image, img_right: Image.Image, bg=(255, 255, 255), gap_px: int = 0) -> Image.Image:
+    target = max(img_left.height, img_right.height)
+    if img_left.height != target:
+        w = int(round(img_left.width * (target / img_left.height)))
+        img_left = img_left.resize((w, target), Image.LANCZOS)
+    if img_right.height != target:
+        w = int(round(img_right.width * (target / img_right.height)))
+        img_right = img_right.resize((w, target), Image.LANCZOS)
+
+    W = img_left.width + img_right.width + gap_px
+    H = target
+    canvas_img = Image.new("RGB", (W, H), bg)
+    canvas_img.paste(img_left, (0, 0))
+    canvas_img.paste(img_right, (img_left.width + gap_px, 0))
+    return canvas_img
+
+
+def pdf_two_pages_side_by_side_image(pdf_bytes: bytes, dpi: int = SBS_DPI, bg=(255, 255, 255)) -> Image.Image:
+    pdf_bytes = _preprocess_pdf_for_raster(pdf_bytes)
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+        if doc.page_count < 1:
+            raise ValueError("PDF inválido (sem páginas).")
+        p1 = render_pdf_page(pdf_bytes, 0, dpi=dpi, bg=bg)
+        if doc.page_count >= 2:
+            p2 = render_pdf_page(pdf_bytes, 1, dpi=dpi, bg=bg)
+        else:
+            p2 = Image.new("RGB", p1.size, bg)
+    merged = merge_side_by_side(p1, p2, bg=bg, gap_px=0)
+    merged = merged.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=3))
+    return merged
+
+
+def images_to_pdf_bytes(pages: List[Image.Image]) -> bytes:
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf)
+
+    for img in pages:
+        w, h = img.size
+        c.setPageSize((w, h))
+        c.drawImage(ImageReader(img), 0, 0, width=w, height=h, mask="auto")
+        c.showPage()
+
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+
+# =========================
+# Performance assets + solvers (folder-only, no uploads)
+# =========================
 ASSETS = {
     "takeoff": {
         "title": "Takeoff Ground Roll",
@@ -625,8 +685,8 @@ ASSETS = {
         "json_default": "to_ground_roll.json",
         "bg_kind": "image",
         "page_default": 0,
-        "round_to": 5,
-        "label_font": 20,
+        "round_to": 5,     # ft
+        "label_font": 18,
     },
     "climb": {
         "title": "Climb Performance",
@@ -634,8 +694,8 @@ ASSETS = {
         "json_default": "climb_perf.json",
         "bg_kind": "image",
         "page_default": 0,
-        "round_to": 10,
-        "label_font": 20,
+        "round_to": 10,    # fpm
+        "label_font": 18,
     },
     "landing": {
         "title": "Landing Ground Roll",
@@ -643,39 +703,57 @@ ASSETS = {
         "json_default": "ldg_ground_roll.json",
         "bg_kind": "pdf",
         "page_default": 0,
-        "round_to": 5,
-        "label_font": 20,
+        "round_to": 5,    # ft
+        "label_font": 24,
     },
 }
 
-def load_json_asset(mode: str) -> Dict[str, Any]:
-    info = ASSETS[mode]
-    p = _here(info["json_default"])
-    if not p:
-        raise FileNotFoundError(f"Não encontrei {info['json_default']} na pasta.")
-    return json.loads(p.read_text(encoding="utf-8"))
+
+def _here(name: str) -> Optional[Path]:
+    p = Path(name)
+    if p.exists():
+        return p
+    if "__file__" in globals():
+        p2 = Path(__file__).resolve().parent / name
+        if p2.exists():
+            return p2
+    return None
+
 
 @st.cache_data(show_spinner=False)
 def render_pdf_to_image(pdf_bytes: bytes, page_index: int, zoom: float) -> Image.Image:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     page = doc.load_page(page_index)
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     doc.close()
     return img
 
+
+@st.cache_data(show_spinner=False)
+def load_json_asset(mode: str) -> Dict[str, Any]:
+    info = ASSETS[mode]
+    p = _here(info["json_default"])
+    if not p:
+        raise FileNotFoundError(f"Não encontrei {info['json_default']}")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+@st.cache_data(show_spinner=False)
 def load_background_asset(mode: str, page_index: int = 0, zoom: float = 2.3) -> Image.Image:
     info = ASSETS[mode]
     if info["bg_kind"] == "pdf":
         p = _here(info["bg_default"])
         if not p:
-            raise FileNotFoundError(f"Não encontrei {info['bg_default']} na pasta.")
-        return render_pdf_to_image(p.read_bytes(), page_index=page_index, zoom=zoom)
+            raise FileNotFoundError(f"Não encontrei {info['bg_default']}")
+        pdf_bytes = p.read_bytes()
+        return render_pdf_to_image(pdf_bytes, page_index=page_index, zoom=zoom)
 
     p = _here(info["bg_default"])
     if not p:
-        raise FileNotFoundError(f"Não encontrei {info['bg_default']} na pasta.")
+        raise FileNotFoundError(f"Não encontrei {info['bg_default']}")
     return Image.open(p).convert("RGB")
+
 
 def pt_xy(p: Any) -> Tuple[float, float]:
     if isinstance(p, dict):
@@ -683,6 +761,7 @@ def pt_xy(p: Any) -> Tuple[float, float]:
     if isinstance(p, (list, tuple)) and len(p) == 2:
         return float(p[0]), float(p[1])
     raise ValueError(f"Invalid point: {p}")
+
 
 def normalize_panel(panel_pts: Any) -> List[Dict[str, float]]:
     if not isinstance(panel_pts, list) or len(panel_pts) != 4:
@@ -693,6 +772,7 @@ def normalize_panel(panel_pts: Any) -> List[Dict[str, float]]:
         out.append({"x": x, "y": y})
     return out
 
+
 def normalize_panels(cap: Dict[str, Any]) -> Dict[str, List[Dict[str, float]]]:
     out = {}
     pc = cap.get("panel_corners", {})
@@ -702,6 +782,7 @@ def normalize_panels(cap: Dict[str, Any]) -> Dict[str, List[Dict[str, float]]]:
         out[k] = normalize_panel(pts)
     return out
 
+
 def fit_axis_value_from_ticks(ticks: List[Dict[str, float]], coord: str) -> Tuple[float, float]:
     xs = np.array([float(t[coord]) for t in ticks], dtype=float)
     vs = np.array([float(t["value"]) for t in ticks], dtype=float)
@@ -709,13 +790,16 @@ def fit_axis_value_from_ticks(ticks: List[Dict[str, float]], coord: str) -> Tupl
     a, b = np.linalg.lstsq(A, vs, rcond=None)[0]
     return float(a), float(b)
 
+
 def axis_value(a: float, b: float, coord_val: float) -> float:
     return a * coord_val + b
+
 
 def axis_coord_from_value(a: float, b: float, value: float) -> float:
     if abs(a) < 1e-12:
         raise ValueError("Axis fit degenerate (a ~ 0).")
     return (value - b) / a
+
 
 def line_y_at_x(seg: Dict[str, float], x: float) -> float:
     x1, y1, x2, y2 = map(float, (seg["x1"], seg["y1"], seg["x2"], seg["y2"]))
@@ -723,6 +807,7 @@ def line_y_at_x(seg: Dict[str, float], x: float) -> float:
         return y1
     t = (x - x1) / (x2 - x1)
     return y1 + t * (y2 - y1)
+
 
 def parse_pa_levels_ft(lines: Dict[str, List[Dict[str, float]]]) -> List[Tuple[float, str]]:
     out: List[Tuple[float, str]] = []
@@ -741,6 +826,7 @@ def parse_pa_levels_ft(lines: Dict[str, List[Dict[str, float]]]) -> List[Tuple[f
     out.sort(key=lambda t: t[0])
     return out
 
+
 def interp_between_levels(v: float, levels: List[Tuple[float, str]]) -> Tuple[Tuple[float, str], Tuple[float, str], float]:
     if not levels:
         raise ValueError("No PA levels available (all pa_* lines empty?).")
@@ -756,20 +842,18 @@ def interp_between_levels(v: float, levels: List[Tuple[float, str]]) -> Tuple[Tu
             return (a, ka), (b, kb), float(alpha)
     return levels[-1], levels[-1], 0.0
 
+
 def round_to_step(x: float, step: float) -> float:
     return step * round(x / step)
+
 
 def x_of_vertical_ref(seg: Dict[str, float]) -> float:
     return 0.5 * (float(seg["x1"]) + float(seg["x2"]))
 
-def interp_guides_y(
-    guides: List[Dict[str, float]],
-    x_ref: float,
-    y_ref: float,
-    x_target: float
-) -> Tuple[float, Dict[str, Any]]:
+
+def interp_guides_y(guides: List[Dict[str, float]], x_ref: float, y_ref: float, x_target: float) -> float:
     if not guides:
-        return y_ref, {"used": "none"}
+        return y_ref
 
     rows = []
     for g in guides:
@@ -780,9 +864,9 @@ def interp_guides_y(
     rows.sort(key=lambda t: t[0])
 
     if y_ref <= rows[0][0]:
-        return float(rows[0][1]), {"used": "clamp_low"}
+        return float(rows[0][1])
     if y_ref >= rows[-1][0]:
-        return float(rows[-1][1]), {"used": "clamp_high"}
+        return float(rows[-1][1])
 
     for i in range(len(rows) - 1):
         y0_ref, y0_tgt = rows[i]
@@ -791,9 +875,10 @@ def interp_guides_y(
             denom = (y1_ref - y0_ref)
             a = 0.0 if abs(denom) < 1e-12 else (y_ref - y0_ref) / denom
             y_tgt = (1 - a) * y0_tgt + a * y1_tgt
-            return float(y_tgt), {"used": "interp", "i0": i, "i1": i + 1, "alpha": float(a)}
+            return float(y_tgt)
 
-    return y_ref, {"used": "fallback"}
+    return y_ref
+
 
 def pick_guides(cap: Dict[str, Any], mode: str) -> Tuple[List[Dict[str, float]], List[Dict[str, float]]]:
     g = cap.get("guides", {}) or {}
@@ -805,14 +890,8 @@ def pick_guides(cap: Dict[str, Any], mode: str) -> Tuple[List[Dict[str, float]],
         return g.get("guides_weight", []) or [], g.get("guides_wind", []) or []
     return mid, rgt
 
-def solve_ground_roll(
-    cap: Dict[str, Any],
-    mode: str,
-    oat_c: float,
-    pa_ft: float,
-    weight_lb: float,
-    wind_kt: float
-) -> Tuple[float, List[Tuple[Tuple[float, float], Tuple[float, float]]], Dict[str, Any]]:
+
+def solve_ground_roll(cap: Dict[str, Any], mode: str, oat_c: float, pa_ft: float, weight_lb: float, headwind_kt: float) -> Tuple[float, List[Tuple[Tuple[float, float], Tuple[float, float]]]]:
     ticks = cap["axis_ticks"]
     lines = cap["lines"]
     panels = normalize_panels(cap)
@@ -821,7 +900,7 @@ def solve_ground_roll(
     ax_wt_a, ax_wt_b = fit_axis_value_from_ticks(ticks["weight_x100_lb"], "x")
     ax_wind_a, ax_wind_b = fit_axis_value_from_ticks(ticks["wind_kt"], "x")
 
-    out_axis_key = "takeoff_gr_ft" if mode == "takeoff" else "ground_roll_ft"
+    out_axis_key = "ground_roll_ft" if mode == "landing" else "takeoff_gr_ft"
     ax_out_a, ax_out_b = fit_axis_value_from_ticks(ticks[out_axis_key], "y")
 
     if not lines.get("weight_ref_line"):
@@ -843,10 +922,10 @@ def solve_ground_roll(
     x_wt = axis_coord_from_value(ax_wt_a, ax_wt_b, weight_lb / 100.0)
 
     g_mid, g_right = pick_guides(cap, mode=mode)
-    y_mid, dbg_mid = interp_guides_y(g_mid, x_ref=x_ref_mid, y_ref=y_entry, x_target=x_wt)
+    y_mid = interp_guides_y(g_mid, x_ref=x_ref_mid, y_ref=y_entry, x_target=x_wt)
 
-    x_wind = axis_coord_from_value(ax_wind_a, ax_wind_b, wind_kt)
-    y_out, dbg_right = interp_guides_y(g_right, x_ref=x_ref_right, y_ref=y_mid, x_target=x_wind)
+    x_wind = axis_coord_from_value(ax_wind_a, ax_wind_b, headwind_kt)
+    y_out = interp_guides_y(g_right, x_ref=x_ref_right, y_ref=y_mid, x_target=x_wind)
 
     out_val = axis_value(ax_out_a, ax_out_b, y_out)
 
@@ -868,14 +947,10 @@ def solve_ground_roll(
     x_right_edge = float(right_panel[1]["x"])
     segs.append(((x_wind, y_out), (x_right_edge, y_out)))
 
-    debug = {"guide_mid": dbg_mid, "guide_right": dbg_right}
-    return out_val, segs, debug
+    return out_val, segs
 
-def solve_climb(
-    cap: Dict[str, Any],
-    oat_c: float,
-    pa_ft: float
-) -> Tuple[float, List[Tuple[Tuple[float, float], Tuple[float, float]]], Dict[str, Any]]:
+
+def solve_climb(cap: Dict[str, Any], oat_c: float, pa_ft: float) -> Tuple[float, List[Tuple[Tuple[float, float], Tuple[float, float]]]]:
     ticks = cap["axis_ticks"]
     lines = cap["lines"]
     panels = normalize_panels(cap)
@@ -903,281 +978,147 @@ def solve_climb(
         ((x_oat, y_bottom), (x_oat, y)),
         ((x_oat, y), (x_right_edge, y)),
     ]
-    return roc, segs, {}
+
+    return roc, segs
 
 
-# =========================================================
-# Pretty perf drawing (badge clean)
-# =========================================================
-def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+# =========================
+# Nicer overlay drawing for performance charts
+# IMPORTANT: labels are FEET/FPM ONLY — NO PERCENTAGES ON CHARTS
+# =========================
+def load_font(size: int):
     try:
         return ImageFont.truetype("DejaVuSans.ttf", size=size)
     except Exception:
         return ImageFont.load_default()
 
-def text_bbox(draw: ImageDraw.ImageDraw, text: str, font) -> Tuple[int, int]:
-    try:
-        x0, y0, x1, y1 = draw.textbbox((0, 0), text, font=font)
-        return int(x1 - x0), int(y1 - y0)
-    except Exception:
-        return (8 * len(text), 14)
 
-def place_label_smart(draw, img_w, img_h, tip, text, font, pad=4, safe_margin=8):
-    tx, ty = int(tip[0]), int(tip[1])
-    tw, th = text_bbox(draw, text, font)
-    candidates = [
-        (10, -th - 10),
-        (-tw - 10, -th - 10),
-        (10, 10),
-        (-tw - 10, 10),
-        (-tw - 10, -th // 2),
-        (10, -th // 2),
-        (-tw // 2, -th - 12),
-        (-tw // 2, 12),
+def draw_arrow(draw: ImageDraw.ImageDraw, p1, p2, color=(255, 140, 0), w: int = 4):
+    draw.line([p1, p2], fill=color, width=w)
+    x1, y1 = p1
+    x2, y2 = p2
+    ang = math.atan2(y2 - y1, x2 - x1)
+    L = 14
+    a1 = ang + math.radians(150)
+    a2 = ang - math.radians(150)
+    h1 = (x2 + L * math.cos(a1), y2 + L * math.sin(a1))
+    h2 = (x2 + L * math.cos(a2), y2 + L * math.sin(a2))
+    draw.polygon([p2, h1, h2], fill=color)
+
+
+def draw_pill_label(img: Image.Image, tip_xy: Tuple[float, float], text: str, font_size: int = 18):
+    rgba = img.convert("RGBA")
+    overlay = Image.new("RGBA", rgba.size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(overlay)
+    font = load_font(font_size)
+
+    try:
+        x0, y0, x1, y1 = d.textbbox((0, 0), text, font=font)
+        tw, th = x1 - x0, y1 - y0
+    except Exception:
+        tw, th = 8 * len(text), font_size
+
+    tx, ty = int(tip_xy[0]), int(tip_xy[1])
+    pad_x, pad_y = 10, 6
+
+    cand = [
+        (tx + 14, ty - th - 18),
+        (tx - tw - 14, ty - th - 18),
+        (tx + 14, ty + 14),
+        (tx - tw - 14, ty + 14),
     ]
 
-    def ok(x, y):
-        rx0 = x - pad
-        ry0 = y - pad
-        rx1 = x + tw + pad
-        ry1 = y + th + pad
-        if rx0 < safe_margin or ry0 < safe_margin:
-            return False
-        if rx1 > img_w - safe_margin or ry1 > img_h - safe_margin:
-            return False
-        if rx1 > img_w - 30:
-            return False
-        return True
+    W, H = rgba.size
+    x, y = cand[0]
+    for cx, cy in cand:
+        rx0 = cx - pad_x
+        ry0 = cy - pad_y
+        rx1 = cx + tw + pad_x
+        ry1 = cy + th + pad_y
+        if 8 <= rx0 and 8 <= ry0 and rx1 <= W - 8 and ry1 <= H - 8 and rx1 <= W - 30:
+            x, y = cx, cy
+            break
 
-    for dx, dy in candidates:
-        x = tx + dx
-        y = ty + dy
-        if ok(x, y):
-            rect = (x - pad, y - pad, x + tw + pad, y + th + pad)
-            return (x, y), rect
+    rx0 = x - pad_x
+    ry0 = y - pad_y
+    rx1 = x + tw + pad_x
+    ry1 = y + th + pad_y
 
-    x = min(max(tx - tw - 10, safe_margin), img_w - tw - safe_margin - 30)
-    y = min(max(ty - th - 10, safe_margin), img_h - th - safe_margin)
-    rect = (x - pad, y - pad, x + tw + pad, y + th + pad)
-    return (x, y), rect
+    d.rounded_rectangle([rx0, ry0, rx1, ry1], radius=10, fill=(0, 0, 0, 150))
+    d.text((x, y), text, fill=(255, 255, 255, 255), font=font)
 
-def draw_path_clean(draw: ImageDraw.ImageDraw, segs, color=(255, 140, 0), width=4):
-    for p1, p2 in segs:
-        draw.line([p1, p2], fill=color, width=width)
-    if segs:
-        x, y = segs[-1][1]
-        draw.ellipse((x - 7, y - 7, x + 7, y + 7), fill=color, outline=(255, 255, 255), width=2)
+    out = Image.alpha_composite(rgba, overlay).convert("RGB")
+    return out
 
-def draw_badge(img: Image.Image, xy: Tuple[int, int], text: str, font) -> Image.Image:
-    base = img.convert("RGBA")
-    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(overlay)
 
-    pad_x, pad_y = 12, 6
-    tw, th = text_bbox(d, text, font)
-    x, y = xy
-    rect = [x - pad_x, y - pad_y, x + tw + pad_x, y + th + pad_y]
+def draw_chart_with_path(
+    base: Image.Image,
+    path_segs: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    title: str,
+    label_text: str,
+    label_tip: Tuple[float, float],
+    title_font_size: int = 22,
+    label_font_size: int = 18,
+) -> Image.Image:
+    img = base.copy().convert("RGB")
+    d = ImageDraw.Draw(img)
 
+    for p1, p2 in path_segs:
+        draw_arrow(d, p1, p2, color=(255, 140, 0), w=5)
+
+    font = load_font(title_font_size)
+    pad = 8
     try:
-        d.rounded_rectangle(rect, radius=14, fill=(30, 41, 59, 210))
+        x0, y0, x1, y1 = d.textbbox((0, 0), title, font=font)
+        tw, th = x1 - x0, y1 - y0
     except Exception:
-        d.rectangle(rect, fill=(30, 41, 59, 210))
+        tw, th = 10 * len(title), title_font_size
 
-    d.text((x + 1, y + 1), text, font=font, fill=(0, 0, 0, 160))
-    d.text((x, y), text, font=font, fill=(255, 255, 255))
+    d.rectangle([8, 8, 8 + tw + 2*pad, 8 + th + 2*pad], fill=(0, 0, 0))
+    d.text((8 + pad, 8 + pad), title, fill=(255, 255, 255), font=font)
 
-    return Image.alpha_composite(base, overlay).convert("RGB")
-
-def make_pretty_perf_image(bg: Image.Image, path, value_text: str, title: str, label_font_size: int = 20) -> Image.Image:
-    img = bg.copy()
-    d = ImageDraw.Draw(img)
-
-    if path:
-        draw_path_clean(d, path)
-        tip = path[-1][1]
-        font = load_font(label_font_size)
-        pos, _ = place_label_smart(d, img.size[0], img.size[1], tip, value_text, font)
-        img = draw_badge(img, pos, value_text, font)
-
-    title_font = load_font(22)
-    d = ImageDraw.Draw(img)
-    d.text((18, 14), title, fill=(20, 20, 20), font=title_font)
+    # label is FEET or FPM only (no %)
+    img = draw_pill_label(img, label_tip, label_text, font_size=label_font_size)
     return img
 
 
-# =========================================================
-# 4-up pages for performance (order: TO -> CLIMB -> LDG)
-# =========================================================
-def build_perf_4up_page(images_by_role: List[Tuple[str, Image.Image]], title: str) -> bytes:
-    W, H = landscape(A4)
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=(W, H))
+def composite_2x2(charts: List[Image.Image], page_title: str) -> Image.Image:
+    assert len(charts) == 4
+    w = min(im.width for im in charts)
+    h = min(im.height for im in charts)
+    charts2 = [im.resize((w, h), Image.LANCZOS) if im.size != (w, h) else im for im in charts]
 
-    margin = 28
-    gap = 14
-    header_h = 30
-    cell_w = (W - 2 * margin - gap) / 2
-    cell_h = (H - 2 * margin - gap - header_h) / 2
+    margin = 30
+    gap = 20
+    title_h = 70
 
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(margin, H - margin, title)
+    W = margin*2 + 2*w + gap
+    H = margin*2 + title_h + 2*h + gap
 
-    top_y = H - margin - header_h
+    page = Image.new("RGB", (W, H), (255, 255, 255))
+    d = ImageDraw.Draw(page)
+
+    font = load_font(32)
+    d.text((margin, margin), page_title, fill=(0, 0, 0), font=font)
+
+    x0 = margin
+    y0 = margin + title_h
     positions = [
-        (margin, top_y - cell_h),
-        (margin + cell_w + gap, top_y - cell_h),
-        (margin, top_y - 2 * cell_h - gap),
-        (margin + cell_w + gap, top_y - 2 * cell_h - gap),
+        (x0, y0),
+        (x0 + w + gap, y0),
+        (x0, y0 + h + gap),
+        (x0 + w + gap, y0 + h + gap),
     ]
+    for im, (x, y) in zip(charts2, positions):
+        page.paste(im, (x, y))
+        d.rectangle([x, y, x+w, y+h], outline=(0, 0, 0), width=2)
 
-    for (label, img), (x, y) in zip(images_by_role, positions):
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(x, y + cell_h - 14, label)
-
-        iw, ih = img.size
-        scale = min(cell_w / iw, (cell_h - 20) / ih)
-
-        dw, dh = iw * scale, ih * scale
-        dx = x + (cell_w - dw) / 2
-        dy = y + (cell_h - 22 - dh) / 2
-
-        c.drawImage(ImageReader(img), dx, dy, width=dw, height=dh, preserveAspectRatio=True, mask="auto")
-        c.setLineWidth(0.6)
-        c.rect(x, y, cell_w, cell_h)
-
-    c.showPage()
-    c.save()
-    return buf.getvalue()
-
-def append_perf_pages(base_pdf_bytes: bytes, perf: dict) -> bytes:
-    reader = PdfReader(io.BytesIO(base_pdf_bytes))
-    writer = PdfWriter()
-    for p in reader.pages:
-        writer.add_page(p)
-
-    order = ["DEPARTURE", "ARRIVAL", "ALTERNATE_1", "ALTERNATE_2"]
-
-    def role_label(role):
-        info = perf.get(role, {})
-        return info.get("inputs", {}).get("label", role)
-
-    pages = [
-        ("TAKEOFF — Distance Required", "takeoff"),
-        ("CLIMB — Rate of Climb", "climb"),
-        ("LANDING — Distance Required", "landing"),
-    ]
-
-    for title, key in pages:
-        imgs = []
-        for r in order:
-            if r in perf and perf[r].get("imgs", {}).get(key) is not None:
-                imgs.append((role_label(r), perf[r]["imgs"][key]))
-        if len(imgs) == 4:
-            page_pdf = build_perf_4up_page(imgs, title)
-            p = PdfReader(io.BytesIO(page_pdf)).pages[0]
-            writer.add_page(p)
-
-    out = io.BytesIO()
-    writer.write(out)
-    return out.getvalue()
+    return page
 
 
-# =========================================================
-# Side-by-side (MB PDF -> image -> single-page PDF)
-# =========================================================
-def _pixmap_to_pil(pix: fitz.Pixmap, bg=(255, 255, 255)) -> Image.Image:
-    if pix.alpha:
-        img = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
-        bg_img = Image.new("RGB", img.size, bg)
-        bg_img.paste(img, mask=img.split()[3])
-        return bg_img
-    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-def _preprocess_pdf_for_raster(pdf_bytes: bytes) -> bytes:
-    try:
-        with fitz.open(stream=pdf_bytes, filetype="pdf") as d:
-            changed = False
-            for page in d:
-                try:
-                    widgets = page.widgets()
-                    if widgets:
-                        for w in widgets:
-                            w.update()
-                            changed = True
-                except Exception:
-                    pass
-            if changed:
-                return d.tobytes(deflate=True, garbage=3)
-    except Exception:
-        pass
-    return pdf_bytes
-
-def _render_page_rgb(page: fitz.Page, dpi: int, bg=(255, 255, 255)) -> Image.Image:
-    zoom = dpi / 72.0
-    mat = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=mat, alpha=False, annots=True, colorspace=fitz.csRGB)
-    return _pixmap_to_pil(pix, bg=bg)
-
-def _merge_side_by_side(img_left: Image.Image, img_right: Image.Image, align_by="height", gap_px=0, bg=(255,255,255)) -> Image.Image:
-    if align_by == "width":
-        target = max(img_left.width, img_right.width)
-        if img_left.width != target:
-            h = int(round(img_left.height * (target / img_left.width)))
-            img_left = img_left.resize((target, h), Image.LANCZOS)
-        if img_right.width != target:
-            h = int(round(img_right.height * (target / img_right.width)))
-            img_right = img_right.resize((target, h), Image.LANCZOS)
-        H = max(img_left.height, img_right.height)
-        W = target * 2 + gap_px
-        canvas_img = Image.new("RGB", (W, H), bg)
-        canvas_img.paste(img_left, (0, (H - img_left.height) // 2))
-        canvas_img.paste(img_right, (target + gap_px, (H - img_right.height) // 2))
-        return canvas_img
-
-    target = max(img_left.height, img_right.height)
-    if img_left.height != target:
-        w = int(round(img_left.width * (target / img_left.height)))
-        img_left = img_left.resize((w, target), Image.LANCZOS)
-    if img_right.height != target:
-        w = int(round(img_right.width * (target / img_right.height)))
-        img_right = img_right.resize((w, target), Image.LANCZOS)
-    W = img_left.width + img_right.width + gap_px
-    H = target
-    canvas_img = Image.new("RGB", (W, H), bg)
-    canvas_img.paste(img_left, (0, 0))
-    canvas_img.paste(img_right, (img_left.width + gap_px, 0))
-    return canvas_img
-
-def mb_pdf_to_side_by_side_image(pdf_bytes: bytes, dpi: int = 300, align_by="height", gap_px=0, bg=(255,255,255), sharpen=True) -> Image.Image:
-    pdf_bytes = _preprocess_pdf_for_raster(pdf_bytes)
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-        if doc.page_count < 1:
-            raise ValueError("PDF inválido (sem páginas).")
-        i1 = _render_page_rgb(doc.load_page(0), dpi, bg)
-        if doc.page_count >= 2:
-            i2 = _render_page_rgb(doc.load_page(1), dpi, bg)
-        else:
-            i2 = Image.new("RGB", i1.size, bg)
-        merged = _merge_side_by_side(i1, i2, align_by=align_by, gap_px=gap_px, bg=bg)
-        if sharpen:
-            merged = merged.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=3))
-        return merged
-
-def image_to_single_page_pdf(img: Image.Image, dpi: int = 300) -> bytes:
-    w_px, h_px = img.size
-    w_pt = (w_px / dpi) * 72.0
-    h_pt = (h_px / dpi) * 72.0
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=(w_pt, h_pt))
-    c.drawImage(ImageReader(img), 0, 0, width=w_pt, height=h_pt, preserveAspectRatio=True, mask="auto")
-    c.showPage()
-    c.save()
-    return buf.getvalue()
-
-
-# =========================================================
-# Session defaults (legs)
-# =========================================================
+# =========================
+# Session defaults
+# =========================
 DEFAULT_LEGS = [
     {"role": "DEPARTURE",   "icao": "LPSO"},
     {"role": "ARRIVAL",     "icao": "LPSO"},
@@ -1185,10 +1126,8 @@ DEFAULT_LEGS = [
     {"role": "ALTERNATE_2", "icao": "LPCB"},
 ]
 
-if "legs" not in st.session_state:
-    st.session_state.legs = [dict(x) for x in DEFAULT_LEGS]
 
-def sync_with_legs():
+def sync_lists():
     n = len(st.session_state.legs)
     if "met" not in st.session_state or not isinstance(st.session_state.met, list):
         st.session_state.met = [None] * n
@@ -1196,12 +1135,16 @@ def sync_with_legs():
         old = st.session_state.met
         st.session_state.met = (old + [None] * n)[:n]
 
-sync_with_legs()
+    if "perf" not in st.session_state or not isinstance(st.session_state.perf, list):
+        st.session_state.perf = [None] * n
+    elif len(st.session_state.perf) != n:
+        old = st.session_state.perf
+        st.session_state.perf = (old + [None] * n)[:n]
 
-if "fleet" not in st.session_state:
-    st.session_state.fleet = {}
-if "fleet_loaded" not in st.session_state:
-    st.session_state.fleet_loaded = False
+
+if "legs" not in st.session_state:
+    st.session_state.legs = [dict(x) for x in DEFAULT_LEGS]
+sync_lists()
 
 if "flight_date" not in st.session_state:
     st.session_state.flight_date = dt.datetime.now(pytz.timezone("Europe/Lisbon")).date()
@@ -1211,139 +1154,96 @@ if "dep_time_utc" not in st.session_state:
 if "arr_time_utc" not in st.session_state:
     st.session_state.arr_time_utc = (dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=2)).time()
 
-if "perf" not in st.session_state:
-    st.session_state.perf = {}  # results per leg
+
+# =========================
+# UI tabs
+# =========================
+tab1, tab2, tab3, tabP, tab4 = st.tabs([
+    "1) Flight",
+    "2) Aerodromes & Weather",
+    "3) Weight & Fuel",
+    "4) Performance",
+    "5) PDF",
+])
 
 
-# =========================================================
-# Sidebar (fleet)
-# =========================================================
-with st.sidebar:
-    st.subheader("🛩️ Fleet")
-    st.caption("Loads EW & EW Moment from GitHub Gist (optional).")
-    token = st.secrets.get("GITHUB_GIST_TOKEN", "")
-    gist_id = st.secrets.get("GITHUB_GIST_ID_PA28", "")
-
-    if st.button("Load fleet from Gist"):
-        if not token or not gist_id:
-            st.error("Missing secrets: GITHUB_GIST_TOKEN and/or GITHUB_GIST_ID_PA28")
-        else:
-            data, err = gist_load(token, gist_id)
-            if err:
-                st.error(err)
-            else:
-                st.session_state.fleet = data or {}
-                st.session_state.fleet_loaded = True
-                st.success(f"Loaded {len(st.session_state.fleet)} aircraft.")
-
-    if not st.session_state.fleet_loaded and token and gist_id:
-        data, err = gist_load(token, gist_id)
-        if data is not None:
-            st.session_state.fleet = data or {}
-            st.session_state.fleet_loaded = True
-
-
-# =========================================================
-# Tabs
-# =========================================================
-tab1, tab2, tab3, tabP, tab4 = st.tabs(
-    ["1) Flight", "2) Aerodromes & Weather", "3) Weight & Fuel", "4) Performance", "5) PDF"]
-)
-
-
-# =========================================================
+# =========================
 # 1) Flight
-# =========================================================
+# =========================
 with tab1:
     c1, c2, c3 = st.columns([0.40, 0.30, 0.30])
     with c1:
         st.markdown("#### Date & Aircraft")
         st.session_state.flight_date = st.date_input("Flight date (Europe/Lisbon)", value=st.session_state.flight_date)
-
-        regs = sorted(st.session_state.fleet.keys()) if st.session_state.fleet else ["(load fleet in sidebar)"]
-        reg = st.selectbox("Aircraft Reg.", regs, index=0)
-        st.session_state["reg"] = reg
-
-        if reg in st.session_state.fleet:
-            ew_lb, ew_mom = parse_ew(st.session_state.fleet[reg])
-            ew_kg = ew_lb / KG_TO_LB
-            ew_cg = (ew_mom / ew_lb) if ew_lb > 0 else 0.0
-            st.markdown(
-                f"<div class='box'><b>Empty Weight</b>: {ew_lb:.0f} lb ({ew_kg:.0f} kg)<br>"
-                f"<b>Empty Moment</b>: {ew_mom:.0f} in-lb<br>"
-                f"<b>Empty CG</b>: {ew_cg:.1f} in</div>",
-                unsafe_allow_html=True
-            )
-        else:
-            st.info("Load fleet from Gist to get EW & moment.")
+        reg = st.text_input("Aircraft Reg.", value=st.session_state.get("reg", ""))
+        st.session_state["reg"] = reg.strip()
+        st.session_state["mission_no"] = st.text_input("Mission/Ref (optional)", value=st.session_state.get("mission_no", ""))
 
     with c2:
         st.markdown("#### Times (UTC)")
         st.session_state.dep_time_utc = st.time_input("Departure time (UTC)", value=st.session_state.dep_time_utc, step=3600)
         st.session_state.arr_time_utc = st.time_input("Arrival time (UTC)", value=st.session_state.arr_time_utc, step=3600)
-        st.markdown("<div class='muted'>Alternates use Arrival + 1 hour.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='muted'>Alternates usam Arrival + 1 hour.</div>", unsafe_allow_html=True)
 
     with c3:
         st.markdown("#### Notes")
-        st.session_state["mission_no"] = st.text_input("Mission/Ref (optional)", value=st.session_state.get("mission_no", ""))
+        st.write("—")
 
 
-# =========================================================
+# =========================
 # 2) Aerodromes & Weather
-# =========================================================
+# =========================
 with tab2:
     st.markdown("#### Aerodromes (4 legs) + model weather (vector-mean wind)")
-    colA, colB = st.columns([0.62, 0.38])
 
-    with colB:
-        if st.button("Fetch weather for all legs", type="primary"):
-            date_iso = st.session_state.flight_date.strftime("%Y-%m-%d")
+    if st.button("Fetch weather for all legs", type="primary"):
+        date_iso = st.session_state.flight_date.strftime("%Y-%m-%d")
 
-            dep_target = dt.datetime.combine(st.session_state.flight_date, st.session_state.dep_time_utc).replace(tzinfo=dt.timezone.utc)
-            arr_target = dt.datetime.combine(st.session_state.flight_date, st.session_state.arr_time_utc).replace(tzinfo=dt.timezone.utc)
-            alt_target = arr_target + dt.timedelta(hours=1)
-            targets = [dep_target, arr_target, alt_target, alt_target]
+        dep_target = dt.datetime.combine(st.session_state.flight_date, st.session_state.dep_time_utc).replace(tzinfo=dt.timezone.utc)
+        arr_target = dt.datetime.combine(st.session_state.flight_date, st.session_state.arr_time_utc).replace(tzinfo=dt.timezone.utc)
+        alt_target = arr_target + dt.timedelta(hours=1)
+        targets = [dep_target, arr_target, alt_target, alt_target]
 
-            ok, err = 0, 0
-            for i, leg in enumerate(st.session_state.legs):
-                icao = leg["icao"]
-                ad = AERODROMES_DB.get(icao)
-                if not ad:
-                    st.error(f"{leg['role']} {icao}: aerodrome not in DB")
-                    err += 1
-                    continue
+        ok, err = 0, 0
+        for i, leg in enumerate(st.session_state.legs):
+            icao = leg["icao"]
+            ad = AERODROMES_DB.get(icao)
+            if not ad:
+                st.error(f"{leg['role']} {icao}: aerodrome not in DB")
+                err += 1
+                continue
 
-                resp = om_point_forecast(ad["lat"], ad["lon"], date_iso, date_iso)
-                if "error" in resp:
-                    st.error(f"{leg['role']} {icao}: weather error: {resp.get('error')} {resp.get('detail','')}")
-                    err += 1
-                    continue
+            resp = om_point_forecast(ad["lat"], ad["lon"], date_iso, date_iso)
+            if "error" in resp:
+                st.error(f"{leg['role']} {icao}: weather error: {resp.get('error')} {resp.get('detail','')}")
+                err += 1
+                continue
 
-                hours = om_hours(resp)
-                if not hours:
-                    st.error(f"{leg['role']} {icao}: no hours in model response")
-                    err += 1
-                    continue
+            hours = om_hours(resp)
+            if not hours:
+                st.error(f"{leg['role']} {icao}: no hours in model response")
+                err += 1
+                continue
 
-                target = targets[i]
-                idx, tsel = min(hours, key=lambda h: abs(h[1] - target))
-                met = om_mean_met_at(resp, idx, window=1)
-                if not met:
-                    st.error(f"{leg['role']} {icao}: could not compute mean MET")
-                    err += 1
-                    continue
+            target = targets[i]
+            idx, tsel = min(hours, key=lambda h: abs(h[1] - target))
+            met = om_mean_met_at(resp, idx, window=1)
+            if not met:
+                st.error(f"{leg['role']} {icao}: could not compute mean MET")
+                err += 1
+                continue
 
-                met["label"] = tsel.strftime("%Y-%m-%d %H:00Z")
-                met["target"] = target.strftime("%Y-%m-%d %H:%MZ")
-                st.session_state.met[i] = met
-                ok += 1
+            met["label"] = tsel.strftime("%Y-%m-%d %H:00Z")
+            met["target"] = target.strftime("%Y-%m-%d %H:%MZ")
+            st.session_state.met[i] = met
+            ok += 1
 
-            if ok and not err:
-                st.success(f"Weather updated for all legs ({ok}/4).")
-            elif ok:
-                st.warning(f"Weather updated for {ok} leg(s); {err} with errors.")
-            else:
-                st.error("No legs updated.")
+        if ok and not err:
+            st.success(f"Weather updated for all legs ({ok}/4).")
+        elif ok:
+            st.warning(f"Weather updated for {ok} leg(s); {err} with errors.")
+        else:
+            st.error("No legs updated.")
 
     for i, leg in enumerate(st.session_state.legs):
         role = leg["role"]
@@ -1377,23 +1277,26 @@ with tab2:
                 st.markdown(
                     f"<div class='box'><b>Auto RWY</b>: {rw['id']} "
                     f"<span class='chip'>QFU {rw['qfu']:.0f}°</span><br>"
+                    f"HW {best['hw']:.0f} kt · XW {best['side']} {best['xw']:.0f} kt<br>"
                     f"TODA {rw['toda']:.0f} m · LDA {rw['lda']:.0f} m</div>",
                     unsafe_allow_html=True,
                 )
 
 
-# =========================================================
+# =========================
 # 3) Weight & Fuel
-# =========================================================
+# =========================
 with tab3:
     st.markdown("#### Weight & Balance (inputs in kg / L)")
-
-    reg = st.session_state.get("reg", "")
-    fleet_ok = reg in st.session_state.fleet
 
     c1, c2 = st.columns([0.52, 0.48])
 
     with c1:
+        ew_lb = st.number_input("Empty Weight (lb)", min_value=0.0, value=float(st.session_state.get("ew_lb", 1450.0)), step=1.0)
+        ew_mom = st.number_input("Empty Moment (in-lb)", min_value=0.0, value=float(st.session_state.get("ew_mom", 120000.0)), step=10.0)
+        st.session_state["ew_lb"] = ew_lb
+        st.session_state["ew_mom"] = ew_mom
+
         student_kg = st.number_input("Student (kg)", min_value=0.0, value=50.0, step=0.5)
         instructor_kg = st.number_input("Instructor (kg)", min_value=0.0, value=80.0, step=0.5)
         rear_pax_kg = st.number_input("Rear passengers total (kg)", min_value=0.0, value=0.0, step=0.5)
@@ -1411,7 +1314,6 @@ with tab3:
         enrt_h = st.number_input("(3) Enroute (h)", min_value=0, value=1, step=1)
         enrt_min = st.number_input("(3) Enroute (min)", min_value=0, value=0, step=5)
         desc_min = st.number_input("(4) Descent (min)", min_value=0, value=10, step=1)
-
         alt_min = st.number_input("(7) Alternate (min)", min_value=0, value=60, step=5)
         reserve_min = 45
 
@@ -1441,7 +1343,6 @@ with tab3:
     total_ramp_l = round(req_ramp_l + extra_l, 1)
     total_ramp_min = req_ramp_min + extra_min
 
-    # Convert inputs to lb / USG
     front_lb = (student_kg + instructor_kg) * KG_TO_LB
     rear_lb = rear_pax_kg * KG_TO_LB
     bag_lb = baggage_kg * KG_TO_LB
@@ -1451,12 +1352,7 @@ with tab3:
         fuel_usg = FUEL_USABLE_USG
     fuel_lb = fuel_usg * FUEL_LB_PER_USG
 
-    if fleet_ok:
-        ew_lb, ew_mom = parse_ew(st.session_state.fleet[reg])
-    else:
-        ew_lb, ew_mom = 0.0, 0.0
-
-    ew_cg = (ew_mom / ew_lb) if ew_lb > 0 else 0.0
+    ew_cg = (ew_mom / ew_lb) if ew_lb > 0 else 82.0
 
     mom_front = front_lb * ARM_FRONT
     mom_rear = rear_lb * ARM_REAR
@@ -1502,8 +1398,34 @@ with tab3:
             unsafe_allow_html=True
         )
 
+        st.markdown("#### Fuel planning (for PDF)")
+        rows = [
+            ("Start-up & Taxi", taxi_min, taxi_l),
+            ("Climb", climb_min, climb_l),
+            ("Enroute", enrt_min_eff, enrt_l),
+            ("Descent", desc_min, desc_l),
+            ("Trip Fuel (2+3+4)", trip_min, trip_l),
+            ("Contingency 5%", cont_min, cont_l),
+            ("Alternate", alt_min, alt_l),
+            ("Reserve 45 min", reserve_min, reserve_l),
+            ("Required Ramp", req_ramp_min, req_ramp_l),
+            ("Extra", extra_min, extra_l),
+            ("Total Ramp", total_ramp_min, total_ramp_l),
+            ("Fuel loaded", 0, fuel_l),
+        ]
+        html = ["<table class='tbl'><tr><th>Item</th><th>Time</th><th>Fuel</th></tr>"]
+        for name, mins, liters in rows:
+            if name == "Fuel loaded" and abs(liters - FUEL_USABLE_L) < 0.5:
+                usg = FUEL_USABLE_USG
+            else:
+                usg = liters * L_TO_USG
+            t = fmt_hm(mins) if mins else "—"
+            html.append(f"<tr><td>{name}</td><td>{t}</td><td>{usg:.1f} USG ({liters:.1f} L)</td></tr>")
+        html.append("</table>")
+        st.markdown("".join(html), unsafe_allow_html=True)
+
     st.session_state["_wb"] = {
-        "ew_lb": ew_lb, "ew_mom": ew_mom,
+        "ew_lb": ew_lb, "ew_mom": ew_mom, "ew_cg": ew_cg,
         "front_lb": front_lb, "rear_lb": rear_lb, "bag_lb": bag_lb, "fuel_lb": fuel_lb,
         "ramp_w": ramp_w, "ramp_m": ramp_m, "ramp_cg": ramp_cg,
         "takeoff_w": takeoff_w, "takeoff_m": takeoff_m, "takeoff_cg": takeoff_cg,
@@ -1527,400 +1449,387 @@ with tab3:
     }
 
 
-# =========================================================
-# 4) Performance (no uploads — uses assets in folder)
-# =========================================================
-def pa_da(elev_ft, qnh_hpa, oat_c):
-    pa_ft = float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
-    isa = 15.0 - 2.0 * (float(elev_ft) / 1000.0)
-    da_ft = pa_ft + 120.0 * (float(oat_c) - isa)
-    return pa_ft, da_ft
-
-def perf_inputs_for_leg(role, icao, met, rw, ad, wb):
-    pa_ft, da_ft = pa_da(ad["elev_ft"], met["qnh_hpa"], met["temp_c"])
-    hw, xw, side = wind_components(rw["qfu"], met["wind_dir"], met["wind_kt"])
-    headwind = max(0.0, float(hw))  # clamp tailwind
-    return {
-        "oat_c": float(met["temp_c"]),
-        "pa_ft": float(pa_ft),
-        "da_ft": float(da_ft),
-        "headwind_kt": float(headwind),
-        "crosswind_kt": float(xw),
-        "takeoff_w_lb": float(wb["takeoff_w"]),
-        "landing_w_lb": float(wb["landing_w"]),
-        "runway_id": rw["id"],
-        "runway_qfu": float(rw["qfu"]),
-        "toda_m": float(rw["toda"]),
-        "lda_m": float(rw["lda"]),
-        "label": f"{icao} {role.replace('_',' ').title()}",
-    }
-
-def fmt_m_and_pct(req_m: float, avail_m: float) -> str:
-    req_m = max(0.0, float(req_m))
-    avail_m = max(0.0, float(avail_m))
-    pct = (req_m / avail_m * 100.0) if avail_m > 1e-6 else 0.0
-    return f"{req_m:.0f} m ({pct:.0f}%)"
-
+# =========================
+# 4) Performance (Takeoff → Climb → Landing)
+# =========================
 with tabP:
-    st.markdown("#### Performance (Takeoff → Climb → Landing) — auto from legs + weather + W&B")
+    st.markdown("#### Performance (Takeoff → Climb → Landing) — usa assets da pasta")
 
     c1, c2, c3 = st.columns([0.22, 0.28, 0.50])
     with c1:
         compute_perf = st.button("Compute performance for all legs", type="primary")
     with c2:
-        preview_imgs = st.checkbox("Show preview images", value=True)
+        show_previews = st.checkbox("Show preview charts", value=True)
     with c3:
-        st.caption("Uses assets from folder (no uploads). Landing chart zoom fixed.")
-
-    if compute_perf:
-        wb = st.session_state.get("_wb", None)
-        if not wb or wb.get("takeoff_w", 0) <= 0:
-            st.error("W&B not ready. Go to tab 'Weight & Fuel' first.")
-        else:
-            try:
-                cap_to = load_json_asset("takeoff")
-                cap_clb = load_json_asset("climb")
-                cap_ldg = load_json_asset("landing")
-
-                bg_to = load_background_asset("takeoff", page_index=0, zoom=1.0)
-                bg_clb = load_background_asset("climb", page_index=0, zoom=1.0)
-                bg_ldg = load_background_asset("landing", page_index=0, zoom=2.3)
-
-                perf = {}
-                for i, leg in enumerate(st.session_state.legs):
-                    role = leg["role"]
-                    icao = leg["icao"]
-                    ad = AERODROMES_DB.get(icao)
-                    if not ad:
-                        continue
-                    met = st.session_state.met[i] or {"wind_dir":240,"wind_kt":8,"temp_c":15,"qnh_hpa":1013}
-                    best = choose_best_runway_by_wind(ad, met["wind_dir"], met["wind_kt"])
-                    if not best:
-                        continue
-                    rw = best["rw"]
-                    inp = perf_inputs_for_leg(role, icao, met, rw, ad, wb)
-
-                    # Takeoff GR (ft -> m) -> TODR
-                    raw_to, segs_to, _ = solve_ground_roll(
-                        cap_to, mode="takeoff",
-                        oat_c=inp["oat_c"], pa_ft=inp["pa_ft"],
-                        weight_lb=inp["takeoff_w_lb"], wind_kt=inp["headwind_kt"]
-                    )
-                    to_ft = round_to_step(raw_to, ASSETS["takeoff"]["round_to"])
-                    to_m = _ft_to_m(to_ft)
-
-                    # Climb ROC
-                    raw_roc, segs_roc, _ = solve_climb(cap_clb, oat_c=inp["oat_c"], pa_ft=inp["pa_ft"])
-                    roc_fpm = round_to_step(raw_roc, ASSETS["climb"]["round_to"])
-
-                    # Landing GR (ft -> m) -> LDR
-                    raw_ldg, segs_ldg, _ = solve_ground_roll(
-                        cap_ldg, mode="landing",
-                        oat_c=inp["oat_c"], pa_ft=inp["pa_ft"],
-                        weight_lb=inp["landing_w_lb"], wind_kt=inp["headwind_kt"]
-                    )
-                    ldg_ft = round_to_step(raw_ldg, ASSETS["landing"]["round_to"])
-                    ldg_m = _ft_to_m(ldg_ft)
-
-                    tod_r_str = fmt_m_and_pct(to_m, inp["toda_m"])
-                    ldr_str = fmt_m_and_pct(ldg_m, inp["lda_m"])
-
-                    imgs = {
-                        "takeoff": make_pretty_perf_image(bg_to, segs_to, tod_r_str, inp["label"], label_font_size=ASSETS["takeoff"]["label_font"]),
-                        "climb":   make_pretty_perf_image(bg_clb, segs_roc, f"{roc_fpm:.0f} fpm", inp["label"], label_font_size=ASSETS["climb"]["label_font"]),
-                        "landing": make_pretty_perf_image(bg_ldg, segs_ldg, ldr_str, inp["label"], label_font_size=ASSETS["landing"]["label_font"]),
-                    }
-
-                    perf[role] = {
-                        "todr_m": float(to_m),
-                        "todr_str": tod_r_str,
-                        "ldr_m": float(ldg_m),
-                        "ldr_str": ldr_str,
-                        "roc_fpm": float(roc_fpm),
-                        "inputs": inp,
-                        "imgs": imgs,
-                        "raw": {"to_ft": float(to_ft), "ldg_ft": float(ldg_ft)},
-                    }
-
-                st.session_state.perf = perf
-                st.success("Performance computed.")
-            except Exception as e:
-                st.error(f"Performance error: {e}")
-
-    perf = st.session_state.get("perf", {}) or {}
-    if not perf:
-        st.info("Compute performance to populate values and images.")
-    else:
-        st.markdown("##### Results (TODR / ROC / LDR)")
-        order = ["DEPARTURE", "ARRIVAL", "ALTERNATE_1", "ALTERNATE_2"]
-
-        rows = []
-        for r in order:
-            if r not in perf:
-                continue
-            rows.append((
-                perf[r]["inputs"]["label"],
-                perf[r]["todr_str"],
-                f"{perf[r]['roc_fpm']:.0f} fpm",
-                perf[r]["ldr_str"],
-                f"{perf[r]['inputs']['headwind_kt']:.0f}",
-                perf[r]["inputs"]["runway_id"],
-            ))
-
-        st.markdown(
-            "<table class='tbl'>"
-            "<tr><th>Leg</th><th>TODR</th><th>CLIMB</th><th>LDR</th><th>HW (kt)</th><th>RWY</th></tr>"
-            + "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td><td>{d}</td><td>{e}</td><td>{f}</td></tr>" for a,b,c,d,e,f in rows])
-            + "</table>",
-            unsafe_allow_html=True,
-        )
-
-        if preview_imgs:
-            st.markdown("##### Preview images (per leg) — Takeoff → Climb → Landing")
-            for r in order:
-                if r not in perf:
-                    continue
-                st.markdown(f"**{perf[r]['inputs']['label']}**")
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.image(perf[r]["imgs"]["takeoff"], caption="Takeoff (TODR)", use_container_width=True)
-                with c2:
-                    st.image(perf[r]["imgs"]["climb"], caption="Climb (ROC)", use_container_width=True)
-                with c3:
-                    st.image(perf[r]["imgs"]["landing"], caption="Landing (LDR)", use_container_width=True)
-                st.divider()
-
-
-# =========================================================
-# 5) PDF (only side-by-side as first page)
-#   option: include performance pages or not
-# =========================================================
-with tab4:
-    st.markdown("#### Generate PDF")
-
-    include_perf_pages = st.checkbox("Include Performance pages (4-up)", value=True)
+        st.caption("Nos gráficos: FEET/FPM apenas (sem percentagens). Percentagens só no PDF (TODR/LDR).")
 
     try:
-        template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
-        fieldset = get_field_names(template_bytes)
+        cap_to = load_json_asset("takeoff")
+        cap_cl = load_json_asset("climb")
+        cap_ld = load_json_asset("landing")
 
-        wb = st.session_state.get("_wb", {})
-        fuel = st.session_state.get("_fuel", {})
-        reg = st.session_state.get("reg", "")
-        date_str = st.session_state.flight_date.strftime("%d/%m/%Y")
-        perf = st.session_state.get("perf", {}) or {}
-
-        f = {}
-
-        def put(name, value):
-            if name in fieldset:
-                f[name] = value
-
-        def put_any(candidates: List[str], value) -> bool:
-            for nm in candidates:
-                if nm in fieldset:
-                    f[nm] = value
-                    return True
-            return False
-
-        # header
-        put("Date", date_str)
-        for candidate in ["Aircraft_Reg", "Aircraft_Reg.", "Aircraft Reg.", "Aircraft_Reg__", "Aircraft_Reg_"]:
-            put(candidate, reg)
-
-        # MTOW / MLW
-        for nm in ["MTOW", "MTOW_LB", "Max_Takeoff_Weight", "Maximum_Takeoff_Weight", "MaxTakeoffWeight", "Max_Takeoff_Wt"]:
-            put(nm, f"{MTOW_LB:.0f}")
-        for nm in ["MLW", "MLW_LB", "Max_Landing_Weight", "Maximum_Landing_Weight", "MaxLandingWeight", "Max_Landing_Wt"]:
-            put(nm, f"{MLW_LB:.0f}")
-
-        # W&B page 0
-        def w_str(lb):
-            kg = lb / KG_TO_LB
-            return f"{lb:.0f} ({kg:.0f}kg)"
-
-        def fuel_w_str(fuel_lb, fuel_usg, fuel_l):
-            return f"{fuel_lb:.0f} ({fuel_usg:.1f}USG/{fuel_l:.0f}L)"
-
-        ew_lb = wb.get("ew_lb", 0.0)
-        ew_mom = wb.get("ew_mom", 0.0)
-        ew_cg = (ew_mom / ew_lb) if ew_lb > 0 else 82.0
-
-        put("Weight_EMPTY", w_str(ew_lb))
-        put("Moment_EMPTY", f"{ew_mom:.0f}")
-        put("Datum_EMPTY", f"{ew_cg:.1f}")
-
-        put("Weight_FRONT", w_str(wb.get("front_lb", 0.0)))
-        put("Moment_FRONT", f"{(wb.get('front_lb',0.0) * ARM_FRONT):.0f}")
-
-        put("Weight_REAR", w_str(wb.get("rear_lb", 0.0)))
-        put("Moment_REAR", f"{(wb.get('rear_lb',0.0) * ARM_REAR):.0f}")
-
-        fuel_usg = wb.get("fuel_usg", 0.0)
-        fuel_l = wb.get("fuel_l", 0.0)
-        fuel_lb = wb.get("fuel_lb", 0.0)
-        put("Weight_FUEL", fuel_w_str(fuel_lb, fuel_usg, fuel_l))
-        put("Moment_FUEL", f"{(fuel_lb * ARM_FUEL):.0f}")
-
-        put("Weight_BAGGAGE", w_str(wb.get("bag_lb", 0.0)))
-        put("Moment_BAGGAGE", f"{(wb.get('bag_lb',0.0) * ARM_BAGGAGE):.0f}")
-
-        put("Weight_RAMP", w_str(wb.get("ramp_w", 0.0)))
-        put("Moment_RAMP", f"{wb.get('ramp_m',0.0):.0f}")
-        put("Datum_RAMP", f"{wb.get('ramp_cg',0.0):.1f}")
-
-        put("Weight_TAKEOFF", w_str(wb.get("takeoff_w", 0.0)))
-        put("Moment_TAKEOFF", f"{wb.get('takeoff_m',0.0):.0f}")
-        put("Datum_TAKEOFF", f"{wb.get('takeoff_cg',0.0):.1f}")
-
-        # Airfield blocks
-        def pa_da(elev_ft, qnh_hpa, oat_c):
-            pa_ft = float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
-            isa = 15.0 - 2.0 * (float(elev_ft) / 1000.0)
-            da_ft = pa_ft + 120.0 * (float(oat_c) - isa)
-            return pa_ft, da_ft
-
-        for i, leg in enumerate(st.session_state.legs):
-            role = leg["role"]
-            icao = leg["icao"]
-            ad = AERODROMES_DB.get(icao, None)
-            if not ad:
-                continue
-            met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013}
-            best = choose_best_runway_by_wind(ad, met["wind_dir"], met["wind_kt"])
-            if not best:
-                continue
-            rw = best["rw"]
-
-            suf = role
-            put(f"Airfield_{suf}", icao)
-            put(f"RWY_QFU_{suf}", f"{rw['qfu']:.0f}")
-            put(f"Elevation_{suf}", f"{ad['elev_ft']:.0f}")
-            put(f"QNH_{suf}", f"{met['qnh_hpa']}")
-            put(f"Temperature_{suf}", f"{met['temp_c']}")
-            put(f"Wind_{suf}", f"{met['wind_dir']:03d}/{met['wind_kt']:02d}")
-
-            pa_ft, da_ft = pa_da(ad["elev_ft"], met["qnh_hpa"], met["temp_c"])
-            if f"Pressure_Alt_{suf}" in fieldset:
-                put(f"Pressure_Alt_{suf}", f"{pa_ft:.0f}")
-            elif suf == "DEPARTURE" and "Pressure_Alt _DEPARTURE" in fieldset:
-                put("Pressure_Alt _DEPARTURE", f"{pa_ft:.0f}")
-
-            put(f"Density_Alt_{suf}", f"{da_ft:.0f}")
-            put(f"TODA_{suf}", f"{rw['toda']:.0f}")
-            put(f"LDA_{suf}", f"{rw['lda']:.0f}")
-
-        # Fuel planning fields
-        def fuel_str(liters):
-            liters = float(liters)
-            if abs(liters - float(FUEL_USABLE_L)) < 0.5:
-                usg = float(FUEL_USABLE_USG)
-            else:
-                usg = liters * L_TO_USG
-            return f"{usg:.1f} ({liters:.1f}L)"
-
-        put("Start-up_and_Taxi_TIME", fmt_hm(int(fuel.get("taxi_min", 0))))
-        put("Start-up_and_Taxi_FUEL", fuel_str(float(fuel.get("taxi_l", 0.0))))
-
-        put("CLIMB_TIME", fmt_hm(int(fuel.get("climb_min", 0))))
-        put("CLIMB_FUEL", fuel_str(float(fuel.get("climb_l", 0.0))))
-
-        put("ENROUTE_TIME", fmt_hm(int(fuel.get("enrt_min", 0))))
-        put("ENROUTE_FUEL", fuel_str(float(fuel.get("enrt_l", 0.0))))
-
-        put("DESCENT_TIME", fmt_hm(int(fuel.get("desc_min", 0))))
-        put("DESCENT_FUEL", fuel_str(float(fuel.get("desc_l", 0.0))))
-
-        put("TRIP_TIME", fmt_hm(int(fuel.get("trip_min", 0))))
-        put("TRIP_FUEL", fuel_str(float(fuel.get("trip_l", 0.0))))
-
-        put("Contingency_TIME", fmt_hm(int(fuel.get("cont_min", 0))))
-        put("Contingency_FUEL", fuel_str(float(fuel.get("cont_l", 0.0))))
-
-        put("ALTERNATE_TIME", fmt_hm(int(fuel.get("alt_min", 0))))
-        put("ALTERNATE_FUEL", fuel_str(float(fuel.get("alt_l", 0.0))))
-
-        put("RESERVE_TIME", fmt_hm(int(fuel.get("reserve_min", 45))))
-        put("RESERVE_FUEL", fuel_str(float(fuel.get("reserve_l", 0.0))))
-
-        put("REQUIRED_TIME", fmt_hm(int(fuel.get("req_min", 0))))
-        put("REQUIRED_FUEL", fuel_str(float(fuel.get("req_l", 0.0))))
-
-        put("EXTRA_TIME", fmt_hm(int(fuel.get("extra_min", 0))))
-        put("EXTRA_FUEL", fuel_str(float(fuel.get("extra_l", 0.0))))
-
-        put("Total_TIME", fmt_hm(int(fuel.get("total_min", 0))))
-        put("Total_FUEL", fuel_str(float(fuel.get("total_l", 0.0))))
-
-        # Performance -> PDF: TODR + LDR (m + percent) + ROC (fpm)
-        if perf:
-            for role, data in perf.items():
-                suf = role
-                # TODR
-                put_any(
-                    [f"TODR_{suf}", f"TO_DR_{suf}", f"TakeoffDR_{suf}", f"Takeoff_DistanceRequired_{suf}", f"TakeoffDistanceRequired_{suf}"],
-                    data["todr_str"]
-                )
-                # LDR
-                put_any(
-                    [f"LDR_{suf}", f"LDG_DR_{suf}", f"LandingDR_{suf}", f"Landing_DistanceRequired_{suf}", f"LandingDistanceRequired_{suf}"],
-                    data["ldr_str"]
-                )
-                # ROC
-                put_any(
-                    [f"ROC_{suf}", f"Climb_ROC_{suf}", f"RateOfClimb_{suf}", f"ROC_FPM_{suf}", f"ClimbFPM_{suf}"],
-                    f"{data['roc_fpm']:.0f}"
-                )
-
-        # Fill PDF
-        base_filled = fill_pdf(template_bytes, f)
-
-        # CG overlay points
-        chart_points = [
-            {"label": "Empty",   "cg": ew_cg,                   "w": ew_lb,                 "rgb": (0.10, 0.60, 0.15)},
-            {"label": "Takeoff", "cg": wb.get("takeoff_cg", 0), "w": wb.get("takeoff_w",0), "rgb": (0.10, 0.30, 0.85)},
-            {"label": "Landing", "cg": wb.get("landing_cg", 0), "w": wb.get("landing_w",0), "rgb": (0.85, 0.15, 0.15)},
-        ]
-        mb_pdf = draw_cg_overlay_on_page0(base_filled, chart_points)
-
-        # Side-by-side FIRST page from the filled+CG M&B PDF
-        sbs_img = mb_pdf_to_side_by_side_image(
-            mb_pdf,
-            dpi=SBS_DPI,
-            align_by=SBS_ALIGN,
-            gap_px=SBS_GAP_PX,
-            bg=SBS_BG,
-            sharpen=SBS_SHARPEN,
-        )
-        sbs_page_pdf = image_to_single_page_pdf(sbs_img, dpi=SBS_DPI)
-
-        # FINAL: only side-by-side page + optional perf 4-up pages
-        final_pdf = sbs_page_pdf
-        if include_perf_pages and perf:
-            final_pdf = append_perf_pages(final_pdf, perf)
-
-        mission = ascii_safe(st.session_state.get("mission_no", "")).strip().replace(" ", "_")
-        mission_part = f"{mission}_" if mission else ""
-        out_name = f"{mission_part}{reg}_PA28_MB_Perf.pdf"
-
-        st.download_button(
-            "Download PDF",
-            data=final_pdf,
-            file_name=out_name,
-            mime="application/pdf",
-            type="primary",
-        )
-
-        st.markdown(
-            "<div class='box'>"
-            "<b>Output</b><br>"
-            f"• Page 1: Side-by-side (filled p0 + p1) @ {SBS_DPI} dpi<br>"
-            "• Optional: +3 pages 4-up (Takeoff → Climb → Landing)"
-            "</div>",
-            unsafe_allow_html=True
-        )
-
+        bg_to = load_background_asset("takeoff")
+        bg_cl = load_background_asset("climb")
+        bg_ld = load_background_asset("landing", page_index=0, zoom=LANDING_BG_ZOOM)
     except Exception as e:
-        st.error(f"PDF error: {e}")
+        st.error(f"Assets error: {e}")
+        cap_to = cap_cl = cap_ld = None
+
+    def pa_ft_from_elev_qnh(elev_ft: float, qnh_hpa: float) -> float:
+        return float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
+
+    if compute_perf and cap_to and cap_cl and cap_ld:
+        wb = st.session_state.get("_wb", {})
+        if not wb:
+            st.error("Faz primeiro o Weight & Fuel (tab 3) para ter pesos.")
+        else:
+            for i, leg in enumerate(st.session_state.legs):
+                role = leg["role"]
+                icao = leg["icao"]
+                ad = AERODROMES_DB.get(icao)
+                met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013}
+                if not ad:
+                    st.session_state.perf[i] = {"error": "no aerodrome"}
+                    continue
+
+                best = choose_best_runway_by_wind(ad, met["wind_dir"], met["wind_kt"])
+                if not best:
+                    st.session_state.perf[i] = {"error": "no runway"}
+                    continue
+
+                rw = best["rw"]
+                hw = max(0.0, float(best["hw"]))  # headwind only
+                oat = float(met["temp_c"])
+                pa = pa_ft_from_elev_qnh(ad["elev_ft"], met["qnh_hpa"])
+
+                to_w = float(wb.get("takeoff_w", 0.0))
+                ld_w = float(wb.get("landing_w", 0.0))
+
+                to_raw_ft, to_segs = solve_ground_roll(cap_to, "takeoff", oat_c=oat, pa_ft=pa, weight_lb=to_w, headwind_kt=hw)
+                to_ft = round_to_step(to_raw_ft, ASSETS["takeoff"]["round_to"])
+
+                roc_raw, roc_segs = solve_climb(cap_cl, oat_c=oat, pa_ft=pa)
+                roc_fpm = round_to_step(roc_raw, ASSETS["climb"]["round_to"])
+
+                ld_raw_ft, ld_segs = solve_ground_roll(cap_ld, "landing", oat_c=oat, pa_ft=pa, weight_lb=ld_w, headwind_kt=hw)
+                ld_ft = round_to_step(ld_raw_ft, ASSETS["landing"]["round_to"])
+
+                st.session_state.perf[i] = {
+                    "icao": icao,
+                    "role": role,
+                    "rwy": rw["id"],
+                    "qfu": float(rw["qfu"]),
+                    "toda_m": float(rw["toda"]),
+                    "lda_m": float(rw["lda"]),
+                    "headwind_kt": float(hw),
+                    "oat_c": oat,
+                    "qnh_hpa": float(met["qnh_hpa"]),
+                    "pa_ft": float(pa),
+                    "togr_ft": float(to_ft),
+                    "roc_fpm": float(roc_fpm),
+                    "ldgr_ft": float(ld_ft),
+                    "paths": {"to": to_segs, "cl": roc_segs, "ld": ld_segs},
+                }
+
+            st.success("Performance computed for all legs.")
+
+    # Results table (UI: show meters or ft? keep meters simple; charts are ft)
+    rows = []
+    for i, leg in enumerate(st.session_state.legs):
+        p = st.session_state.perf[i]
+        role = leg["role"]
+        icao = leg["icao"]
+        if not p or "error" in (p or {}):
+            rows.append((role, icao, "—", "—", "—"))
+            continue
+
+        todr_m = p["togr_ft"] * FT_TO_M
+        ldr_m = p["ldgr_ft"] * FT_TO_M
+        rows.append((role, icao, f"{todr_m:.0f} m", f"{p['roc_fpm']:.0f} fpm", f"{ldr_m:.0f} m"))
+
+    html = ["<table class='tbl'><tr><th>Leg</th><th>ICAO</th><th>TODR</th><th>ROC</th><th>LDR</th></tr>"]
+    for r in rows:
+        html.append(f"<tr><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td><td>{r[4]}</td></tr>")
+    html.append("</table>")
+    st.markdown("".join(html), unsafe_allow_html=True)
+
+    if show_previews and cap_to and cap_cl and cap_ld:
+        st.markdown("#### Preview charts (labels em ft/fpm, sem %)")
+        grid_cols = st.columns(2)
+        for i, leg in enumerate(st.session_state.legs):
+            p = st.session_state.perf[i]
+            title = f"{leg['icao']} — {leg['role']}"
+            if not p or "error" in (p or {}):
+                (grid_cols[i % 2]).info(f"{title}: sem performance (faz Compute).")
+                continue
+
+            to_segs = p["paths"]["to"]
+            cl_segs = p["paths"]["cl"]
+            ld_segs = p["paths"]["ld"]
+
+            # ✅ FEET / FPM ONLY — NO %
+            to_label = f"{p['togr_ft']:.0f} ft"
+            cl_label = f"{p['roc_fpm']:.0f} fpm"
+            ld_label = f"{p['ldgr_ft']:.0f} ft"
+
+            to_tip = to_segs[-1][1] if to_segs else (40, 40)
+            cl_tip = cl_segs[-1][1] if cl_segs else (40, 40)
+            ld_tip = ld_segs[-1][1] if ld_segs else (40, 40)
+
+            im_to = draw_chart_with_path(bg_to, to_segs, f"{title} — TAKEOFF", to_label, to_tip, label_font_size=18)
+            im_cl = draw_chart_with_path(bg_cl, cl_segs, f"{title} — CLIMB", cl_label, cl_tip, label_font_size=18)
+            im_ld = draw_chart_with_path(bg_ld, ld_segs, f"{title} — LANDING", ld_label, ld_tip, label_font_size=22)
+
+            with (grid_cols[i % 2]):
+                st.image(im_to, caption=f"{title} — Takeoff", use_container_width=True)
+                st.image(im_cl, caption=f"{title} — Climb", use_container_width=True)
+                st.image(im_ld, caption=f"{title} — Landing", use_container_width=True)
+
+
+# =========================
+# 5) PDF (minimal controls)
+# =========================
+with tab4:
+    st.markdown("#### Generate final PDF")
+
+    include_perf_pages = st.checkbox("Include performance pages (TO + CLIMB + LDG, each with 4 charts)", value=True)
+
+    if st.button("Generate PDF", type="primary"):
+        try:
+            template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
+            fieldset = get_field_names(template_bytes)
+
+            wb = st.session_state.get("_wb", {})
+            fuel = st.session_state.get("_fuel", {})
+            reg = st.session_state.get("reg", "").strip()
+            date_str = st.session_state.flight_date.strftime("%d/%m/%Y")
+
+            if not wb:
+                st.error("Faz primeiro o Weight & Fuel (tab 3).")
+                st.stop()
+
+            f: Dict[str, str] = {}
+
+            def put(name, value):
+                if name in fieldset:
+                    f[name] = value
+
+            # Header
+            put("Date", date_str)
+            put("Aircraft_Reg", reg)
+
+            # MTOW/MLW
+            put("MTOW", f"{MTOW_LB:.0f}")
+            put("MLW", f"{MLW_LB:.0f}")
+
+            # W&B strings
+            def w_str(lb):
+                kg = lb / KG_TO_LB
+                return f"{lb:.0f} ({kg:.0f}kg)"
+
+            def fuel_w_str(fuel_lb, fuel_usg, fuel_l):
+                return f"{fuel_lb:.0f} ({fuel_usg:.1f}USG/{fuel_l:.0f}L)"
+
+            ew_lb = wb.get("ew_lb", 0.0)
+            ew_mom = wb.get("ew_mom", 0.0)
+            ew_cg = wb.get("ew_cg", (ew_mom / ew_lb) if ew_lb > 0 else 82.0)
+
+            put("Weight_EMPTY", w_str(ew_lb))
+            put("Moment_EMPTY", f"{ew_mom:.0f}")
+            put("Datum_EMPTY", f"{ew_cg:.1f}")
+
+            put("Weight_FRONT", w_str(wb.get("front_lb", 0.0)))
+            put("Moment_FRONT", f"{(wb.get('front_lb',0.0) * ARM_FRONT):.0f}")
+
+            put("Weight_REAR", w_str(wb.get("rear_lb", 0.0)))
+            put("Moment_REAR", f"{(wb.get('rear_lb',0.0) * ARM_REAR):.0f}")
+
+            fuel_usg = wb.get("fuel_usg", 0.0)
+            fuel_l = wb.get("fuel_l", 0.0)
+            fuel_lb = wb.get("fuel_lb", 0.0)
+            put("Weight_FUEL", fuel_w_str(fuel_lb, fuel_usg, fuel_l))
+            put("Moment_FUEL", f"{(fuel_lb * ARM_FUEL):.0f}")
+
+            put("Weight_BAGGAGE", w_str(wb.get("bag_lb", 0.0)))
+            put("Moment_BAGGAGE", f"{(wb.get('bag_lb',0.0) * ARM_BAGGAGE):.0f}")
+
+            put("Weight_RAMP", w_str(wb.get("ramp_w", 0.0)))
+            put("Moment_RAMP", f"{wb.get('ramp_m',0.0):.0f}")
+            put("Datum_RAMP", f"{wb.get('ramp_cg',0.0):.1f}")
+
+            put("Weight_TAKEOFF", w_str(wb.get("takeoff_w", 0.0)))
+            put("Moment_TAKEOFF", f"{wb.get('takeoff_m',0.0):.0f}")
+            put("Datum_TAKEOFF", f"{wb.get('takeoff_cg',0.0):.1f}")
+
+            # Airfield blocks (page 1)
+            def pa_da(elev_ft, qnh_hpa, oat_c):
+                pa_ft = float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
+                isa = 15.0 - 2.0 * (float(elev_ft) / 1000.0)
+                da_ft = pa_ft + 120.0 * (float(oat_c) - isa)
+                return pa_ft, da_ft
+
+            for i, leg in enumerate(st.session_state.legs):
+                role = leg["role"]
+                icao = leg["icao"]
+                ad = AERODROMES_DB.get(icao)
+                if not ad:
+                    continue
+
+                met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013}
+                best = choose_best_runway_by_wind(ad, met["wind_dir"], met["wind_kt"])
+                if not best:
+                    continue
+                rw = best["rw"]
+
+                suf = role
+                put(f"Airfield_{suf}", icao)
+                put(f"RWY_QFU_{suf}", f"{rw['qfu']:.0f}")
+                put(f"Elevation_{suf}", f"{ad['elev_ft']:.0f}")
+                put(f"QNH_{suf}", f"{int(met['qnh_hpa'])}")
+                put(f"Temperature_{suf}", f"{int(met['temp_c'])}")
+                put(f"Wind_{suf}", f"{int(met['wind_dir']):03d}/{int(met['wind_kt']):02d}")
+
+                pa_ft, da_ft = pa_da(ad["elev_ft"], met["qnh_hpa"], met["temp_c"])
+                if suf == "DEPARTURE":
+                    put("Pressure_Alt _DEPARTURE", f"{pa_ft:.0f}")
+                put(f"Density_Alt_{suf}", f"{da_ft:.0f}")
+                put(f"TODA_{suf}", f"{float(rw['toda']):.0f}")
+                put(f"LDA_{suf}", f"{float(rw['lda']):.0f}")
+
+                # PERFORMANCE fields (TODR/LDR/ROC) — percentagens só AQUI (PDF)
+                perf_list = st.session_state.get("perf") or [None]*len(st.session_state.legs)
+                perf = perf_list[i] or {}
+
+                todr_m = float(perf.get("togr_ft", 0.0)) * FT_TO_M
+                ldr_m  = float(perf.get("ldgr_ft", 0.0)) * FT_TO_M
+                roc    = perf.get("roc_fpm", None)
+
+                toda_m = float(rw.get("toda", 0.0))
+                lda_m  = float(rw.get("lda", 0.0))
+
+                put(f"TODR_{suf}", fmt_m_and_pct(todr_m, toda_m))
+                put(f"LDR_{suf}",  fmt_m_and_pct(ldr_m,  lda_m))
+                if roc is not None and float(roc) > 0:
+                    put(f"ROC_{suf}", f"{float(roc):.0f}")
+
+            # Fuel planning fields
+            def fuel_str(liters):
+                liters = float(liters)
+                if abs(liters - float(FUEL_USABLE_L)) < 0.5:
+                    usg = float(FUEL_USABLE_USG)
+                else:
+                    usg = liters * L_TO_USG
+                return f"{usg:.1f} ({liters:.1f}L)"
+
+            put("Start-up_and_Taxi_TIME", fmt_hm(int(fuel.get("taxi_min", 0))))
+            put("Start-up_and_Taxi_FUEL", fuel_str(float(fuel.get("taxi_l", 0.0))))
+
+            put("CLIMB_TIME", fmt_hm(int(fuel.get("climb_min", 0))))
+            put("CLIMB_FUEL", fuel_str(float(fuel.get("climb_l", 0.0))))
+
+            put("ENROUTE_TIME", fmt_hm(int(fuel.get("enrt_min", 0))))
+            put("ENROUTE_FUEL", fuel_str(float(fuel.get("enrt_l", 0.0))))
+
+            put("DESCENT_TIME", fmt_hm(int(fuel.get("desc_min", 0))))
+            put("DESCENT_FUEL", fuel_str(float(fuel.get("desc_l", 0.0))))
+
+            put("TRIP_TIME", fmt_hm(int(fuel.get("trip_min", 0))))
+            put("TRIP_FUEL", fuel_str(float(fuel.get("trip_l", 0.0))))
+
+            put("Contingency_TIME", fmt_hm(int(fuel.get("cont_min", 0))))
+            put("Contingency_FUEL", fuel_str(float(fuel.get("cont_l", 0.0))))
+
+            put("ALTERNATE_TIME", fmt_hm(int(fuel.get("alt_min", 0))))
+            put("ALTERNATE_FUEL", fuel_str(float(fuel.get("alt_l", 0.0))))
+
+            put("RESERVE_TIME", fmt_hm(int(fuel.get("reserve_min", 45))))
+            put("RESERVE_FUEL", fuel_str(float(fuel.get("reserve_l", 0.0))))
+
+            put("REQUIRED_TIME", fmt_hm(int(fuel.get("req_min", 0))))
+            put("REQUIRED_FUEL", fuel_str(float(fuel.get("req_l", 0.0))))
+
+            put("EXTRA_TIME", fmt_hm(int(fuel.get("extra_min", 0))))
+            put("EXTRA_FUEL", fuel_str(float(fuel.get("extra_l", 0.0))))
+
+            put("Total_TIME", fmt_hm(int(fuel.get("total_min", 0))))
+            put("Total_FUEL", fuel_str(float(fuel.get("total_l", 0.0))))
+
+            # Fill PDF then overlay CG on page 0
+            base_filled = fill_pdf(template_bytes, f)
+
+            chart_points = [
+                {"label": "Empty",   "cg": ew_cg,                   "w": ew_lb,                 "rgb": (0.10, 0.60, 0.15)},
+                {"label": "Takeoff", "cg": wb.get("takeoff_cg", 0), "w": wb.get("takeoff_w",0), "rgb": (0.10, 0.30, 0.85)},
+                {"label": "Landing", "cg": wb.get("landing_cg", 0), "w": wb.get("landing_w",0), "rgb": (0.85, 0.15, 0.15)},
+            ]
+            filled_with_cg = draw_cg_overlay_on_page0(base_filled, chart_points)
+
+            # Final PDF: first page is SBS only (no original pages)
+            page1_img = pdf_two_pages_side_by_side_image(filled_with_cg, dpi=SBS_DPI, bg=(255, 255, 255))
+            out_pages: List[Image.Image] = [page1_img]
+
+            if include_perf_pages:
+                # render and compose 2x2 per mode
+                cap_to = load_json_asset("takeoff")
+                cap_cl = load_json_asset("climb")
+                cap_ld = load_json_asset("landing")
+                bg_to = load_background_asset("takeoff")
+                bg_cl = load_background_asset("climb")
+                bg_ld = load_background_asset("landing", page_index=0, zoom=LANDING_BG_ZOOM)
+
+                charts_to, charts_cl, charts_ld = [], [], []
+
+                for i, leg in enumerate(st.session_state.legs):
+                    p = (st.session_state.get("perf") or [None]*4)[i] or {}
+                    title = f"{leg['icao']} {leg['role']}"
+                    if not p or "error" in p or "paths" not in p:
+                        placeholder = Image.new("RGB", bg_to.size, (255, 255, 255))
+                        d = ImageDraw.Draw(placeholder)
+                        d.text((40, 40), f"{title}\n(no data)", fill=(0, 0, 0), font=load_font(24))
+                        charts_to.append(placeholder)
+                        charts_cl.append(placeholder)
+                        charts_ld.append(placeholder)
+                        continue
+
+                    to_segs = p["paths"]["to"]
+                    cl_segs = p["paths"]["cl"]
+                    ld_segs = p["paths"]["ld"]
+
+                    # ✅ FEET / FPM ONLY — NO %
+                    to_label = f"{float(p['togr_ft']):.0f} ft"
+                    cl_label = f"{float(p['roc_fpm']):.0f} fpm"
+                    ld_label = f"{float(p['ldgr_ft']):.0f} ft"
+
+                    to_tip = to_segs[-1][1] if to_segs else (40, 40)
+                    cl_tip = cl_segs[-1][1] if cl_segs else (40, 40)
+                    ld_tip = ld_segs[-1][1] if ld_segs else (40, 40)
+
+                    charts_to.append(draw_chart_with_path(bg_to, to_segs, f"{title} — TAKEOFF", to_label, to_tip))
+                    charts_cl.append(draw_chart_with_path(bg_cl, cl_segs, f"{title} — CLIMB",  cl_label, cl_tip))
+                    charts_ld.append(draw_chart_with_path(bg_ld, ld_segs, f"{title} — LANDING", ld_label, ld_tip, label_font_size=22))
+
+                out_pages.append(composite_2x2(charts_to, "TAKEOFF (4 legs)"))
+                out_pages.append(composite_2x2(charts_cl, "CLIMB (4 legs)"))
+                out_pages.append(composite_2x2(charts_ld, "LANDING (4 legs)"))
+
+            final_pdf_bytes = images_to_pdf_bytes(out_pages)
+
+            mission = ascii_safe(st.session_state.get("mission_no", "")).strip().replace(" ", "_")
+            mission_part = f"{mission}_" if mission else ""
+            out_name = f"{mission_part}{reg}_PA28_MB_Perf_FINAL.pdf" if reg else f"{mission_part}PA28_MB_Perf_FINAL.pdf"
+
+            st.download_button(
+                "Download PDF",
+                data=final_pdf_bytes,
+                file_name=out_name,
+                mime="application/pdf",
+                type="primary",
+            )
+
+            st.success("PDF generated.")
+
+        except Exception as e:
+            st.error(f"PDF error: {e}")
+
 
 
