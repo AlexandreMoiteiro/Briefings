@@ -1,5 +1,4 @@
-# app.py — PA28 Archer III (Sevenair)
-# M&B + Weather + Performance (from charts in folder) + PDF fill + CG + Final PDF (SBS first page)
+# app.py — PA28 Archer III (Sevenair) — M&B + Weather + Performance + PDF (SBS) + CG
 #
 # Requisitos:
 #   pip install streamlit requests pytz pypdf reportlab pillow pymupdf numpy
@@ -7,11 +6,12 @@
 # Execução:
 #   streamlit run app.py
 #
-# Ficheiros na mesma pasta:
-#   RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf
-#   to_ground_roll.jpg          + to_ground_roll.json
-#   climb_perf.jpg              + climb_perf.json
-#   ldg_ground_roll.pdf         + ldg_ground_roll.json
+# Nota:
+# - Gráficos: mostram apenas o valor (em ft / fpm). SEM percentagens.
+# - PDF: TODR/LDR preenchidos com METROS e percentagem entre parênteses (ex: "420 (23%)").
+# - PDF final: NÃO inclui as páginas originais preenchidas. A 1ª página é sempre o "side-by-side" (pág. 1+2).
+# - Aba Performance: sem uploads (assume assets na pasta).
+# - Sem controlos de "zoom" landing / DPI; DPI fixo 500.
 
 from __future__ import annotations
 
@@ -84,39 +84,31 @@ L_TO_USG = 1.0 / 3.785411784
 USG_TO_L = 3.785411784
 FT_TO_M = 0.3048
 
-# Fuel density (approx for 100LL): 6.0 lb/USG
 FUEL_LB_PER_USG = 6.0
 
-# Sheet maxima (as requested)
 FUEL_USABLE_USG = 48.0
 FUEL_USABLE_L = 182.0
 BAGGAGE_MAX_KG = 90.0
-BAGGAGE_MAX_LB = BAGGAGE_MAX_KG * KG_TO_LB
 
-# PA28 arms (inches aft of datum)
 ARM_FRONT = 80.5
 ARM_REAR = 118.1
 ARM_FUEL = 95.0
 ARM_BAGGAGE = 142.8
 
-# Taxi/runup allowance
 TAXI_ALLOW_LB = 8.0
 TAXI_ARM = 95.5
 
-# Max weights (POH)
 MTOW_LB = 2550.0
 MLW_LB = 2550.0
 
-# PDF template
 PDF_TEMPLATE_PATHS = ["RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"]
 
-# Raster / export defaults (fixed; no user clutter)
 SBS_DPI = 500
-LANDING_BG_ZOOM = 2.3  # fixed — no “Landing PDF zoom” control
+LANDING_BG_ZOOM = 2.3  # fixo
 
 
 # =========================
-# Small helpers
+# Helpers
 # =========================
 def ascii_safe(text):
     if not isinstance(text, str):
@@ -138,10 +130,6 @@ def fmt_hm(total_min: int) -> str:
 
 
 def fmt_m_and_pct(dist_m: float, avail_m: float) -> str:
-    """
-    Para PDF: escreve em metros com percentagem de pista usada:
-      "410 (23%)"
-    """
     dist_m = float(dist_m or 0.0)
     avail_m = float(avail_m or 0.0)
     if dist_m <= 0:
@@ -251,7 +239,7 @@ def build_aerodromes_db(icaos):
 
         db[icao] = {"name": name, "lat": lat, "lon": lon, "elev_ft": elev_ft, "runways": runways}
 
-    # Overrides (mantidos)
+    # Overrides pedidos (garante QFU/seleção coerente com o teu uso)
     if "LPSO" in db:
         db["LPSO"]["name"] = "Ponte de Sôr"
         db["LPSO"]["runways"] = [
@@ -288,7 +276,6 @@ ICAO_OPTIONS = sorted(AERODROMES_DB.keys())
 # Wind / runway helpers
 # =========================
 def wind_components(qfu_deg, wind_dir_deg, wind_speed_kt):
-    # wind_dir is FROM
     diff = ((wind_dir_deg - qfu_deg + 180) % 360) - 180
     hw = wind_speed_kt * math.cos(math.radians(diff))
     cw = wind_speed_kt * math.sin(math.radians(diff))
@@ -413,7 +400,7 @@ def om_mean_met_at(resp, idx, window=1):
 
 
 # =========================
-# PDF utils (fill + NeedAppearances)
+# PDF utils
 # =========================
 def read_pdf_bytes(paths) -> bytes:
     for path_str in paths:
@@ -586,7 +573,7 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
 
 
 # =========================
-# “SBS image” page from filled PDF (2 pages side-by-side)
+# “SBS image” from filled PDF (2 pages side-by-side)
 # =========================
 def _preprocess_pdf_for_raster(pdf_bytes: bytes) -> bytes:
     try:
@@ -650,11 +637,12 @@ def pdf_two_pages_side_by_side_image(pdf_bytes: bytes, dpi: int = SBS_DPI, bg=(2
     with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
         if doc.page_count < 1:
             raise ValueError("PDF inválido (sem páginas).")
-        p1 = render_pdf_page(pdf_bytes, 0, dpi=dpi, bg=bg)
-        if doc.page_count >= 2:
-            p2 = render_pdf_page(pdf_bytes, 1, dpi=dpi, bg=bg)
-        else:
-            p2 = Image.new("RGB", p1.size, bg)
+    p1 = render_pdf_page(pdf_bytes, 0, dpi=dpi, bg=bg)
+    try:
+        p2 = render_pdf_page(pdf_bytes, 1, dpi=dpi, bg=bg)
+    except Exception:
+        p2 = Image.new("RGB", p1.size, bg)
+
     merged = merge_side_by_side(p1, p2, bg=bg, gap_px=0)
     merged = merged.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=3))
     return merged
@@ -663,20 +651,18 @@ def pdf_two_pages_side_by_side_image(pdf_bytes: bytes, dpi: int = SBS_DPI, bg=(2
 def images_to_pdf_bytes(pages: List[Image.Image]) -> bytes:
     buf = io.BytesIO()
     c = canvas.Canvas(buf)
-
     for img in pages:
         w, h = img.size
         c.setPageSize((w, h))
         c.drawImage(ImageReader(img), 0, 0, width=w, height=h, mask="auto")
         c.showPage()
-
     c.save()
     buf.seek(0)
     return buf.read()
 
 
 # =========================
-# Performance assets + solvers (folder-only, no uploads)
+# Performance assets + solvers (folder-only)
 # =========================
 ASSETS = {
     "takeoff": {
@@ -829,7 +815,7 @@ def parse_pa_levels_ft(lines: Dict[str, List[Dict[str, float]]]) -> List[Tuple[f
 
 def interp_between_levels(v: float, levels: List[Tuple[float, str]]) -> Tuple[Tuple[float, str], Tuple[float, str], float]:
     if not levels:
-        raise ValueError("No PA levels available (all pa_* lines empty?).")
+        raise ValueError("No PA levels available.")
     if v <= levels[0][0]:
         return levels[0], levels[0], 0.0
     if v >= levels[-1][0]:
@@ -978,13 +964,11 @@ def solve_climb(cap: Dict[str, Any], oat_c: float, pa_ft: float) -> Tuple[float,
         ((x_oat, y_bottom), (x_oat, y)),
         ((x_oat, y), (x_right_edge, y)),
     ]
-
     return roc, segs
 
 
 # =========================
-# Nicer overlay drawing for performance charts
-# IMPORTANT: labels are FEET/FPM ONLY — NO PERCENTAGES ON CHARTS
+# Nicer overlay drawing (labels in ft/fpm, sem %)
 # =========================
 def load_font(size: int):
     try:
@@ -1016,7 +1000,7 @@ def draw_pill_label(img: Image.Image, tip_xy: Tuple[float, float], text: str, fo
         x0, y0, x1, y1 = d.textbbox((0, 0), text, font=font)
         tw, th = x1 - x0, y1 - y0
     except Exception:
-        tw, th = 8 * len(text), font_size
+        tw, th = 8 * len(text), 18
 
     tx, ty = int(tip_xy[0]), int(tip_xy[1])
     pad_x, pad_y = 10, 6
@@ -1047,19 +1031,10 @@ def draw_pill_label(img: Image.Image, tip_xy: Tuple[float, float], text: str, fo
     d.rounded_rectangle([rx0, ry0, rx1, ry1], radius=10, fill=(0, 0, 0, 150))
     d.text((x, y), text, fill=(255, 255, 255, 255), font=font)
 
-    out = Image.alpha_composite(rgba, overlay).convert("RGB")
-    return out
+    return Image.alpha_composite(rgba, overlay).convert("RGB")
 
 
-def draw_chart_with_path(
-    base: Image.Image,
-    path_segs: List[Tuple[Tuple[float, float], Tuple[float, float]]],
-    title: str,
-    label_text: str,
-    label_tip: Tuple[float, float],
-    title_font_size: int = 22,
-    label_font_size: int = 18,
-) -> Image.Image:
+def draw_chart_with_path(base: Image.Image, path_segs, title: str, label_text: str, label_tip, title_font_size: int = 22, label_font_size: int = 18):
     img = base.copy().convert("RGB")
     d = ImageDraw.Draw(img)
 
@@ -1077,7 +1052,6 @@ def draw_chart_with_path(
     d.rectangle([8, 8, 8 + tw + 2*pad, 8 + th + 2*pad], fill=(0, 0, 0))
     d.text((8 + pad, 8 + pad), title, fill=(255, 255, 255), font=font)
 
-    # label is FEET or FPM only (no %)
     img = draw_pill_label(img, label_tip, label_text, font_size=label_font_size)
     return img
 
@@ -1156,7 +1130,7 @@ if "arr_time_utc" not in st.session_state:
 
 
 # =========================
-# UI tabs
+# Tabs
 # =========================
 tab1, tab2, tab3, tabP, tab4 = st.tabs([
     "1) Flight",
@@ -1177,6 +1151,7 @@ with tab1:
         st.session_state.flight_date = st.date_input("Flight date (Europe/Lisbon)", value=st.session_state.flight_date)
         reg = st.text_input("Aircraft Reg.", value=st.session_state.get("reg", ""))
         st.session_state["reg"] = reg.strip()
+
         st.session_state["mission_no"] = st.text_input("Mission/Ref (optional)", value=st.session_state.get("mission_no", ""))
 
     with c2:
@@ -1272,8 +1247,17 @@ with tab2:
 
             if not best:
                 st.markdown("<div class='box warn'><b>No runway data for this aerodrome.</b></div>", unsafe_allow_html=True)
+                st.session_state[f"rwy_{role}"] = ""
+                st.session_state[f"qfu_{role}"] = 0
+                st.session_state[f"toda_{role}"] = 0
+                st.session_state[f"lda_{role}"] = 0
             else:
                 rw = best["rw"]
+                st.session_state[f"rwy_{role}"] = rw["id"]
+                st.session_state[f"qfu_{role}"] = rw["qfu"]
+                st.session_state[f"toda_{role}"] = rw["toda"]
+                st.session_state[f"lda_{role}"] = rw["lda"]
+
                 st.markdown(
                     f"<div class='box'><b>Auto RWY</b>: {rw['id']} "
                     f"<span class='chip'>QFU {rw['qfu']:.0f}°</span><br>"
@@ -1453,7 +1437,7 @@ with tab3:
 # 4) Performance (Takeoff → Climb → Landing)
 # =========================
 with tabP:
-    st.markdown("#### Performance (Takeoff → Climb → Landing) — usa assets da pasta")
+    st.markdown("#### Performance (Takeoff → Climb → Landing) — assets na pasta")
 
     c1, c2, c3 = st.columns([0.22, 0.28, 0.50])
     with c1:
@@ -1461,7 +1445,7 @@ with tabP:
     with c2:
         show_previews = st.checkbox("Show preview charts", value=True)
     with c3:
-        st.caption("Nos gráficos: FEET/FPM apenas (sem percentagens). Percentagens só no PDF (TODR/LDR).")
+        st.caption("Labels nos gráficos: só ft/fpm. Sem percentagens (as % ficam só no PDF).")
 
     try:
         cap_to = load_json_asset("takeoff")
@@ -1498,7 +1482,7 @@ with tabP:
                     continue
 
                 rw = best["rw"]
-                hw = max(0.0, float(best["hw"]))  # headwind only
+                hw = max(0.0, float(best["hw"]))  # só headwind
                 oat = float(met["temp_c"])
                 pa = pa_ft_from_elev_qnh(ad["elev_ft"], met["qnh_hpa"])
 
@@ -1533,7 +1517,6 @@ with tabP:
 
             st.success("Performance computed for all legs.")
 
-    # Results table (UI: show meters or ft? keep meters simple; charts are ft)
     rows = []
     for i, leg in enumerate(st.session_state.legs):
         p = st.session_state.perf[i]
@@ -1542,7 +1525,6 @@ with tabP:
         if not p or "error" in (p or {}):
             rows.append((role, icao, "—", "—", "—"))
             continue
-
         todr_m = p["togr_ft"] * FT_TO_M
         ldr_m = p["ldgr_ft"] * FT_TO_M
         rows.append((role, icao, f"{todr_m:.0f} m", f"{p['roc_fpm']:.0f} fpm", f"{ldr_m:.0f} m"))
@@ -1567,10 +1549,10 @@ with tabP:
             cl_segs = p["paths"]["cl"]
             ld_segs = p["paths"]["ld"]
 
-            # ✅ FEET / FPM ONLY — NO %
-            to_label = f"{p['togr_ft']:.0f} ft"
-            cl_label = f"{p['roc_fpm']:.0f} fpm"
-            ld_label = f"{p['ldgr_ft']:.0f} ft"
+            # ✅ FT/FPM no gráfico (sem percentagens)
+            to_label = f"{float(p['togr_ft']):.0f} ft"
+            cl_label = f"{float(p['roc_fpm']):.0f} fpm"
+            ld_label = f"{float(p['ldgr_ft']):.0f} ft"
 
             to_tip = to_segs[-1][1] if to_segs else (40, 40)
             cl_tip = cl_segs[-1][1] if cl_segs else (40, 40)
@@ -1587,7 +1569,7 @@ with tabP:
 
 
 # =========================
-# 5) PDF (minimal controls)
+# 5) PDF
 # =========================
 with tab4:
     st.markdown("#### Generate final PDF")
@@ -1622,7 +1604,6 @@ with tab4:
             put("MTOW", f"{MTOW_LB:.0f}")
             put("MLW", f"{MLW_LB:.0f}")
 
-            # W&B strings
             def w_str(lb):
                 kg = lb / KG_TO_LB
                 return f"{lb:.0f} ({kg:.0f}kg)"
@@ -1661,7 +1642,6 @@ with tab4:
             put("Moment_TAKEOFF", f"{wb.get('takeoff_m',0.0):.0f}")
             put("Datum_TAKEOFF", f"{wb.get('takeoff_cg',0.0):.1f}")
 
-            # Airfield blocks (page 1)
             def pa_da(elev_ft, qnh_hpa, oat_c):
                 pa_ft = float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
                 isa = 15.0 - 2.0 * (float(elev_ft) / 1000.0)
@@ -1690,13 +1670,17 @@ with tab4:
                 put(f"Wind_{suf}", f"{int(met['wind_dir']):03d}/{int(met['wind_kt']):02d}")
 
                 pa_ft, da_ft = pa_da(ad["elev_ft"], met["qnh_hpa"], met["temp_c"])
+
                 if suf == "DEPARTURE":
                     put("Pressure_Alt _DEPARTURE", f"{pa_ft:.0f}")
+                else:
+                    put(f"Pressure_Alt_{suf}", f"{pa_ft:.0f}")
+
                 put(f"Density_Alt_{suf}", f"{da_ft:.0f}")
                 put(f"TODA_{suf}", f"{float(rw['toda']):.0f}")
                 put(f"LDA_{suf}", f"{float(rw['lda']):.0f}")
 
-                # PERFORMANCE fields (TODR/LDR/ROC) — percentagens só AQUI (PDF)
+                # PERFORMANCE no PDF: METROS + (PCT) — (gráficos ficam em ft/fpm sem %)
                 perf_list = st.session_state.get("perf") or [None]*len(st.session_state.legs)
                 perf = perf_list[i] or {}
 
@@ -1712,7 +1696,6 @@ with tab4:
                 if roc is not None and float(roc) > 0:
                     put(f"ROC_{suf}", f"{float(roc):.0f}")
 
-            # Fuel planning fields
             def fuel_str(liters):
                 liters = float(liters)
                 if abs(liters - float(FUEL_USABLE_L)) < 0.5:
@@ -1754,7 +1737,6 @@ with tab4:
             put("Total_TIME", fmt_hm(int(fuel.get("total_min", 0))))
             put("Total_FUEL", fuel_str(float(fuel.get("total_l", 0.0))))
 
-            # Fill PDF then overlay CG on page 0
             base_filled = fill_pdf(template_bytes, f)
 
             chart_points = [
@@ -1764,12 +1746,11 @@ with tab4:
             ]
             filled_with_cg = draw_cg_overlay_on_page0(base_filled, chart_points)
 
-            # Final PDF: first page is SBS only (no original pages)
+            # 1ª página: sempre side-by-side (e não incluímos as páginas originais)
             page1_img = pdf_two_pages_side_by_side_image(filled_with_cg, dpi=SBS_DPI, bg=(255, 255, 255))
             out_pages: List[Image.Image] = [page1_img]
 
             if include_perf_pages:
-                # render and compose 2x2 per mode
                 cap_to = load_json_asset("takeoff")
                 cap_cl = load_json_asset("climb")
                 cap_ld = load_json_asset("landing")
@@ -1777,11 +1758,14 @@ with tab4:
                 bg_cl = load_background_asset("climb")
                 bg_ld = load_background_asset("landing", page_index=0, zoom=LANDING_BG_ZOOM)
 
-                charts_to, charts_cl, charts_ld = [], [], []
+                charts_to = []
+                charts_cl = []
+                charts_ld = []
 
                 for i, leg in enumerate(st.session_state.legs):
                     p = (st.session_state.get("perf") or [None]*4)[i] or {}
                     title = f"{leg['icao']} {leg['role']}"
+
                     if not p or "error" in p or "paths" not in p:
                         placeholder = Image.new("RGB", bg_to.size, (255, 255, 255))
                         d = ImageDraw.Draw(placeholder)
@@ -1795,7 +1779,7 @@ with tab4:
                     cl_segs = p["paths"]["cl"]
                     ld_segs = p["paths"]["ld"]
 
-                    # ✅ FEET / FPM ONLY — NO %
+                    # ✅ FT/FPM no gráfico (sem percentagens)
                     to_label = f"{float(p['togr_ft']):.0f} ft"
                     cl_label = f"{float(p['roc_fpm']):.0f} fpm"
                     ld_label = f"{float(p['ldgr_ft']):.0f} ft"
@@ -1830,6 +1814,4 @@ with tab4:
 
         except Exception as e:
             st.error(f"PDF error: {e}")
-
-
 
