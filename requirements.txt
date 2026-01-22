@@ -5,3 +5,4 @@ numpy>=1.26
 streamlit-image-coordinates>=0.2.0
 pypdf
 reportlab
+fpdf
