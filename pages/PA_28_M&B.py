@@ -1563,8 +1563,11 @@ def fmt_m_and_pct(req_m: float, avail_m: float) -> str:
 
 with tabP:
     st.markdown("#### Performance (Takeoff → Climb → Landing) — auto from legs + weather + W&B")
-    
+
+    right = st.columns([0.70, 0.30])[1]
+    with right:
         preview_imgs = st.checkbox("Show preview images", value=True)
+        ldg_zoom = st.number_input("Landing PDF zoom", value=2.3, step=0.1)
         compute_perf = st.button("Compute performance for all legs", type="primary")
 
     if compute_perf:
