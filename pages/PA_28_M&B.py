@@ -1,9 +1,9 @@
-# app.py — PA28 Archer III (Sevenair) — M&B + Weather + Performance + PDF + CG + 4-up + Side-by-side first page
+# app.py — PA28 Archer III (Sevenair) — M&B + Weather + Performance + PDF
 # Execução:
 #   pip install streamlit requests pytz pypdf reportlab pymupdf pillow numpy
 #   streamlit run app.py
 #
-# Assets esperados (na mesma pasta, ou via upload no tab Performance se quiseres):
+# Assets esperados (na mesma pasta):
 #   - RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf   (template M&B)
 #   - takeoff: to_ground_roll.jpg + to_ground_roll.json
 #   - landing: ldg_ground_roll.pdf + ldg_ground_roll.json
@@ -101,9 +101,7 @@ def clamp(v, lo, hi):
 
 def _here(name: str) -> Optional[Path]:
     p = Path(name)
-    if p.exists():
-        return p
-    return None
+    return p if p.exists() else None
 
 
 def _to_float(x, default=None):
@@ -115,6 +113,10 @@ def _to_float(x, default=None):
 
 def _ft_to_m(ft):
     return float(ft) * 0.3048
+
+
+def _m_to_ft(m):
+    return float(m) / 0.3048
 
 
 def _rw_ident_to_qfu_deg(ident: str):
@@ -171,6 +173,13 @@ MTOW_LB = 2550.0
 MLW_LB = 2550.0
 
 PDF_TEMPLATE_PATHS = ["RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"]
+
+# Side-by-side (fixo como pediste)
+SBS_DPI = 500
+SBS_ALIGN = "height"
+SBS_GAP_PX = 0
+SBS_BG = (255, 255, 255)
+SBS_SHARPEN = True
 
 
 # =========================================================
@@ -238,7 +247,7 @@ def build_aerodromes_db(icaos):
 
         db[icao] = {"name": name, "lat": lat, "lon": lon, "elev_ft": elev_ft, "runways": runways}
 
-    # OVERRIDES (dados operacionais reais / consistentes)
+    # OVERRIDES
     # LPSO: RWY03/21 headings 026/206, length 1800m
     if "LPSO" in db:
         db["LPSO"]["name"] = "Ponte de Sôr"
@@ -277,7 +286,6 @@ ICAO_OPTIONS = sorted(AERODROMES_DB.keys())
 # Wind/runway helpers
 # =========================================================
 def wind_components(qfu_deg, wind_dir_deg, wind_speed_kt):
-    # wind_dir is FROM
     diff = ((wind_dir_deg - qfu_deg + 180) % 360) - 180
     hw = wind_speed_kt * cos(radians(diff))
     cw = wind_speed_kt * sin(radians(diff))
@@ -611,15 +619,6 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
 # Performance solver assets + math (takeoff/landing/climb)
 # =========================================================
 ASSETS = {
-    "landing": {
-        "title": "Landing Ground Roll",
-        "bg_default": "ldg_ground_roll.pdf",
-        "json_default": "ldg_ground_roll.json",
-        "bg_kind": "pdf",
-        "page_default": 0,
-        "round_to": 5,
-        "label_font": 20,
-    },
     "takeoff": {
         "title": "Takeoff Ground Roll",
         "bg_default": "to_ground_roll.jpg",
@@ -638,15 +637,22 @@ ASSETS = {
         "round_to": 10,
         "label_font": 20,
     },
+    "landing": {
+        "title": "Landing Ground Roll",
+        "bg_default": "ldg_ground_roll.pdf",
+        "json_default": "ldg_ground_roll.json",
+        "bg_kind": "pdf",
+        "page_default": 0,
+        "round_to": 5,
+        "label_font": 20,
+    },
 }
 
-def load_json_asset(mode: str, upload_json=None) -> Dict[str, Any]:
+def load_json_asset(mode: str) -> Dict[str, Any]:
     info = ASSETS[mode]
-    if upload_json is not None:
-        return json.loads(upload_json.read().decode("utf-8"))
     p = _here(info["json_default"])
     if not p:
-        raise FileNotFoundError(f"Não encontrei {info['json_default']}")
+        raise FileNotFoundError(f"Não encontrei {info['json_default']} na pasta.")
     return json.loads(p.read_text(encoding="utf-8"))
 
 @st.cache_data(show_spinner=False)
@@ -658,24 +664,17 @@ def render_pdf_to_image(pdf_bytes: bytes, page_index: int, zoom: float) -> Image
     doc.close()
     return img
 
-def load_background_asset(mode: str, upload_bg=None, page_index: int = 0, zoom: float = 2.3) -> Image.Image:
+def load_background_asset(mode: str, page_index: int = 0, zoom: float = 2.3) -> Image.Image:
     info = ASSETS[mode]
     if info["bg_kind"] == "pdf":
-        if upload_bg is not None:
-            pdf_bytes = upload_bg.read()
-        else:
-            p = _here(info["bg_default"])
-            if not p:
-                raise FileNotFoundError(f"Não encontrei {info['bg_default']}")
-            pdf_bytes = p.read_bytes()
-        return render_pdf_to_image(pdf_bytes, page_index=page_index, zoom=zoom)
-
-    if upload_bg is not None:
-        return Image.open(upload_bg).convert("RGB")
+        p = _here(info["bg_default"])
+        if not p:
+            raise FileNotFoundError(f"Não encontrei {info['bg_default']} na pasta.")
+        return render_pdf_to_image(p.read_bytes(), page_index=page_index, zoom=zoom)
 
     p = _here(info["bg_default"])
     if not p:
-        raise FileNotFoundError(f"Não encontrei {info['bg_default']}")
+        raise FileNotFoundError(f"Não encontrei {info['bg_default']} na pasta.")
     return Image.open(p).convert("RGB")
 
 def pt_xy(p: Any) -> Tuple[float, float]:
@@ -822,7 +821,7 @@ def solve_ground_roll(
     ax_wt_a, ax_wt_b = fit_axis_value_from_ticks(ticks["weight_x100_lb"], "x")
     ax_wind_a, ax_wind_b = fit_axis_value_from_ticks(ticks["wind_kt"], "x")
 
-    out_axis_key = "ground_roll_ft" if mode == "landing" else "takeoff_gr_ft"
+    out_axis_key = "takeoff_gr_ft" if mode == "takeoff" else "ground_roll_ft"
     ax_out_a, ax_out_b = fit_axis_value_from_ticks(ticks[out_axis_key], "y")
 
     if not lines.get("weight_ref_line"):
@@ -869,19 +868,7 @@ def solve_ground_roll(
     x_right_edge = float(right_panel[1]["x"])
     segs.append(((x_wind, y_out), (x_right_edge, y_out)))
 
-    debug = {
-        "x_oat": x_oat,
-        "y_entry": y_entry,
-        "x_ref_mid": x_ref_mid,
-        "x_wt": x_wt,
-        "y_mid": y_mid,
-        "x_ref_right": x_ref_right,
-        "x_wind": x_wind,
-        "y_out": y_out,
-        "pa_interp": {"lo": (lo_ft, k_lo), "hi": (hi_ft, k_hi), "alpha": alpha},
-        "guide_mid": dbg_mid,
-        "guide_right": dbg_right,
-    }
+    debug = {"guide_mid": dbg_mid, "guide_right": dbg_right}
     return out_val, segs, debug
 
 def solve_climb(
@@ -916,18 +903,11 @@ def solve_climb(
         ((x_oat, y_bottom), (x_oat, y)),
         ((x_oat, y), (x_right_edge, y)),
     ]
-
-    debug = {
-        "x_oat": x_oat,
-        "y": y,
-        "x_right_edge": x_right_edge,
-        "pa_interp": {"lo": (lo_ft, k_lo), "hi": (hi_ft, k_hi), "alpha": alpha},
-    }
-    return roc, segs, debug
+    return roc, segs, {}
 
 
 # =========================================================
-# Pretty drawing for performance images (no ugly white box)
+# Pretty perf drawing (badge clean)
 # =========================================================
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     try:
@@ -942,16 +922,7 @@ def text_bbox(draw: ImageDraw.ImageDraw, text: str, font) -> Tuple[int, int]:
     except Exception:
         return (8 * len(text), 14)
 
-def place_label_smart(
-    draw: ImageDraw.ImageDraw,
-    img_w: int,
-    img_h: int,
-    tip: Tuple[float, float],
-    text: str,
-    font,
-    pad: int = 4,
-    safe_margin: int = 8,
-) -> Tuple[Tuple[int, int], Tuple[int, int, int, int]]:
+def place_label_smart(draw, img_w, img_h, tip, text, font, pad=4, safe_margin=8):
     tx, ty = int(tip[0]), int(tip[1])
     tw, th = text_bbox(draw, text, font)
     candidates = [
@@ -965,7 +936,7 @@ def place_label_smart(
         (-tw // 2, 12),
     ]
 
-    def ok(x: int, y: int) -> bool:
+    def ok(x, y):
         rx0 = x - pad
         ry0 = y - pad
         rx1 = x + tw + pad
@@ -1023,22 +994,19 @@ def make_pretty_perf_image(bg: Image.Image, path, value_text: str, title: str, l
 
     if path:
         draw_path_clean(d, path)
-
         tip = path[-1][1]
         font = load_font(label_font_size)
         pos, _ = place_label_smart(d, img.size[0], img.size[1], tip, value_text, font)
         img = draw_badge(img, pos, value_text, font)
 
-    # title top
     title_font = load_font(22)
     d = ImageDraw.Draw(img)
     d.text((18, 14), title, fill=(20, 20, 20), font=title_font)
-
     return img
 
 
 # =========================================================
-# 4-up pages for performance (3 pages) + append to PDF
+# 4-up pages for performance (order: TO -> CLIMB -> LDG)
 # =========================================================
 def build_perf_4up_page(images_by_role: List[Tuple[str, Image.Image]], title: str) -> bytes:
     W, H = landscape(A4)
@@ -1088,14 +1056,15 @@ def append_perf_pages(base_pdf_bytes: bytes, perf: dict) -> bytes:
         writer.add_page(p)
 
     order = ["DEPARTURE", "ARRIVAL", "ALTERNATE_1", "ALTERNATE_2"]
+
     def role_label(role):
         info = perf.get(role, {})
         return info.get("inputs", {}).get("label", role)
 
     pages = [
-        ("TAKEOFF — Ground Roll", "takeoff"),
-        ("LANDING — Ground Roll", "landing"),
+        ("TAKEOFF — Distance Required", "takeoff"),
         ("CLIMB — Rate of Climb", "climb"),
+        ("LANDING — Distance Required", "landing"),
     ]
 
     for title, key in pages:
@@ -1114,7 +1083,7 @@ def append_perf_pages(base_pdf_bytes: bytes, perf: dict) -> bytes:
 
 
 # =========================================================
-# Side-by-side first page (MB PDF -> image -> single-page PDF -> prepend)
+# Side-by-side (MB PDF -> image -> single-page PDF)
 # =========================================================
 def _pixmap_to_pil(pix: fitz.Pixmap, bg=(255, 255, 255)) -> Image.Image:
     if pix.alpha:
@@ -1205,18 +1174,6 @@ def image_to_single_page_pdf(img: Image.Image, dpi: int = 300) -> bytes:
     c.save()
     return buf.getvalue()
 
-def prepend_pdf(first_page_pdf_bytes: bytes, rest_pdf_bytes: bytes) -> bytes:
-    r1 = PdfReader(io.BytesIO(first_page_pdf_bytes))
-    r2 = PdfReader(io.BytesIO(rest_pdf_bytes))
-    w = PdfWriter()
-    for p in r1.pages:
-        w.add_page(p)
-    for p in r2.pages:
-        w.add_page(p)
-    out = io.BytesIO()
-    w.write(out)
-    return out.getvalue()
-
 
 # =========================================================
 # Session defaults (legs)
@@ -1289,7 +1246,9 @@ with st.sidebar:
 # =========================================================
 # Tabs
 # =========================================================
-tab1, tab2, tab3, tabP, tab4 = st.tabs(["1) Flight", "2) Aerodromes & Weather", "3) Weight & Fuel", "4) Performance", "5) PDF"])
+tab1, tab2, tab3, tabP, tab4 = st.tabs(
+    ["1) Flight", "2) Aerodromes & Weather", "3) Weight & Fuel", "4) Performance", "5) PDF"]
+)
 
 
 # =========================================================
@@ -1407,27 +1366,17 @@ with tab2:
             )
 
         with c3:
-            met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013, "label": "", "target": ""}
+            met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013}
             ad = AERODROMES_DB[st.session_state.legs[i]["icao"]]
             best = choose_best_runway_by_wind(ad, met["wind_dir"], met["wind_kt"])
 
             if not best:
                 st.markdown("<div class='box warn'><b>No runway data for this aerodrome.</b></div>", unsafe_allow_html=True)
-                st.session_state[f"rwy_{role}"] = ""
-                st.session_state[f"qfu_{role}"] = 0
-                st.session_state[f"toda_{role}"] = 0
-                st.session_state[f"lda_{role}"] = 0
             else:
                 rw = best["rw"]
-                st.session_state[f"rwy_{role}"] = rw["id"]
-                st.session_state[f"qfu_{role}"] = rw["qfu"]
-                st.session_state[f"toda_{role}"] = rw["toda"]
-                st.session_state[f"lda_{role}"] = rw["lda"]
-
                 st.markdown(
                     f"<div class='box'><b>Auto RWY</b>: {rw['id']} "
                     f"<span class='chip'>QFU {rw['qfu']:.0f}°</span><br>"
-                    f"HW {best['hw']:.0f} kt · XW {best['side']} {best['xw']:.0f} kt<br>"
                     f"TODA {rw['toda']:.0f} m · LDA {rw['lda']:.0f} m</div>",
                     unsafe_allow_html=True,
                 )
@@ -1509,7 +1458,6 @@ with tab3:
 
     ew_cg = (ew_mom / ew_lb) if ew_lb > 0 else 0.0
 
-    # moments
     mom_front = front_lb * ARM_FRONT
     mom_rear = rear_lb * ARM_REAR
     mom_fuel = fuel_lb * ARM_FUEL
@@ -1554,32 +1502,6 @@ with tab3:
             unsafe_allow_html=True
         )
 
-        st.markdown("#### Fuel planning (for PDF)")
-        rows = [
-            ("Start-up & Taxi", taxi_min, taxi_l),
-            ("Climb", climb_min, climb_l),
-            ("Enroute", enrt_min_eff, enrt_l),
-            ("Descent", desc_min, desc_l),
-            ("Trip Fuel (2+3+4)", trip_min, trip_l),
-            ("Contingency 5%", cont_min, cont_l),
-            ("Alternate", alt_min, alt_l),
-            ("Reserve 45 min", reserve_min, reserve_l),
-            ("Required Ramp", req_ramp_min, req_ramp_l),
-            ("Extra", extra_min, extra_l),
-            ("Total Ramp", total_ramp_min, total_ramp_l),
-            ("Fuel loaded", 0, fuel_l),
-        ]
-        html = ["<table class='tbl'><tr><th>Item</th><th>Time</th><th>Fuel</th></tr>"]
-        for name, mins, liters in rows:
-            if name == "Fuel loaded" and abs(liters - FUEL_USABLE_L) < 0.5:
-                usg = FUEL_USABLE_USG
-            else:
-                usg = liters * L_TO_USG
-            t = fmt_hm(mins) if mins else "—"
-            html.append(f"<tr><td>{name}</td><td>{t}</td><td>{usg:.1f} USG ({liters:.1f} L)</td></tr>")
-        html.append("</table>")
-        st.markdown("".join(html), unsafe_allow_html=True)
-
     st.session_state["_wb"] = {
         "ew_lb": ew_lb, "ew_mom": ew_mom,
         "front_lb": front_lb, "rear_lb": rear_lb, "bag_lb": bag_lb, "fuel_lb": fuel_lb,
@@ -1606,7 +1528,7 @@ with tab3:
 
 
 # =========================================================
-# 4) Performance (auto compute for legs)
+# 4) Performance (no uploads — uses assets in folder)
 # =========================================================
 def pa_da(elev_ft, qnh_hpa, oat_c):
     pa_ft = float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
@@ -1633,21 +1555,17 @@ def perf_inputs_for_leg(role, icao, met, rw, ad, wb):
         "label": f"{icao} {role.replace('_',' ').title()}",
     }
 
+def fmt_m_and_pct(req_m: float, avail_m: float) -> str:
+    req_m = max(0.0, float(req_m))
+    avail_m = max(0.0, float(avail_m))
+    pct = (req_m / avail_m * 100.0) if avail_m > 1e-6 else 0.0
+    return f"{req_m:.0f} m ({pct:.0f}%)"
+
 with tabP:
-    st.markdown("#### Performance (Landing / Takeoff / Climb) — auto from legs + weather + W&B")
+    st.markdown("#### Performance (Takeoff → Climb → Landing) — auto from legs + weather + W&B")
 
-    cL, cR = st.columns([0.62, 0.38])
-
-    with cR:
-        st.markdown("##### Assets")
-        upload_to_bg = st.file_uploader("Upload Takeoff BG (jpg)", type=["jpg","jpeg","png"], key="up_to_bg")
-        upload_to_json = st.file_uploader("Upload Takeoff JSON", type=["json"], key="up_to_json")
-        upload_ldg_bg = st.file_uploader("Upload Landing BG (pdf)", type=["pdf"], key="up_ldg_bg")
-        upload_ldg_json = st.file_uploader("Upload Landing JSON", type=["json"], key="up_ldg_json")
-        upload_clb_bg = st.file_uploader("Upload Climb BG (jpg)", type=["jpg","jpeg","png"], key="up_clb_bg")
-        upload_clb_json = st.file_uploader("Upload Climb JSON", type=["json"], key="up_clb_json")
-
-        st.markdown("##### Compute")
+    right = st.columns([0.70, 0.30])[1]
+    with right:
         preview_imgs = st.checkbox("Show preview images", value=True)
         ldg_zoom = st.number_input("Landing PDF zoom", value=2.3, step=0.1)
         compute_perf = st.button("Compute performance for all legs", type="primary")
@@ -1658,13 +1576,13 @@ with tabP:
             st.error("W&B not ready. Go to tab 'Weight & Fuel' first.")
         else:
             try:
-                cap_to = load_json_asset("takeoff", upload_to_json)
-                cap_ldg = load_json_asset("landing", upload_ldg_json)
-                cap_clb = load_json_asset("climb", upload_clb_json)
+                cap_to = load_json_asset("takeoff")
+                cap_clb = load_json_asset("climb")
+                cap_ldg = load_json_asset("landing")
 
-                bg_to = load_background_asset("takeoff", upload_to_bg, page_index=0, zoom=1.0)
-                bg_ldg = load_background_asset("landing", upload_ldg_bg, page_index=0, zoom=float(ldg_zoom))
-                bg_clb = load_background_asset("climb", upload_clb_bg, page_index=0, zoom=1.0)
+                bg_to = load_background_asset("takeoff", page_index=0, zoom=1.0)
+                bg_clb = load_background_asset("climb", page_index=0, zoom=1.0)
+                bg_ldg = load_background_asset("landing", page_index=0, zoom=float(ldg_zoom))
 
                 perf = {}
                 for i, leg in enumerate(st.session_state.legs):
@@ -1680,27 +1598,46 @@ with tabP:
                     rw = best["rw"]
                     inp = perf_inputs_for_leg(role, icao, met, rw, ad, wb)
 
-                    raw_to, segs_to, _ = solve_ground_roll(cap_to, mode="takeoff", oat_c=inp["oat_c"], pa_ft=inp["pa_ft"], weight_lb=inp["takeoff_w_lb"], wind_kt=inp["headwind_kt"])
+                    # Takeoff GR (ft -> m) -> TODR
+                    raw_to, segs_to, _ = solve_ground_roll(
+                        cap_to, mode="takeoff",
+                        oat_c=inp["oat_c"], pa_ft=inp["pa_ft"],
+                        weight_lb=inp["takeoff_w_lb"], wind_kt=inp["headwind_kt"]
+                    )
                     to_ft = round_to_step(raw_to, ASSETS["takeoff"]["round_to"])
+                    to_m = _ft_to_m(to_ft)
 
-                    raw_ldg, segs_ldg, _ = solve_ground_roll(cap_ldg, mode="landing", oat_c=inp["oat_c"], pa_ft=inp["pa_ft"], weight_lb=inp["landing_w_lb"], wind_kt=inp["headwind_kt"])
-                    ldg_ft = round_to_step(raw_ldg, ASSETS["landing"]["round_to"])
-
+                    # Climb ROC
                     raw_roc, segs_roc, _ = solve_climb(cap_clb, oat_c=inp["oat_c"], pa_ft=inp["pa_ft"])
                     roc_fpm = round_to_step(raw_roc, ASSETS["climb"]["round_to"])
 
+                    # Landing GR (ft -> m) -> LDR
+                    raw_ldg, segs_ldg, _ = solve_ground_roll(
+                        cap_ldg, mode="landing",
+                        oat_c=inp["oat_c"], pa_ft=inp["pa_ft"],
+                        weight_lb=inp["landing_w_lb"], wind_kt=inp["headwind_kt"]
+                    )
+                    ldg_ft = round_to_step(raw_ldg, ASSETS["landing"]["round_to"])
+                    ldg_m = _ft_to_m(ldg_ft)
+
+                    tod_r_str = fmt_m_and_pct(to_m, inp["toda_m"])
+                    ldr_str = fmt_m_and_pct(ldg_m, inp["lda_m"])
+
                     imgs = {
-                        "takeoff": make_pretty_perf_image(bg_to, segs_to, f"{to_ft:.0f} ft", inp["label"], label_font_size=ASSETS["takeoff"]["label_font"]),
-                        "landing": make_pretty_perf_image(bg_ldg, segs_ldg, f"{ldg_ft:.0f} ft", inp["label"], label_font_size=ASSETS["landing"]["label_font"]),
+                        "takeoff": make_pretty_perf_image(bg_to, segs_to, tod_r_str, inp["label"], label_font_size=ASSETS["takeoff"]["label_font"]),
                         "climb":   make_pretty_perf_image(bg_clb, segs_roc, f"{roc_fpm:.0f} fpm", inp["label"], label_font_size=ASSETS["climb"]["label_font"]),
+                        "landing": make_pretty_perf_image(bg_ldg, segs_ldg, ldr_str, inp["label"], label_font_size=ASSETS["landing"]["label_font"]),
                     }
 
                     perf[role] = {
-                        "takeoff_gr_ft": float(to_ft),
-                        "landing_gr_ft": float(ldg_ft),
+                        "todr_m": float(to_m),
+                        "todr_str": tod_r_str,
+                        "ldr_m": float(ldg_m),
+                        "ldr_str": ldr_str,
                         "roc_fpm": float(roc_fpm),
                         "inputs": inp,
                         "imgs": imgs,
+                        "raw": {"to_ft": float(to_ft), "ldg_ft": float(ldg_ft)},
                     }
 
                 st.session_state.perf = perf
@@ -1712,7 +1649,7 @@ with tabP:
     if not perf:
         st.info("Compute performance to populate values and images.")
     else:
-        st.markdown("##### Results")
+        st.markdown("##### Results (TODR / ROC / LDR)")
         order = ["DEPARTURE", "ARRIVAL", "ALTERNATE_1", "ALTERNATE_2"]
 
         rows = []
@@ -1721,54 +1658,45 @@ with tabP:
                 continue
             rows.append((
                 perf[r]["inputs"]["label"],
-                f"{perf[r]['takeoff_gr_ft']:.0f}",
-                f"{perf[r]['landing_gr_ft']:.0f}",
-                f"{perf[r]['roc_fpm']:.0f}",
+                perf[r]["todr_str"],
+                f"{perf[r]['roc_fpm']:.0f} fpm",
+                perf[r]["ldr_str"],
                 f"{perf[r]['inputs']['headwind_kt']:.0f}",
                 perf[r]["inputs"]["runway_id"],
             ))
 
         st.markdown(
             "<table class='tbl'>"
-            "<tr><th>Leg</th><th>TO GR (ft)</th><th>LDG GR (ft)</th><th>ROC (fpm)</th><th>HW (kt)</th><th>RWY</th></tr>"
+            "<tr><th>Leg</th><th>TODR</th><th>CLIMB</th><th>LDR</th><th>HW (kt)</th><th>RWY</th></tr>"
             + "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td><td>{d}</td><td>{e}</td><td>{f}</td></tr>" for a,b,c,d,e,f in rows])
             + "</table>",
             unsafe_allow_html=True,
         )
 
         if preview_imgs:
-            st.markdown("##### Preview images (per leg)")
+            st.markdown("##### Preview images (per leg) — Takeoff → Climb → Landing")
             for r in order:
                 if r not in perf:
                     continue
                 st.markdown(f"**{perf[r]['inputs']['label']}**")
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.image(perf[r]["imgs"]["takeoff"], caption="Takeoff", use_container_width=True)
+                    st.image(perf[r]["imgs"]["takeoff"], caption="Takeoff (TODR)", use_container_width=True)
                 with c2:
-                    st.image(perf[r]["imgs"]["landing"], caption="Landing", use_container_width=True)
+                    st.image(perf[r]["imgs"]["climb"], caption="Climb (ROC)", use_container_width=True)
                 with c3:
-                    st.image(perf[r]["imgs"]["climb"], caption="Climb", use_container_width=True)
+                    st.image(perf[r]["imgs"]["landing"], caption="Landing (LDR)", use_container_width=True)
                 st.divider()
 
 
 # =========================================================
-# 5) PDF (fill + CG + performance fields + append 4-up + prepend side-by-side)
+# 5) PDF (only side-by-side as first page)
+#   option: include performance pages or not
 # =========================================================
 with tab4:
-    st.markdown("#### Generate filled PDF")
+    st.markdown("#### Generate PDF")
 
-    opt_col1, opt_col2 = st.columns([0.6, 0.4])
-    with opt_col2:
-        st.markdown("##### Output options")
-        add_perf_pages = st.checkbox("Append 4-up performance pages (3 pages)", value=True)
-        add_side_by_side_first = st.checkbox("Add side-by-side preview as FIRST page", value=True)
-        sbs_dpi = st.slider("Side-by-side DPI", 200, 600, 300, 50)
-        sbs_align = st.radio("Side-by-side align", ["height", "width"], index=0, horizontal=True)
-        sbs_gap = st.number_input("Side-by-side gap (px)", min_value=0, max_value=100, value=0, step=1)
-        sbs_sharpen = st.checkbox("Side-by-side sharpen", value=True)
-        bg_choice = st.selectbox("Side-by-side background", ["White", "Light gray", "Black"], index=0)
-        sbs_bg = {"White": (255,255,255), "Light gray": (246,248,251), "Black": (0,0,0)}[bg_choice]
+    include_perf_pages = st.checkbox("Include Performance pages (4-up)", value=True)
 
     try:
         template_bytes = read_pdf_bytes(PDF_TEMPLATE_PATHS)
@@ -1786,7 +1714,7 @@ with tab4:
             if name in fieldset:
                 f[name] = value
 
-        def put_any(candidates: List[str], value):
+        def put_any(candidates: List[str], value) -> bool:
             for nm in candidates:
                 if nm in fieldset:
                     f[nm] = value
@@ -1804,7 +1732,7 @@ with tab4:
         for nm in ["MLW", "MLW_LB", "Max_Landing_Weight", "Maximum_Landing_Weight", "MaxLandingWeight", "Max_Landing_Wt"]:
             put(nm, f"{MLW_LB:.0f}")
 
-        # Loading page 0
+        # W&B page 0
         def w_str(lb):
             kg = lb / KG_TO_LB
             return f"{lb:.0f} ({kg:.0f}kg)"
@@ -1843,7 +1771,13 @@ with tab4:
         put("Moment_TAKEOFF", f"{wb.get('takeoff_m',0.0):.0f}")
         put("Datum_TAKEOFF", f"{wb.get('takeoff_cg',0.0):.1f}")
 
-        # Airfield blocks (page 1)
+        # Airfield blocks
+        def pa_da(elev_ft, qnh_hpa, oat_c):
+            pa_ft = float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
+            isa = 15.0 - 2.0 * (float(elev_ft) / 1000.0)
+            da_ft = pa_ft + 120.0 * (float(oat_c) - isa)
+            return pa_ft, da_ft
+
         for i, leg in enumerate(st.session_state.legs):
             role = leg["role"]
             icao = leg["icao"]
@@ -1865,7 +1799,6 @@ with tab4:
             put(f"Wind_{suf}", f"{met['wind_dir']:03d}/{met['wind_kt']:02d}")
 
             pa_ft, da_ft = pa_da(ad["elev_ft"], met["qnh_hpa"], met["temp_c"])
-
             if f"Pressure_Alt_{suf}" in fieldset:
                 put(f"Pressure_Alt_{suf}", f"{pa_ft:.0f}")
             elif suf == "DEPARTURE" and "Pressure_Alt _DEPARTURE" in fieldset:
@@ -1875,7 +1808,7 @@ with tab4:
             put(f"TODA_{suf}", f"{rw['toda']:.0f}")
             put(f"LDA_{suf}", f"{rw['lda']:.0f}")
 
-        # Fuel planning fields (USG + liters)
+        # Fuel planning fields
         def fuel_str(liters):
             liters = float(liters)
             if abs(liters - float(FUEL_USABLE_L)) < 0.5:
@@ -1917,40 +1850,52 @@ with tab4:
         put("Total_TIME", fmt_hm(int(fuel.get("total_min", 0))))
         put("Total_FUEL", fuel_str(float(fuel.get("total_l", 0.0))))
 
-        # Performance values -> PDF (best-effort field-name variants)
+        # Performance -> PDF: TODR + LDR (m + percent) + ROC (fpm)
         if perf:
             for role, data in perf.items():
                 suf = role
-                put_any([f"TO_GR_{suf}", f"Takeoff_GR_{suf}", f"TakeoffGroundRoll_{suf}", f"TO_GroundRoll_{suf}", f"TakeoffGroundRollFt_{suf}"], f"{data['takeoff_gr_ft']:.0f}")
-                put_any([f"LDG_GR_{suf}", f"Landing_GR_{suf}", f"LandingGroundRoll_{suf}", f"LDG_GroundRoll_{suf}", f"LandingGroundRollFt_{suf}"], f"{data['landing_gr_ft']:.0f}")
-                put_any([f"ROC_{suf}", f"Climb_ROC_{suf}", f"RateOfClimb_{suf}", f"ROC_FPM_{suf}", f"ClimbFPM_{suf}"], f"{data['roc_fpm']:.0f}")
+                # TODR
+                put_any(
+                    [f"TODR_{suf}", f"TO_DR_{suf}", f"TakeoffDR_{suf}", f"Takeoff_DistanceRequired_{suf}", f"TakeoffDistanceRequired_{suf}"],
+                    data["todr_str"]
+                )
+                # LDR
+                put_any(
+                    [f"LDR_{suf}", f"LDG_DR_{suf}", f"LandingDR_{suf}", f"Landing_DistanceRequired_{suf}", f"LandingDistanceRequired_{suf}"],
+                    data["ldr_str"]
+                )
+                # ROC
+                put_any(
+                    [f"ROC_{suf}", f"Climb_ROC_{suf}", f"RateOfClimb_{suf}", f"ROC_FPM_{suf}", f"ClimbFPM_{suf}"],
+                    f"{data['roc_fpm']:.0f}"
+                )
 
         # Fill PDF
         base_filled = fill_pdf(template_bytes, f)
 
-        # CG overlay points (Empty/Takeoff/Landing only)
+        # CG overlay points
         chart_points = [
             {"label": "Empty",   "cg": ew_cg,                   "w": ew_lb,                 "rgb": (0.10, 0.60, 0.15)},
             {"label": "Takeoff", "cg": wb.get("takeoff_cg", 0), "w": wb.get("takeoff_w",0), "rgb": (0.10, 0.30, 0.85)},
             {"label": "Landing", "cg": wb.get("landing_cg", 0), "w": wb.get("landing_w",0), "rgb": (0.85, 0.15, 0.15)},
         ]
-        mb_pdf = draw_cg_overlay_on_page0(base_filled, chart_points)  # "mass & balance" part
+        mb_pdf = draw_cg_overlay_on_page0(base_filled, chart_points)
 
-        # Build side-by-side FIRST page from the M&B part only (2 pages)
-        if add_side_by_side_first:
-            sbs_img = mb_pdf_to_side_by_side_image(mb_pdf, dpi=int(sbs_dpi), align_by=sbs_align, gap_px=int(sbs_gap), bg=sbs_bg, sharpen=sbs_sharpen)
-            sbs_page_pdf = image_to_single_page_pdf(sbs_img, dpi=int(sbs_dpi))
-        else:
-            sbs_page_pdf = None
+        # Side-by-side FIRST page from the filled+CG M&B PDF
+        sbs_img = mb_pdf_to_side_by_side_image(
+            mb_pdf,
+            dpi=SBS_DPI,
+            align_by=SBS_ALIGN,
+            gap_px=SBS_GAP_PX,
+            bg=SBS_BG,
+            sharpen=SBS_SHARPEN,
+        )
+        sbs_page_pdf = image_to_single_page_pdf(sbs_img, dpi=SBS_DPI)
 
-        # Append performance pages (optional)
-        final_pdf = mb_pdf
-        if add_perf_pages and perf:
+        # FINAL: only side-by-side page + optional perf 4-up pages
+        final_pdf = sbs_page_pdf
+        if include_perf_pages and perf:
             final_pdf = append_perf_pages(final_pdf, perf)
-
-        # Prepend side-by-side page (optional)
-        if sbs_page_pdf is not None:
-            final_pdf = prepend_pdf(sbs_page_pdf, final_pdf)
 
         mission = ascii_safe(st.session_state.get("mission_no", "")).strip().replace(" ", "_")
         mission_part = f"{mission}_" if mission else ""
@@ -1964,16 +1909,14 @@ with tab4:
             type="primary",
         )
 
-        with opt_col1:
-            st.markdown(
-                "<div class='box'>"
-                "<b>Output structure</b><br>"
-                "• If enabled: Page 1 = Side-by-side preview (M&B p1+p2 as one image)<br>"
-                "• Then: original filled M&B pages<br>"
-                "• If enabled: +3 pages (Takeoff/Landing/Climb 4-up) at the end"
-                "</div>",
-                unsafe_allow_html=True
-            )
+        st.markdown(
+            "<div class='box'>"
+            "<b>Output</b><br>"
+            f"• Page 1: Side-by-side (filled p0 + p1) @ {SBS_DPI} dpi<br>"
+            "• Optional: +3 pages 4-up (Takeoff → Climb → Landing)"
+            "</div>",
+            unsafe_allow_html=True
+        )
 
     except Exception as e:
         st.error(f"PDF error: {e}")
