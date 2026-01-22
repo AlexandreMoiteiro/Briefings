@@ -1564,11 +1564,13 @@ def fmt_m_and_pct(req_m: float, avail_m: float) -> str:
 with tabP:
     st.markdown("#### Performance (Takeoff → Climb → Landing) — auto from legs + weather + W&B")
 
-    right = st.columns([0.70, 0.30])[1]
-    with right:
-        preview_imgs = st.checkbox("Show preview images", value=True)
-        ldg_zoom = st.number_input("Landing PDF zoom", value=2.3, step=0.1)
+    c1, c2, c3 = st.columns([0.22, 0.28, 0.50])
+    with c1:
         compute_perf = st.button("Compute performance for all legs", type="primary")
+    with c2:
+        preview_imgs = st.checkbox("Show preview images", value=True)
+    with c3:
+        st.caption("Uses assets from folder (no uploads). Landing chart zoom fixed.")
 
     if compute_perf:
         wb = st.session_state.get("_wb", None)
@@ -1582,7 +1584,7 @@ with tabP:
 
                 bg_to = load_background_asset("takeoff", page_index=0, zoom=1.0)
                 bg_clb = load_background_asset("climb", page_index=0, zoom=1.0)
-                bg_ldg = load_background_asset("landing", page_index=0, zoom=float(ldg_zoom))
+                bg_ldg = load_background_asset("landing", page_index=0, zoom=2.3)
 
                 perf = {}
                 for i, leg in enumerate(st.session_state.legs):
