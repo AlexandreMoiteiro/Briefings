@@ -1,5 +1,14 @@
 # app.py — Briefings (no AI) — A4 Landscape
-# Order: Cover → Weather → NOTAM (PIB/SUP) → PERF/M&B → FPL → Routes (NavLog + VFR per route)
+# Order: Cover → Weather → NOTAM → PERF/M&B → FPL → Routes
+# Notes per your request:
+# - Top buttons: add PA_28_M&B + rename old MassBalance to TECNAM_P2008_M&B (pretty labels)
+# - Weather: keep only Pressure / SIGWX / Wind + "Outros" (no Satellite/Radar, METAR/TAF, SIGMET/GAMET)
+# - Allow multiple uploads per category + allow ordering
+# - NOTAM: two buckets: PIB + SUP (multiple + ordering)
+# - PERF and Mass & Balance are the same section (one tab/section)
+# - Remove FUEL and PROFILE sections
+# - Navlog/Routes behaves like the old app: route pairs (Navlog + VFR Map) repeated
+
 from typing import Dict, Any, List, Tuple, Optional
 import io, os, tempfile
 import streamlit as st
@@ -7,9 +16,7 @@ from PIL import Image, ImageOps
 from fpdf import FPDF
 import fitz  # PyMuPDF
 
-# =========================
-# Page config & styles
-# =========================
+# ---------- Page config & styles ----------
 st.set_page_config(page_title="Briefings", layout="wide")
 st.markdown("""
 <style>
@@ -22,19 +29,19 @@ st.markdown("""
 [data-testid="stSidebar"], [data-testid="stSidebarNav"] { display:none !important; }
 [data-testid="stSidebarCollapseButton"] { display:none !important; }
 header [data-testid="baseButton-headerNoPadding"] { display:none !important; }
-.small-muted { color: #6b7280; font-size: 0.9rem; }
+.small-muted { color:#6b7280; font-size:.9rem }
 </style>
 """, unsafe_allow_html=True)
 
-# =========================
-# Top links (buttons)
-# =========================
+# ---------- Top links ----------
 IPMA_URL = "https://brief-ng.ipma.pt/#showLogin"
-APP_VFRMAP_URL       = "https://briefings.streamlit.app/VFRMap"
-APP_MNB_TECNAM_URL   = "https://briefings.streamlit.app/MassBalance"   # antiga, agora TECNAM_P2008_M&B
-APP_MNB_PA28_URL     = "https://briefings.streamlit.app/PA_28_MassBalance"  # <-- AJUSTA para o URL real da nova app
-APP_NAV_LOG_URL      = "https://briefings.streamlit.app/NavLog"
-APP_JPG_URL          = "https://briefings.streamlit.app/JPG"
+APP_VFRMAP_URL  = "https://briefings.streamlit.app/VFRMap"
+APP_NAV_LOG     = "https://briefings.streamlit.app/NavLog"
+APP_JPG         = "https://briefings.streamlit.app/JPG"
+
+# Your requested M&B apps (paths + pretty labels)
+APP_MNB_TECNAM_URL = "https://briefings.streamlit.app/TECNAM_P2008_M&B"
+APP_MNB_PA28_URL   = "https://briefings.streamlit.app/PA_28_M&B"
 
 st.markdown(
     f'''<div class="app-top">
@@ -42,42 +49,34 @@ st.markdown(
            <span class="btnbar">
              <a href="{IPMA_URL}" target="_blank">Weather (IPMA)</a>
              <a href="{APP_VFRMAP_URL}" target="_blank">VFR Map</a>
-             <a href="{APP_MNB_TECNAM_URL}" target="_blank">TECNAM_P2008_M&amp;B</a>
-             <a href="{APP_MNB_PA28_URL}" target="_blank">PA_28_M&amp;B</a>
-             <a href="{APP_NAV_LOG_URL}" target="_blank">NavLog</a>
-             <a href="{APP_JPG_URL}" target="_blank">JPG</a>
+             <a href="{APP_MNB_TECNAM_URL}" target="_blank">TECNAM P2008 M&amp;B</a>
+             <a href="{APP_MNB_PA28_URL}" target="_blank">PA-28 M&amp;B</a>
+             <a href="{APP_NAV_LOG}" target="_blank">NavLog</a>
+             <a href="{APP_JPG}" target="_blank">JPG</a>
            </span>
          </div>''',
     unsafe_allow_html=True
 )
 
-# =========================
-# Structure (requested)
-# =========================
-WEATHER_CATEGORIES = [
-    ("pressure",    "Pressure chart"),
-    ("sigwx",       "SIGWX chart"),
-    ("wind",        "Wind chart"),
-    ("sat",         "Satellite/Radar"),
-    ("other",       "Outros"),
-    ("metar_taf",   "METAR/TAF"),
-]
-# SIGMET/GAMET removido como pediste
-
-# Main sections on cover (in this order)
-COVER_SECTIONS = [
-    ("weather",   "Weather"),
-    ("notam",     "NOTAM"),
-    ("perf_mb",   "PERF/M&B"),
-    ("fpl",       "FPL"),
-    ("routes",    "Nav / Routes"),
+# ---------- Structure ----------
+# Cover index keys must match targets later
+STRUCTURE = [
+    ("weather", "Weather"),
+    ("notam", "NOTAM"),
+    ("perf_mb", "PERF/M&B"),
+    ("fpl", "FPL"),
+    ("routes", "Routes"),
 ]
 
-PASTEL = (90, 127, 179)
+WEATHER_TYPES = ["Pressure chart", "SIGWX chart", "Wind chart", "Outros"]
+WEATHER_RANK = {"Pressure chart": 1, "SIGWX chart": 2, "Wind chart": 3, "Outros": 9}
 
-# =========================
-# Utils
-# =========================
+NOTAM_BUCKETS = [
+    ("pib", "PIB"),
+    ("sup", "SUP"),
+]
+
+# ---------- Utils ----------
 def safe_str(x) -> str:
     try:
         return "" if x is None else str(x)
@@ -91,13 +90,6 @@ def read_upload_bytes(upload) -> bytes:
         return upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
     except Exception:
         return b""
-
-def fpdf_to_bytes(doc: FPDF) -> bytes:
-    data = doc.output(dest="S")
-    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
-
-def mm_to_pt(mm: float) -> float:
-    return mm * 72.0 / 25.4
 
 def image_bytes_to_pdf_bytes_fullbleed(img_bytes: bytes, orientation: str = "L") -> bytes:
     """Image -> single-page full-bleed A4 PDF (landscape)."""
@@ -119,7 +111,16 @@ def image_bytes_to_pdf_bytes_fullbleed(img_bytes: bytes, orientation: str = "L")
 
     doc.image(path, x=x, y=y, w=w, h=h)
     os.remove(path)
-    return fpdf_to_bytes(doc)
+
+    data = doc.output(dest="S")
+    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
+
+def fpdf_to_bytes(doc: FPDF) -> bytes:
+    data = doc.output(dest="S")
+    return data if isinstance(data, (bytes, bytearray)) else str(data).encode("latin-1")
+
+def mm_to_pt(mm: float) -> float:
+    return mm * 72.0 / 25.4
 
 def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Document]:
     """Return a PyMuPDF Document for a PDF upload or for an image converted to PDF."""
@@ -134,9 +135,13 @@ def open_upload_as_pdf(upload, orientation_for_images="L") -> Optional[fitz.Docu
     ext_bytes = image_bytes_to_pdf_bytes_fullbleed(raw, orientation=orientation_for_images)
     return fitz.open(stream=ext_bytes, filetype="pdf")
 
-# =========================
-# PDF base
-# =========================
+def ss_init(key: str, default):
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+# ---------- PDF look ----------
+PASTEL = (90, 127, 179)
+
 class BriefPDF(FPDF):
     def header(self): pass
     def footer(self): pass
@@ -159,7 +164,7 @@ class BriefPDF(FPDF):
         items: List[Tuple[str, str]],
     ) -> Dict[str, Tuple[float, float, float, float]]:
         """
-        Cover with numbered index.
+        Cover with clean numbered index.
         Returns clickable rectangles (mm) per section key.
         """
         self.add_page(orientation="L")
@@ -187,8 +192,11 @@ class BriefPDF(FPDF):
         self.ln(2)
 
         rects_mm: Dict[str, Tuple[float, float, float, float]] = {}
-        x_num, x_lbl = 35.0, 60.0
-        y, step = 80.0, 16.5
+
+        x_num = 35.0
+        x_lbl = 60.0
+        y = 80.0
+        step = 16.5
 
         for i, (key, label) in enumerate(items, start=1):
             num = f"{i:02d}"
@@ -212,34 +220,33 @@ class BriefPDF(FPDF):
         self.set_text_color(0, 0, 0)
         return rects_mm
 
-def make_section_title_pdf(title: str, subtitle: str = "") -> bytes:
+def make_section_title_pdf(title: str) -> bytes:
     tmp = BriefPDF(orientation="L", unit="mm", format="A4")
     tmp.add_page(orientation="L")
     tmp.draw_header_band(title)
-    if subtitle:
-        tmp.set_font("Helvetica", "I", 12)
-        tmp.set_text_color(107, 114, 128)
-        tmp.cell(0, 10, subtitle, ln=True, align="C")
     return fpdf_to_bytes(tmp)
 
-# =========================
-# PyMuPDF link helpers
-# =========================
+# ---------- PyMuPDF link helpers ----------
 def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float, float, float, float]],
-                    targets: Dict[str, Optional[int]]):
-    """Clickable links on the cover (page 0) to section start pages."""
+                    targets: Dict[str, Optional[int]], ipma_url: str):
+    """Clickable links on the cover (page 0)."""
     if doc.page_count == 0:
         return
     page0 = doc.load_page(0)
     for key, (x, y, w, h) in rects_mm.items():
-        target = targets.get(key)
-        if target is None:
-            continue
         rect = fitz.Rect(mm_to_pt(x), mm_to_pt(y), mm_to_pt(x + w), mm_to_pt(y + h))
-        page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
+        if key == "weather":
+            # keep Weather as internal link; IPMA stays as top button (no cover link needed)
+            target = targets.get(key)
+            if target is not None:
+                page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
+        else:
+            target = targets.get(key)
+            if target is not None:
+                page0.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": int(target)})
 
 def add_back_to_index_badge(doc: fitz.Document):
-    """Tiny, rounded, low-contrast back chip on every page (except the cover)."""
+    """Tiny, rounded, low-contrast back chip on every page (except cover)."""
     for pno in range(1, doc.page_count):
         page = doc.load_page(pno)
         pw = page.rect.width
@@ -282,65 +289,29 @@ def add_back_to_index_badge(doc: fitz.Document):
 
         page.insert_link({"kind": fitz.LINK_GOTO, "from": rect, "page": 0})
 
-# =========================
-# Streamlit state helpers
-# =========================
-def ss_init(key: str, default):
-    if key not in st.session_state:
-        st.session_state[key] = default
+# ---------- Collectors (UI -> structured lists) ----------
+def weather_sort_key(item: Dict[str, Any]) -> Tuple[int, int, str]:
+    kind = item.get("kind", "Outros")
+    rank = WEATHER_RANK.get(kind, 9)
+    order = int(item.get("order", 9999) or 9999)
+    name = safe_str(item.get("filename", ""))
+    return (rank, order, name.lower())
 
-def collect_multi_uploads(
-    state_key: str,
-    label: str,
-    types: List[str],
-    help_text: str = "",
-) -> List[Dict[str, Any]]:
-    """
-    UI: multi uploader + per-file order inputs.
-    Returns list of dicts: {upload, order, name}
-    """
-    ss_init(state_key, [])
-    st.markdown(f"**{label}**")
-    if help_text:
-        st.markdown(f"<div class='small-muted'>{help_text}</div>", unsafe_allow_html=True)
+def simple_order_key(item: Dict[str, Any]) -> Tuple[int, str]:
+    order = int(item.get("order", 9999) or 9999)
+    name = safe_str(item.get("filename", ""))
+    return (order, name.lower())
 
-    uploads = st.file_uploader(
-        label,
-        type=types,
-        accept_multiple_files=True,
-        key=f"u_{state_key}",
-        label_visibility="collapsed"
-    )
+# ---------- Session defaults ----------
+ss_init("pilot", "Alexandre Moiteiro")
+ss_init("callsign", "RVP")
+ss_init("aircraft_type", "Tecnam P2008")
+ss_init("registration", "CS-DHS")
+ss_init("mission_no", "")
+ss_init("flight_date", None)
+ss_init("time_utc", "")
 
-    # Keep latest uploads in session
-    if uploads is None:
-        uploads = []
-    st.session_state[state_key] = uploads
-
-    items: List[Dict[str, Any]] = []
-    if uploads:
-        st.caption("Organizar: define a ordem (1 = primeiro).")
-        for i, f in enumerate(uploads):
-            name = safe_str(getattr(f, "name", f"file_{i}"))
-            ord_key = f"{state_key}_ord_{i}"
-            ss_init(ord_key, i + 1)
-            c1, c2, c3 = st.columns([0.60, 0.20, 0.20])
-            with c1:
-                st.write(name)
-            with c2:
-                st.session_state[ord_key] = st.number_input("Ordem", min_value=1, step=1, value=int(st.session_state[ord_key]), key=f"ni_{ord_key}")
-            with c3:
-                st.write(f"{safe_str(getattr(f, 'type', ''))}")
-            items.append({"upload": f, "order": int(st.session_state[ord_key]), "name": name})
-
-    # Sort before returning
-    items.sort(key=lambda d: (d["order"], d["name"]))
-    st.divider()
-    return items
-
-# =========================
-# UI: Tabs
-# =========================
+# ---------- UI: Tabs ----------
 tab_mission, tab_weather, tab_notam, tab_perfmb, tab_fpl, tab_routes, tab_generate = st.tabs(
     ["Mission", "Weather", "NOTAM", "PERF/M&B", "FPL", "Routes", "Generate PDF"]
 )
@@ -348,14 +319,6 @@ tab_mission, tab_weather, tab_notam, tab_perfmb, tab_fpl, tab_routes, tab_genera
 # Mission
 with tab_mission:
     st.markdown("### Mission")
-    ss_init("pilot", "Alexandre Moiteiro")
-    ss_init("callsign", "RVP")
-    ss_init("aircraft_type", "Tecnam P2008")
-    ss_init("registration", "CS-DHS")
-    ss_init("mission_no", "")
-    ss_init("flight_date", None)
-    ss_init("time_utc", "")
-
     colA, colB, colC = st.columns(3)
     with colA:
         st.session_state.pilot = st.text_input("Pilot name", st.session_state.pilot)
@@ -370,97 +333,213 @@ with tab_mission:
         st.session_state.flight_date = st.date_input("Flight date")
         st.session_state.time_utc = st.text_input("UTC time", st.session_state.time_utc)
 
-# Weather (multiple per category + ordering)
+# Weather
 with tab_weather:
     st.markdown("### Weather")
-    st.caption("Podes colocar mais do que um ficheiro por categoria e definir a ordem.")
-    wx_items_by_cat: Dict[str, List[Dict[str, Any]]] = {}
-    for key, label in WEATHER_CATEGORIES:
-        wx_items_by_cat[key] = collect_multi_uploads(
-            state_key=f"wx_{key}",
-            label=label,
-            types=["pdf", "png", "jpg", "jpeg", "gif"],
-            help_text="Aceita PDF/PNG/JPG/JPEG/GIF (até 200MB por ficheiro)."
-        )
-    st.session_state["wx_items_by_cat"] = wx_items_by_cat
+    st.caption("Upload PDF/PNG/JPG/JPEG/GIF. You can add multiple files per type and set the order.")
 
-# NOTAM (PIB + SUP, each multiple + ordering)
+    preview_w = st.slider("Preview width (px)", min_value=240, max_value=700, value=460, step=10)
+
+    weather_items: List[Dict[str, Any]] = []
+
+    for kind in WEATHER_TYPES:
+        st.markdown(f"#### {kind}")
+        files = st.file_uploader(
+            f"Upload — {kind}",
+            type=["pdf", "png", "jpg", "jpeg", "gif"],
+            accept_multiple_files=True,
+            key=f"wx_uploader_{kind}",
+        )
+        if not files:
+            continue
+
+        for j, f in enumerate(files):
+            fname = safe_str(getattr(f, "name", "")) or "(untitled)"
+            base_key = f"wx_{kind}_{j}_{fname}"
+
+            col_img, col_meta = st.columns([0.52, 0.48])
+            with col_img:
+                # light preview (first page if pdf)
+                try:
+                    raw = read_upload_bytes(f)
+                    mime = (getattr(f, "type", "") or "").lower()
+                    if mime == "application/pdf":
+                        doc = fitz.open(stream=raw, filetype="pdf")
+                        page = doc.load_page(0)
+                        png = page.get_pixmap(dpi=140).tobytes("png")
+                        doc.close()
+                        st.image(png, caption=fname, width=preview_w)
+                    else:
+                        img = Image.open(io.BytesIO(raw))
+                        img = ImageOps.exif_transpose(img).convert("RGB")
+                        buf = io.BytesIO()
+                        img.save(buf, "PNG")
+                        st.image(buf.getvalue(), caption=fname, width=preview_w)
+                except Exception:
+                    st.write(fname)
+
+            with col_meta:
+                order_val = st.number_input(
+                    "Order",
+                    min_value=1,
+                    max_value=999,
+                    value=(j + 1),
+                    step=1,
+                    key=f"{base_key}_order",
+                )
+                subtitle = st.text_input(
+                    "Subtitle (optional)",
+                    value="",
+                    key=f"{base_key}_subtitle",
+                )
+
+            weather_items.append({
+                "kind": kind,
+                "upload": f,
+                "filename": fname,
+                "order": int(order_val),
+                "subtitle": subtitle,
+            })
+
+# NOTAM
 with tab_notam:
     st.markdown("### NOTAM")
-    st.caption("Duas abas: PIB e SUP. Podes adicionar vários e organizar a ordem.")
-    tab_pib, tab_sup = st.tabs(["PIB", "SUP"])
+    st.caption("Two buckets: PIB + SUP. Upload multiple files and set order.")
 
-    with tab_pib:
-        notam_pib_items = collect_multi_uploads(
-            state_key="notam_pib",
-            label="PIB",
-            types=["pdf", "png", "jpg", "jpeg"],
-            help_text="NOTAMs em formato PIB (PDF/Imagem)."
+    notam_items: List[Dict[str, Any]] = []
+    for bucket_key, bucket_label in NOTAM_BUCKETS:
+        st.markdown(f"#### {bucket_label}")
+        files = st.file_uploader(
+            f"Upload — {bucket_label}",
+            type=["pdf", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key=f"notam_uploader_{bucket_key}",
         )
-        st.session_state["notam_pib_items"] = notam_pib_items
+        if not files:
+            continue
+        for j, f in enumerate(files):
+            fname = safe_str(getattr(f, "name", "")) or "(untitled)"
+            base_key = f"notam_{bucket_key}_{j}_{fname}"
+            c1, c2 = st.columns([0.5, 0.5])
+            with c1:
+                st.write(f"**{fname}**")
+                st.markdown(f"<div class='small-muted'>{bucket_label}</div>", unsafe_allow_html=True)
+            with c2:
+                order_val = st.number_input(
+                    "Order",
+                    min_value=1,
+                    max_value=999,
+                    value=(j + 1),
+                    step=1,
+                    key=f"{base_key}_order",
+                )
+            notam_items.append({
+                "bucket": bucket_label,
+                "upload": f,
+                "filename": fname,
+                "order": int(order_val),
+            })
 
-    with tab_sup:
-        notam_sup_items = collect_multi_uploads(
-            state_key="notam_sup",
-            label="SUP",
-            types=["pdf", "png", "jpg", "jpeg"],
-            help_text="NOTAMs / suplementos (PDF/Imagem)."
-        )
-        st.session_state["notam_sup_items"] = notam_sup_items
-
-# PERF/M&B (same section; multiple allowed)
+# PERF/M&B (same section)
 with tab_perfmb:
     st.markdown("### PERF/M&B")
-    st.caption("Perf e Mass & Balance tratados como a mesma secção. Podes anexar vários e ordenar.")
-    perfmb_items = collect_multi_uploads(
-        state_key="perfmb",
-        label="PERF/M&B uploads",
-        types=["pdf", "png", "jpg", "jpeg"],
-        help_text="PDF/PNG/JPG/JPEG."
-    )
-    st.session_state["perfmb_items"] = perfmb_items
+    st.caption("Upload one or more documents (PDF/PNG/JPG). Set order if multiple.")
 
-# FPL (keep, allow multiple + ordering)
+    perfmb_files = st.file_uploader(
+        "Upload PERF/M&B",
+        type=["pdf", "png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key="perfmb_uploader",
+    )
+
+    perfmb_items: List[Dict[str, Any]] = []
+    if perfmb_files:
+        for j, f in enumerate(perfmb_files):
+            fname = safe_str(getattr(f, "name", "")) or "(untitled)"
+            base_key = f"perfmb_{j}_{fname}"
+            c1, c2 = st.columns([0.6, 0.4])
+            with c1:
+                st.write(f"**{fname}**")
+            with c2:
+                order_val = st.number_input(
+                    "Order",
+                    min_value=1,
+                    max_value=999,
+                    value=(j + 1),
+                    step=1,
+                    key=f"{base_key}_order",
+                )
+            perfmb_items.append({
+                "upload": f,
+                "filename": fname,
+                "order": int(order_val),
+            })
+
+# FPL
 with tab_fpl:
     st.markdown("### FPL")
-    st.caption("Podes anexar mais do que um (por exemplo FPL + anexos).")
-    fpl_items = collect_multi_uploads(
-        state_key="fpl_files",
-        label="FPL uploads",
-        types=["pdf", "png", "jpg", "jpeg"],
-        help_text="PDF/PNG/JPG/JPEG."
-    )
-    st.session_state["fpl_items"] = fpl_items
+    st.caption("Upload one or more flight plans (PDF/PNG/JPG). Set order if multiple.")
 
-# Routes (NavLog as before: route pairs with navlog + VFR map)
+    fpl_files = st.file_uploader(
+        "Upload FPL",
+        type=["pdf", "png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key="fpl_uploader",
+    )
+    fpl_items: List[Dict[str, Any]] = []
+    if fpl_files:
+        for j, f in enumerate(fpl_files):
+            fname = safe_str(getattr(f, "name", "")) or "(untitled)"
+            base_key = f"fpl_{j}_{fname}"
+            c1, c2 = st.columns([0.6, 0.4])
+            with c1:
+                st.write(f"**{fname}**")
+            with c2:
+                order_val = st.number_input(
+                    "Order",
+                    min_value=1,
+                    max_value=999,
+                    value=(j + 1),
+                    step=1,
+                    key=f"{base_key}_order",
+                )
+            fpl_items.append({
+                "upload": f,
+                "filename": fname,
+                "order": int(order_val),
+            })
+
+# Routes (old behavior)
 with tab_routes:
     st.markdown("### Routes")
-    st.caption("Como estava antigamente: por rota (ex.: LPSO-LPCB) anexas NavLog e VFR Map.")
-    ss_init("num_pairs", 0)
-    num_pairs = st.number_input("Number of route pairs", min_value=0, max_value=10, value=int(st.session_state.num_pairs), step=1)
-    st.session_state.num_pairs = int(num_pairs)
-
+    st.caption("For each route (e.g., LPSO-LPCB) upload a Navlog and its VFR map. Accepts PDF/PNG/JPG/JPEG.")
+    num_pairs = st.number_input("Number of route pairs", min_value=0, max_value=20, value=0, step=1)
     pairs: List[Dict[str, Any]] = []
     for i in range(int(num_pairs)):
-        with st.expander(f"Route #{i+1}", expanded=False):
+        with st.expander(f"Route #{i+1}", expanded=(i == 0 and num_pairs > 0)):
             route = safe_str(st.text_input("ROUTE (e.g., LPSO-LPCB)", key=f"pair_route_{i}")).upper().strip()
             c1, c2 = st.columns(2)
             with c1:
-                nav_file = st.file_uploader(f"NavLog ({route or 'ROUTE'})", type=["pdf", "png", "jpg", "jpeg"], key=f"pair_nav_{i}")
+                nav_file = st.file_uploader(
+                    f"Navlog ({route or 'ROUTE'})",
+                    type=["pdf", "png", "jpg", "jpeg"],
+                    key=f"pair_nav_{i}"
+                )
             with c2:
-                vfr_file = st.file_uploader(f"VFR Map ({route or 'ROUTE'})", type=["pdf", "png", "jpg", "jpeg"], key=f"pair_vfr_{i}")
+                vfr_file = st.file_uploader(
+                    f"VFR Map ({route or 'ROUTE'})",
+                    type=["pdf", "png", "jpg", "jpeg"],
+                    key=f"pair_vfr_{i}"
+                )
             pairs.append({"route": route, "nav": nav_file, "vfr": vfr_file})
-    st.session_state["pairs"] = pairs
 
 # Generate
 with tab_generate:
+    st.markdown("### Generate PDF")
     gen_pdf = st.button("Generate PDF", use_container_width=True)
 
-# =========================
-# PDF generation helpers
-# =========================
+# ---------- PDF generation helpers ----------
 def insert_pdf_bytes(main_doc: fitz.Document, pdf_bytes: bytes) -> int:
-    """Insert a PDF (bytes) at end. Returns start page index (0-based) where inserted."""
     start = main_doc.page_count
     d = fitz.open(stream=pdf_bytes, filetype="pdf")
     main_doc.insert_pdf(d, start_at=start)
@@ -468,7 +547,6 @@ def insert_pdf_bytes(main_doc: fitz.Document, pdf_bytes: bytes) -> int:
     return start
 
 def append_upload(main_doc: fitz.Document, upload) -> Optional[int]:
-    """Append upload document. Returns start page or None if nothing appended."""
     ext = open_upload_as_pdf(upload, orientation_for_images="L")
     if not ext:
         return None
@@ -477,87 +555,72 @@ def append_upload(main_doc: fitz.Document, upload) -> Optional[int]:
     ext.close()
     return start
 
-def append_many(main_doc: fitz.Document, items: List[Dict[str, Any]]):
-    """Append many ordered items (each item has 'upload')."""
-    for it in items:
-        append_upload(main_doc, it.get("upload"))
+def append_titled_upload(main_doc: fitz.Document, section_title: str, subtitle: str, upload) -> bool:
+    """
+    Optional: insert a small title page for each item? (currently OFF by default)
+    We'll keep it simple: only section title pages; items are appended directly.
+    """
+    _ = section_title, subtitle, upload
+    return False
 
-# =========================
-# Generate PDF
-# =========================
+# ---------- PDF generation ----------
 if gen_pdf:
-    # --- Cover ---
-    pdf = BriefPDF(orientation="L", unit="mm", format="A4")
-    cover_items = [(k, title) for (k, title) in COVER_SECTIONS]
-    cover_rects_mm = pdf.cover_with_numbered_index(
-        mission_no=safe_str(st.session_state.get("mission_no")),
-        pilot=safe_str(st.session_state.get("pilot")),
-        aircraft=safe_str(st.session_state.get("aircraft_type")),
-        callsign=safe_str(st.session_state.get("callsign")),
-        reg=safe_str(st.session_state.get("registration")),
-        date_str=safe_str(st.session_state.get("flight_date")),
-        time_utc=safe_str(st.session_state.get("time_utc")),
+    # COVER
+    cover = BriefPDF(orientation="L", unit="mm", format="A4")
+    cover_items = [(k, title) for (k, title) in STRUCTURE]
+    cover_rects_mm = cover.cover_with_numbered_index(
+        mission_no=safe_str(st.session_state.mission_no),
+        pilot=safe_str(st.session_state.pilot),
+        aircraft=safe_str(st.session_state.aircraft_type),
+        callsign=safe_str(st.session_state.callsign),
+        reg=safe_str(st.session_state.registration),
+        date_str=safe_str(st.session_state.flight_date),
+        time_utc=safe_str(st.session_state.time_utc),
         items=cover_items,
     )
-    main_doc = fitz.open(stream=fpdf_to_bytes(pdf), filetype="pdf")
+    main_doc = fitz.open(stream=fpdf_to_bytes(cover), filetype="pdf")
 
-    section_start: Dict[str, Optional[int]] = {k: None for (k, _t) in COVER_SECTIONS}
+    section_start: Dict[str, Optional[int]] = {k: None for (k, _t) in STRUCTURE}
 
-    # --- Weather ---
+    # WEATHER
     section_start["weather"] = insert_pdf_bytes(main_doc, make_section_title_pdf("Weather"))
-    wx_by_cat: Dict[str, List[Dict[str, Any]]] = st.session_state.get("wx_items_by_cat", {})
-    for cat_key, cat_label in WEATHER_CATEGORIES:
-        items = wx_by_cat.get(cat_key, []) or []
-        if items:
-            insert_pdf_bytes(main_doc, make_section_title_pdf("Weather", subtitle=cat_label))
-            append_many(main_doc, items)
+    for item in sorted(weather_items, key=weather_sort_key):
+        # If you want per-item header pages later, we can add them here.
+        append_upload(main_doc, item["upload"])
 
-    # --- NOTAM ---
+    # NOTAM
     section_start["notam"] = insert_pdf_bytes(main_doc, make_section_title_pdf("NOTAM"))
-    pib_items = st.session_state.get("notam_pib_items", []) or []
-    sup_items = st.session_state.get("notam_sup_items", []) or []
-    if pib_items:
-        insert_pdf_bytes(main_doc, make_section_title_pdf("NOTAM", subtitle="PIB"))
-        append_many(main_doc, pib_items)
-    if sup_items:
-        insert_pdf_bytes(main_doc, make_section_title_pdf("NOTAM", subtitle="SUP"))
-        append_many(main_doc, sup_items)
+    for item in sorted(notam_items, key=simple_order_key):
+        append_upload(main_doc, item["upload"])
 
-    # --- PERF/M&B ---
+    # PERF/M&B
     section_start["perf_mb"] = insert_pdf_bytes(main_doc, make_section_title_pdf("PERF/M&B"))
-    perfmb_items = st.session_state.get("perfmb_items", []) or []
-    append_many(main_doc, perfmb_items)
+    for item in sorted(perfmb_items, key=simple_order_key):
+        append_upload(main_doc, item["upload"])
 
-    # --- FPL ---
+    # FPL
     section_start["fpl"] = insert_pdf_bytes(main_doc, make_section_title_pdf("FPL"))
-    fpl_items = st.session_state.get("fpl_items", []) or []
-    append_many(main_doc, fpl_items)
+    for item in sorted(fpl_items, key=simple_order_key):
+        append_upload(main_doc, item["upload"])
 
-    # --- Routes (NavLog + VFR map per route) ---
-    section_start["routes"] = insert_pdf_bytes(main_doc, make_section_title_pdf("Nav / Routes"))
-    pairs_local: List[Dict[str, Any]] = st.session_state.get("pairs", []) or []
-    for idx, p in enumerate(pairs_local, start=1):
-        route = safe_str(p.get("route")).upper().strip() or f"ROUTE #{idx}"
-        nav_up = p.get("nav")
-        vfr_up = p.get("vfr")
-        if nav_up or vfr_up:
-            insert_pdf_bytes(main_doc, make_section_title_pdf("Route", subtitle=route))
-            if nav_up:
-                insert_pdf_bytes(main_doc, make_section_title_pdf("Route", subtitle=f"{route} — NavLog"))
-                append_upload(main_doc, nav_up)
-            if vfr_up:
-                insert_pdf_bytes(main_doc, make_section_title_pdf("Route", subtitle=f"{route} — VFR Map"))
-                append_upload(main_doc, vfr_up)
+    # ROUTES (Navlog + VFR per route, in order entered)
+    section_start["routes"] = insert_pdf_bytes(main_doc, make_section_title_pdf("Routes"))
+    for p in (pairs or []):
+        # Keep the same principle: nav then vfr
+        append_upload(main_doc, p.get("nav"))
+        append_upload(main_doc, p.get("vfr"))
 
-    # --- Cover links + back chip ---
-    add_cover_links(main_doc, cover_rects_mm, section_start)
+    # Add cover links
+    add_cover_links(main_doc, cover_rects_mm, section_start, IPMA_URL)
+
+    # Back-to-index chip
     add_back_to_index_badge(main_doc)
 
-    # --- Export ---
+    # Export
     final_bytes = main_doc.tobytes()
     main_doc.close()
 
-    final_name = f"Briefing - Mission {safe_str(st.session_state.get('mission_no')) or 'X'}.pdf"
+    final_name = f"Briefing - Mission {safe_str(st.session_state.mission_no) or 'X'}.pdf"
     st.download_button(
         "Download PDF",
         data=final_bytes,
@@ -565,3 +628,4 @@ if gen_pdf:
         mime="application/pdf",
         use_container_width=True
     )
+
