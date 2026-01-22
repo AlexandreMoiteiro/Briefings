@@ -615,7 +615,7 @@ ASSETS = {
         "bg_default": "to_ground_roll.jpg",
         "json_default": "to_ground_roll.json",
         "bg_kind": "image",
-        "round_to": 5,   # ft
+        "round_to": 10,   # ft
     },
     "climb": {
         "title": "Climb Performance",
@@ -629,7 +629,7 @@ ASSETS = {
         "bg_default": "ldg_ground_roll.pdf",
         "json_default": "ldg_ground_roll.json",
         "bg_kind": "pdf",
-        "round_to": 5,   # ft
+        "round_to": 10,   # ft
     },
 }
 
