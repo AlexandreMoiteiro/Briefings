@@ -3,6 +3,6 @@ pymupdf>=1.23
 pillow>=10.0
 numpy>=1.26
 streamlit-image-coordinates>=0.2.0
-pypdf
+pypdf==4.1.0
 reportlab
 fpdf
