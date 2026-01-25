@@ -16,3 +16,4 @@ pdfplumber
 pandas>=2.0
 folium>=0.15
 streamlit-folium>=0.20
+pdfrw
