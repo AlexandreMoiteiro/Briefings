@@ -6,3 +6,7 @@ streamlit-image-coordinates>=0.2.0
 pypdf==4.1.0
 reportlab
 fpdf
+folium
+math
+re
+datetime
