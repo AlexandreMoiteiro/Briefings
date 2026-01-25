@@ -6,3 +6,13 @@ streamlit-image-coordinates>=0.2.0
 pypdf==4.1.0
 reportlab
 fpdf
+
+pytz
+pypdf==4.1.0
+
+reportlab
+pdfplumber
+
+pandas>=2.0
+folium>=0.15
+streamlit-folium>=0.20
