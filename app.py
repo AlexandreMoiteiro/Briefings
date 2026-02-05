@@ -194,12 +194,6 @@ class BriefPDF(FPDF):
         self.set_text_color(0, 0, 0)
         return rects_mm
 
-def make_section_title_pdf(title: str) -> bytes:
-    tmp = BriefPDF(orientation="L", unit="mm", format="A4")
-    tmp.add_page(orientation="L")
-    tmp.draw_header_band(title)
-    return fpdf_to_bytes(tmp)
-
 def add_cover_links(doc: fitz.Document, rects_mm: Dict[str, Tuple[float, float, float, float]],
                     targets: Dict[str, Optional[int]]):
     if doc.page_count == 0:
@@ -499,7 +493,11 @@ def append_upload(main_doc: fitz.Document, upload) -> Optional[int]:
     ext.close()
     return start
 
+# ==========================
+# GERAÇÃO DO PDF (SEM PÁGINAS DE TÍTULO POR SECÇÃO)
+# ==========================
 if gen_pdf:
+    # capa + índice (mantém)
     cover = BriefPDF(orientation="L", unit="mm", format="A4")
     cover_items = [(k, title) for (k, title) in STRUCTURE]
     cover_rects_mm = cover.cover_with_numbered_index(
@@ -514,29 +512,44 @@ if gen_pdf:
     )
     main_doc = fitz.open(stream=fpdf_to_bytes(cover), filetype="pdf")
 
+    # destino dos links: primeira página de conteúdo (se existir)
     section_start: Dict[str, Optional[int]] = {k: None for (k, _t) in STRUCTURE}
 
-    section_start["weather"] = insert_pdf_bytes(main_doc, make_section_title_pdf("Weather"))
+    # WEATHER
     for item in sorted(weather_items, key=weather_sort_key):
-        append_upload(main_doc, item["upload"])
+        start = append_upload(main_doc, item["upload"])
+        if start is not None and section_start["weather"] is None:
+            section_start["weather"] = start
 
-    section_start["notam"] = insert_pdf_bytes(main_doc, make_section_title_pdf("NOTAM"))
+    # NOTAM
     for item in sorted(notam_items, key=simple_order_key):
-        append_upload(main_doc, item["upload"])
+        start = append_upload(main_doc, item["upload"])
+        if start is not None and section_start["notam"] is None:
+            section_start["notam"] = start
 
-    section_start["perf_mb"] = insert_pdf_bytes(main_doc, make_section_title_pdf("PERF/M&B"))
+    # PERF/M&B
     for item in sorted(perfmb_items, key=simple_order_key):
-        append_upload(main_doc, item["upload"])
+        start = append_upload(main_doc, item["upload"])
+        if start is not None and section_start["perf_mb"] is None:
+            section_start["perf_mb"] = start
 
-    section_start["fpl"] = insert_pdf_bytes(main_doc, make_section_title_pdf("FPL"))
+    # FPL
     for item in sorted(fpl_items, key=simple_order_key):
-        append_upload(main_doc, item["upload"])
+        start = append_upload(main_doc, item["upload"])
+        if start is not None and section_start["fpl"] is None:
+            section_start["fpl"] = start
 
-    section_start["routes"] = insert_pdf_bytes(main_doc, make_section_title_pdf("Routes"))
+    # ROUTES (nav + vfr)
     for p in (pairs or []):
-        append_upload(main_doc, p.get("nav"))
-        append_upload(main_doc, p.get("vfr"))
+        start_nav = append_upload(main_doc, p.get("nav"))
+        if start_nav is not None and section_start["routes"] is None:
+            section_start["routes"] = start_nav
 
+        start_vfr = append_upload(main_doc, p.get("vfr"))
+        if start_vfr is not None and section_start["routes"] is None:
+            section_start["routes"] = start_vfr
+
+    # links no índice + badge para voltar ao índice
     add_cover_links(main_doc, cover_rects_mm, section_start)
     add_back_to_index_badge(main_doc)
 
