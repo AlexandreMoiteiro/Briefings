@@ -1,4 +1,3 @@
-
 # app_navlog_skeleton_routes_only.py
 # ---------------------------------------------------------------
 # Versão onde as rotas padrão (Gist) guardam APENAS o esqueleto:
@@ -34,10 +33,9 @@ AIRCRAFT_PROFILES = {
         "climb_tas":   100.0,
         "cruise_tas":  115.0,
         "descent_tas": 115.0,
-        "fuel_flow_lh": 38.0,   # L/h  (≈10 USG/h)
+        "fuel_flow_lh": 38.0,   # L/h
     },
 }
-USG_TO_L = 3.78541
 
 EARTH_NM  = 3440.065
 PROFILE_COLORS = {"CLIMB":"#FF7A00","LEVEL":"#C000FF","DESCENT":"#00B386","STOP":"#FF0000"}
@@ -389,11 +387,11 @@ def extract_polygon_coords(raw_text:str):
 def ens(k, v): return st.session_state.setdefault(k, v)
 
 # ---- Aeronave ----
-ens("aircraft_type", "Tecnam P2008")
-ens("ac_climb_tas",   70.0)
-ens("ac_cruise_tas",  90.0)
-ens("ac_descent_tas", 90.0)
-ens("ac_fuel_flow_lh", 20.0)
+ens("aircraft_type", "Piper PA-28")
+ens("ac_climb_tas",   100.0)
+ens("ac_cruise_tas",  115.0)
+ens("ac_descent_tas", 115.0)
+ens("ac_fuel_flow_lh", 38.0)
 
 ens("wind_from", 0)
 ens("wind_kt", 0)
@@ -449,80 +447,34 @@ def get_fuel_flow():   return float(st.session_state.ac_fuel_flow_lh)
 
 # ========= FORM GLOBAL =========
 
-# ---- Selector de aeronave (fora do form para reagir imediatamente) ----
+# ---- Selector de aeronave (fora do form para reagir imediatamente e recarregar defaults) ----
 st.markdown("### ✈️ Aeronave")
-ac_col1, ac_col2, ac_col3, ac_col4, ac_col5 = st.columns([2, 1, 1, 1, 2])
+ac_names = list(AIRCRAFT_PROFILES.keys())
+ac_choice = st.selectbox(
+    "Tipo de aeronave",
+    ac_names,
+    index=ac_names.index(st.session_state.aircraft_type)
+    if st.session_state.aircraft_type in ac_names else 0,
+    key="aircraft_select_widget",
+)
+# Quando muda o tipo, carrega os defaults e faz rerun para que o form
+# mostre os novos valores correctos nos number_input
+if ac_choice != st.session_state.aircraft_type:
+    st.session_state.aircraft_type = ac_choice
+    p = AIRCRAFT_PROFILES[ac_choice]
+    st.session_state.ac_climb_tas    = p["climb_tas"]
+    st.session_state.ac_cruise_tas   = p["cruise_tas"]
+    st.session_state.ac_descent_tas  = p["descent_tas"]
+    st.session_state.ac_fuel_flow_lh = p["fuel_flow_lh"]
+    st.rerun()
 
-with ac_col1:
-    ac_names = list(AIRCRAFT_PROFILES.keys())
-    ac_choice = st.selectbox(
-        "Tipo de aeronave",
-        ac_names,
-        index=ac_names.index(st.session_state.aircraft_type)
-        if st.session_state.aircraft_type in ac_names else 0,
-        key="aircraft_select_widget",
-    )
-    # Quando muda o tipo, carrega os defaults do perfil
-    if ac_choice != st.session_state.aircraft_type:
-        st.session_state.aircraft_type = ac_choice
-        p = AIRCRAFT_PROFILES[ac_choice]
-        st.session_state.ac_climb_tas    = p["climb_tas"]
-        st.session_state.ac_cruise_tas   = p["cruise_tas"]
-        st.session_state.ac_descent_tas  = p["descent_tas"]
-        st.session_state.ac_fuel_flow_lh = p["fuel_flow_lh"]
-        st.rerun()
-
-with ac_col2:
-    st.session_state.ac_climb_tas = st.number_input(
-        "TAS subida (kt)", 30.0, 300.0,
-        float(st.session_state.ac_climb_tas), step=1.0,
-        key="ac_climb_tas_input"
-    )
-with ac_col3:
-    st.session_state.ac_cruise_tas = st.number_input(
-        "TAS cruzeiro (kt)", 30.0, 300.0,
-        float(st.session_state.ac_cruise_tas), step=1.0,
-        key="ac_cruise_tas_input"
-    )
-with ac_col4:
-    st.session_state.ac_descent_tas = st.number_input(
-        "TAS descida (kt)", 30.0, 300.0,
-        float(st.session_state.ac_descent_tas), step=1.0,
-        key="ac_descent_tas_input"
-    )
-with ac_col5:
-    fuel_col_a, fuel_col_b = st.columns(2)
-    with fuel_col_a:
-        st.session_state.ac_fuel_flow_lh = st.number_input(
-            "Consumo (L/h)", 1.0, 200.0,
-            float(st.session_state.ac_fuel_flow_lh), step=0.5,
-            key="ac_fuel_lh_input"
-        )
-    with fuel_col_b:
-        # Mostrar também em USG/h (read-only, informativo)
-        usg_val = st.session_state.ac_fuel_flow_lh / USG_TO_L
-        st.number_input(
-            "Consumo (USG/h) ℹ️", 0.0, 100.0,
-            float(round(usg_val, 2)), step=0.1,
-            key="ac_fuel_usg_display",
-            disabled=False,
-            help="Campo de referência — editar aqui atualiza L/h automaticamente."
-        )
-        # Se o utilizador mexeu no campo USG, converter para L/h
-        # (Streamlit não tem callback fácil sem form; usamos a diferença)
-        stored_usg = round(st.session_state.ac_fuel_flow_lh / USG_TO_L, 2)
-        new_usg = st.session_state.get("ac_fuel_usg_display", stored_usg)
-        if abs(float(new_usg) - stored_usg) > 0.005:
-            st.session_state.ac_fuel_flow_lh = float(new_usg) * USG_TO_L
-
-# Banner de aeronave selecionada
+# Banner de aeronave selecionada (sempre visível, acima do form)
 ac_color = "#1e40af" if "Piper" in st.session_state.aircraft_type else "#065f46"
 st.markdown(
     f"<div class='ac-banner' style='background:#dbeafe;color:{ac_color};border:1.5px solid {ac_color};'>"
     f"🛩 {st.session_state.aircraft_type} &nbsp;|&nbsp; "
     f"Cruise {st.session_state.ac_cruise_tas:.0f} kt &nbsp;|&nbsp; "
-    f"{st.session_state.ac_fuel_flow_lh:.1f} L/h "
-    f"({st.session_state.ac_fuel_flow_lh/USG_TO_L:.1f} USG/h)"
+    f"Consumo {st.session_state.ac_fuel_flow_lh:.1f} L/h"
     f"</div>",
     unsafe_allow_html=True
 )
@@ -530,6 +482,31 @@ st.markdown(
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
 with st.form("globals"):
+    # ---- Parâmetros de aeronave (dentro do form → só aplicam ao clicar "Aplicar") ----
+    st.markdown("**Parâmetros da aeronave**")
+    ac_col1, ac_col2, ac_col3, ac_col4 = st.columns(4)
+    with ac_col1:
+        st.session_state.ac_climb_tas = st.number_input(
+            "TAS subida (kt)", 30.0, 300.0,
+            float(st.session_state.ac_climb_tas), step=1.0,
+        )
+    with ac_col2:
+        st.session_state.ac_cruise_tas = st.number_input(
+            "TAS cruzeiro (kt)", 30.0, 300.0,
+            float(st.session_state.ac_cruise_tas), step=1.0,
+        )
+    with ac_col3:
+        st.session_state.ac_descent_tas = st.number_input(
+            "TAS descida (kt)", 30.0, 300.0,
+            float(st.session_state.ac_descent_tas), step=1.0,
+        )
+    with ac_col4:
+        st.session_state.ac_fuel_flow_lh = st.number_input(
+            "Consumo (L/h)", 1.0, 200.0,
+            float(st.session_state.ac_fuel_flow_lh), step=0.5,
+        )
+
+    st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
     c1,c2,c3,c4 = st.columns(4)
     with c1:
         st.session_state.wind_from = st.number_input("Vento global FROM (°T)", 0, 360, int(st.session_state.wind_from))
@@ -1441,12 +1418,11 @@ if st.session_state.legs:
     total_burn = rfuel05(sum(L["burn"] for L in st.session_state.legs))
     total_dist = rdist05(sum(L["Dist"] for L in st.session_state.legs))
     efob_final = st.session_state.legs[-1]["efob_end"]
-    total_burn_usg = total_burn / USG_TO_L
     st.markdown(
         "<div class='kvrow'>"
         + f"<div class='kv'>⏱️ ETE Total: <b>{hhmmss(total_sec)}</b></div>"
         + f"<div class='kv'>🧭 Distância: <b>{total_dist:.1f} nm</b></div>"
-        + f"<div class='kv'>⛽ Burn Total: <b>{total_burn:.1f} L ({total_burn_usg:.1f} USG)</b></div>"
+        + f"<div class='kv'>⛽ Burn Total: <b>{total_burn:.1f} L</b></div>"
         + f"<div class='kv'>🧯 EFOB Final: <b>{efob_final:.1f} L</b></div>"
         + f"<div class='kv'>🛩 {st.session_state.aircraft_type}</div>"
         + f"<div class='kv'>🧮 Nº legs: <b>{len(st.session_state.legs)}</b></div>"
