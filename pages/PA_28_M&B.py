@@ -165,7 +165,7 @@ MLW_LB = 2550.0
 PDF_TEMPLATE_PATHS = ["RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"]
 
 # Side-by-side fixed settings
-SBS_DPI = 500
+SBS_DPI = 200          # was 500 — main driver of file size
 SBS_ALIGN = "height"
 SBS_GAP_PX = 0
 SBS_BG = (255, 255, 255)
@@ -886,13 +886,12 @@ def build_perf_2aerodromes_page(pairs: List[Tuple[str, dict]]) -> bytes:
 
     MARGIN   = 22
     GAP_COL  = 10   # gap between chart columns
-    GAP_ROW  = 14   # gap between the two airfield rows
-    ROW_LBL  = 16   # height for the airfield label bar
+    GAP_ROW  = 18   # gap between the two airfield rows
+    ROW_LBL  = 14   # height reserved for the airfield label text
     N_COLS   = 3
     COL_KEYS = ["takeoff_img", "climb_img", "landing_img"]
 
-    n_rows = len(pairs)  # 1 or 2
-
+    n_rows = len(pairs)
     usable_w = W - 2 * MARGIN
     usable_h = H - 2 * MARGIN
 
@@ -900,28 +899,29 @@ def build_perf_2aerodromes_page(pairs: List[Tuple[str, dict]]) -> bytes:
     row_h  = (usable_h - GAP_ROW * (n_rows - 1)) / n_rows
     img_h  = row_h - ROW_LBL
 
-    # ---- Rows ----
     top_y = H - MARGIN
 
     for ri, (label, info) in enumerate(pairs):
         row_top = top_y - ri * (row_h + GAP_ROW)
         row_bot = row_top - row_h
 
-        # Airfield label bar (coloured accent)
-        c.setFillColorRGB(0.18, 0.35, 0.60)
-        c.rect(MARGIN, row_top - ROW_LBL, usable_w, ROW_LBL, fill=1, stroke=0)
-        c.setFillColorRGB(1, 1, 1)
+        # Airfield label — plain bold text, no coloured bar
+        c.setFillColorRGB(0.15, 0.15, 0.15)
         c.setFont("Helvetica-Bold", 10)
-        c.drawString(MARGIN + 6, row_top - ROW_LBL + 4, label)
+        c.drawString(MARGIN, row_top - ROW_LBL + 3, label)
 
-        # Charts
+        # Thin separator line under label
+        c.setStrokeColorRGB(0.65, 0.65, 0.65)
+        c.setLineWidth(0.4)
+        c.line(MARGIN, row_top - ROW_LBL, MARGIN + usable_w, row_top - ROW_LBL)
+
+        # Charts — JPEG compressed for smaller PDF
         for ci, col_key in enumerate(COL_KEYS):
             cx = MARGIN + ci * (cell_w + GAP_COL)
             cy = row_bot
 
-            # Cell border
-            c.setStrokeColorRGB(0.78, 0.78, 0.78)
-            c.setLineWidth(0.4)
+            c.setStrokeColorRGB(0.80, 0.80, 0.80)
+            c.setLineWidth(0.3)
             c.rect(cx, cy, cell_w, img_h)
 
             img = info.get(col_key)
@@ -931,7 +931,8 @@ def build_perf_2aerodromes_page(pairs: List[Tuple[str, dict]]) -> bytes:
                 dw, dh = iw * scale, ih * scale
                 dx = cx + (cell_w - dw) / 2
                 dy = cy + (img_h - dh) / 2
-                c.drawImage(ImageReader(img), dx, dy, width=dw, height=dh,
+                c.drawImage(ImageReader(_img_to_jpeg_reader(img, quality=78)),
+                            dx, dy, width=dw, height=dh,
                             preserveAspectRatio=True, mask="auto")
 
     c.showPage()
@@ -939,7 +940,14 @@ def build_perf_2aerodromes_page(pairs: List[Tuple[str, dict]]) -> bytes:
     return buf.getvalue()
 
 
-def append_perf_pages(base_pdf_bytes: bytes, perf_by_role: dict) -> bytes:
+def _img_to_jpeg_reader(img: Image.Image, quality: int = 80) -> io.BytesIO:
+    """Convert PIL image to JPEG bytes for compact PDF embedding."""
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
+    buf.seek(0)
+    return buf
+
+
     """Append 2 landscape pages: each page has 2 airfields × 3 charts."""
     reader = PdfReader(io.BytesIO(base_pdf_bytes))
     writer = PdfWriter()
@@ -1044,13 +1052,18 @@ def mb_pdf_to_side_by_side_image(
             merged = merged.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=3))
         return merged
 
-def image_to_single_page_pdf(img: Image.Image, dpi: int) -> bytes:
+def image_to_single_page_pdf(img: Image.Image, dpi: int, jpeg_quality: int = 82) -> bytes:
     w_px, h_px = img.size
     w_pt = (w_px / dpi) * 72.0
     h_pt = (h_px / dpi) * 72.0
+    # Compress to JPEG first — massive size reduction vs raw PIL embed
+    jpeg_buf = io.BytesIO()
+    img.convert("RGB").save(jpeg_buf, format="JPEG", quality=jpeg_quality, optimize=True)
+    jpeg_buf.seek(0)
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(w_pt, h_pt))
-    c.drawImage(ImageReader(img), 0, 0, width=w_pt, height=h_pt, preserveAspectRatio=True, mask="auto")
+    c.drawImage(ImageReader(jpeg_buf), 0, 0, width=w_pt, height=h_pt,
+                preserveAspectRatio=True, mask="auto")
     c.showPage()
     c.save()
     return buf.getvalue()
