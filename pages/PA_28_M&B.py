@@ -1270,7 +1270,7 @@ with tab2:
                 rw = best["rw"]
                 hw, xw, side = wind_components(rw["qfu"], met["wind_dir"], met["wind_kt"])
                 st.markdown(
-                    f"<div class='box'><b>Auto RWY</b>: {rw['id']} <span class='chip'>QFU {rw['qfu']:.0f}°</span><br>"
+                    f"<div class='box'><b>Auto RWY</b>: {rw['id']} <span class='chip'>QFU {rw['qfu']:03.0f}°</span><br>"
                     f"HW {hw:.0f} kt · XW {side} {xw:.0f} kt<br>"
                     f"TODA {rw['toda']:.0f} m · LDA {rw['lda']:.0f} m</div>",
                     unsafe_allow_html=True,
@@ -1680,7 +1680,7 @@ with tab4:
                 rw = best["rw"]
                 suf = role
                 put(f"Airfield_{suf}", icao)
-                put(f"RWY_QFU_{suf}", f"{rw['qfu']:.0f}")
+                put(f"RWY_QFU_{suf}", f"{rw['qfu']:03.0f}")
                 put(f"Elevation_{suf}", f"{ad['elev_ft']:.0f}")
                 put(f"QNH_{suf}", f"{met['qnh_hpa']}")
                 put(f"Temperature_{suf}", f"{met['temp_c']}")
