@@ -887,37 +887,21 @@ def build_perf_2aerodromes_page(pairs: List[Tuple[str, dict]]) -> bytes:
     MARGIN   = 22
     GAP_COL  = 10   # gap between chart columns
     GAP_ROW  = 14   # gap between the two airfield rows
-    HDR_H    = 20   # top page header height
-    ROW_LBL  = 16   # height for the airfield label inside each row
-    COL_LBL  = 14   # height for column labels (Takeoff / Climb / Landing)
+    ROW_LBL  = 16   # height for the airfield label bar
     N_COLS   = 3
-    COL_KEYS   = ["takeoff_img", "climb_img", "landing_img"]
-    COL_LABELS = ["Takeoff", "Climb", "Landing"]
+    COL_KEYS = ["takeoff_img", "climb_img", "landing_img"]
 
     n_rows = len(pairs)  # 1 or 2
 
     usable_w = W - 2 * MARGIN
-    usable_h = H - 2 * MARGIN - HDR_H
+    usable_h = H - 2 * MARGIN
 
     cell_w = (usable_w - GAP_COL * (N_COLS - 1)) / N_COLS
     row_h  = (usable_h - GAP_ROW * (n_rows - 1)) / n_rows
-    img_h  = row_h - ROW_LBL - COL_LBL  # space left for the chart image
-
-    # ---- Page header (subtle, small) ----
-    c.setFillColorRGB(0.92, 0.92, 0.92)
-    c.rect(MARGIN, H - MARGIN - HDR_H + 2, usable_w, HDR_H - 2, fill=1, stroke=0)
-    c.setFillColorRGB(0.25, 0.25, 0.25)
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(MARGIN + 6, H - MARGIN - HDR_H + 7, "Performance Data")
-    # column headers in page header bar
-    for ci, col_lbl in enumerate(COL_LABELS):
-        cx = MARGIN + ci * (cell_w + GAP_COL)
-        c.setFont("Helvetica", 8)
-        c.setFillColorRGB(0.35, 0.35, 0.35)
-        c.drawCentredString(cx + cell_w / 2, H - MARGIN - HDR_H + 7, col_lbl)
+    img_h  = row_h - ROW_LBL
 
     # ---- Rows ----
-    top_y = H - MARGIN - HDR_H  # top of first row
+    top_y = H - MARGIN
 
     for ri, (label, info) in enumerate(pairs):
         row_top = top_y - ri * (row_h + GAP_ROW)
@@ -931,9 +915,9 @@ def build_perf_2aerodromes_page(pairs: List[Tuple[str, dict]]) -> bytes:
         c.drawString(MARGIN + 6, row_top - ROW_LBL + 4, label)
 
         # Charts
-        for ci, (col_key, col_lbl) in enumerate(zip(COL_KEYS, COL_LABELS)):
+        for ci, col_key in enumerate(COL_KEYS):
             cx = MARGIN + ci * (cell_w + GAP_COL)
-            cy = row_bot  # bottom of chart cell
+            cy = row_bot
 
             # Cell border
             c.setStrokeColorRGB(0.78, 0.78, 0.78)
