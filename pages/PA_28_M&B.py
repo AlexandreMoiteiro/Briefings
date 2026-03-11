@@ -1623,9 +1623,9 @@ with tab4:
                 kg = lb / KG_TO_LB
                 return f"{lb:.0f} ({kg:.0f}kg)"
 
-            # Fuel weight: "48USG/182L" — no lbs, fits the field
+            # Fuel weight: just the lbs value, no unit label
             def fuel_w_str(fuel_lb, fuel_usg, fuel_l):
-                return f"{fuel_usg:.0f}USG/{fuel_l:.0f}L"
+                return f"{fuel_lb:.0f}"
 
             ew_lb = wb.get("ew_lb", 0.0)
             ew_mom = wb.get("ew_mom", 0.0)
