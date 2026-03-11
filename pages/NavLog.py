@@ -1,3 +1,4 @@
+
 # app_navlog_skeleton_routes_only.py
 # ---------------------------------------------------------------
 # Versão onde as rotas padrão (Gist) guardam APENAS o esqueleto:
@@ -21,15 +22,30 @@ from pdfrw import PdfReader, PdfWriter, PdfDict, PdfName
 TEMPLATE_MAIN = "NAVLOG_FORM.pdf"
 TEMPLATE_CONT = "NAVLOG_FORM_1.pdf"
 
-CLIMB_TAS, CRUISE_TAS, DESCENT_TAS = 70.0, 90.0, 90.0
-FUEL_FLOW = 20.0              # L/h
+# ---- Perfis de aeronave ----
+AIRCRAFT_PROFILES = {
+    "Tecnam P2008": {
+        "climb_tas":   70.0,
+        "cruise_tas":  90.0,
+        "descent_tas": 90.0,
+        "fuel_flow_lh": 20.0,   # L/h
+    },
+    "Piper PA-28": {
+        "climb_tas":   100.0,
+        "cruise_tas":  115.0,
+        "descent_tas": 115.0,
+        "fuel_flow_lh": 38.0,   # L/h  (≈10 USG/h)
+    },
+}
+USG_TO_L = 3.78541
+
 EARTH_NM  = 3440.065
 PROFILE_COLORS = {"CLIMB":"#FF7A00","LEVEL":"#C000FF","DESCENT":"#00B386","STOP":"#FF0000"}
 
 # arredondamentos (minuto e litro)
-ROUND_TIME_SEC = 60       # arredonda ao minuto
-ROUND_DIST_NM  = 0.5      # 0.5 NM
-ROUND_FUEL_L   = 1.0      # 1 L
+ROUND_TIME_SEC = 60
+ROUND_DIST_NM  = 0.5
+ROUND_FUEL_L   = 1.0
 
 CP_TICK_HALF = 0.38
 NBSP_THIN = "&#8239;"
@@ -257,6 +273,7 @@ st.markdown("""
 .small{font-size:12px;color:#555}
 .row{display:flex;gap:8px;align-items:center}
 .badge{font-weight:700;border:1px solid #111;border-radius:8px;padding:2px 6px;margin-right:6px}
+.ac-banner{border-radius:10px;padding:8px 14px;font-weight:700;font-size:14px;margin-bottom:6px;display:inline-block}
 </style>
 """, unsafe_allow_html=True)
 
@@ -371,6 +388,13 @@ def extract_polygon_coords(raw_text:str):
 # ========= STATE =========
 def ens(k, v): return st.session_state.setdefault(k, v)
 
+# ---- Aeronave ----
+ens("aircraft_type", "Tecnam P2008")
+ens("ac_climb_tas",   70.0)
+ens("ac_cruise_tas",  90.0)
+ens("ac_descent_tas", 90.0)
+ens("ac_fuel_flow_lh", 20.0)
+
 ens("wind_from", 0)
 ens("wind_kt", 0)
 ens("use_global_wind", True)
@@ -415,10 +439,96 @@ ens("preset_selected", [])
 ens("use_leg_filter", False)
 ens("leg_filter_ids", [])
 
-# Rotas padrão (Gist)
 ens("saved_routes", {})
 
+# ========= HELPERS aeronave (usados no cálculo) =========
+def get_climb_tas():   return float(st.session_state.ac_climb_tas)
+def get_cruise_tas():  return float(st.session_state.ac_cruise_tas)
+def get_descent_tas(): return float(st.session_state.ac_descent_tas)
+def get_fuel_flow():   return float(st.session_state.ac_fuel_flow_lh)
+
 # ========= FORM GLOBAL =========
+
+# ---- Selector de aeronave (fora do form para reagir imediatamente) ----
+st.markdown("### ✈️ Aeronave")
+ac_col1, ac_col2, ac_col3, ac_col4, ac_col5 = st.columns([2, 1, 1, 1, 2])
+
+with ac_col1:
+    ac_names = list(AIRCRAFT_PROFILES.keys())
+    ac_choice = st.selectbox(
+        "Tipo de aeronave",
+        ac_names,
+        index=ac_names.index(st.session_state.aircraft_type)
+        if st.session_state.aircraft_type in ac_names else 0,
+        key="aircraft_select_widget",
+    )
+    # Quando muda o tipo, carrega os defaults do perfil
+    if ac_choice != st.session_state.aircraft_type:
+        st.session_state.aircraft_type = ac_choice
+        p = AIRCRAFT_PROFILES[ac_choice]
+        st.session_state.ac_climb_tas    = p["climb_tas"]
+        st.session_state.ac_cruise_tas   = p["cruise_tas"]
+        st.session_state.ac_descent_tas  = p["descent_tas"]
+        st.session_state.ac_fuel_flow_lh = p["fuel_flow_lh"]
+        st.rerun()
+
+with ac_col2:
+    st.session_state.ac_climb_tas = st.number_input(
+        "TAS subida (kt)", 30.0, 300.0,
+        float(st.session_state.ac_climb_tas), step=1.0,
+        key="ac_climb_tas_input"
+    )
+with ac_col3:
+    st.session_state.ac_cruise_tas = st.number_input(
+        "TAS cruzeiro (kt)", 30.0, 300.0,
+        float(st.session_state.ac_cruise_tas), step=1.0,
+        key="ac_cruise_tas_input"
+    )
+with ac_col4:
+    st.session_state.ac_descent_tas = st.number_input(
+        "TAS descida (kt)", 30.0, 300.0,
+        float(st.session_state.ac_descent_tas), step=1.0,
+        key="ac_descent_tas_input"
+    )
+with ac_col5:
+    fuel_col_a, fuel_col_b = st.columns(2)
+    with fuel_col_a:
+        st.session_state.ac_fuel_flow_lh = st.number_input(
+            "Consumo (L/h)", 1.0, 200.0,
+            float(st.session_state.ac_fuel_flow_lh), step=0.5,
+            key="ac_fuel_lh_input"
+        )
+    with fuel_col_b:
+        # Mostrar também em USG/h (read-only, informativo)
+        usg_val = st.session_state.ac_fuel_flow_lh / USG_TO_L
+        st.number_input(
+            "Consumo (USG/h) ℹ️", 0.0, 100.0,
+            float(round(usg_val, 2)), step=0.1,
+            key="ac_fuel_usg_display",
+            disabled=False,
+            help="Campo de referência — editar aqui atualiza L/h automaticamente."
+        )
+        # Se o utilizador mexeu no campo USG, converter para L/h
+        # (Streamlit não tem callback fácil sem form; usamos a diferença)
+        stored_usg = round(st.session_state.ac_fuel_flow_lh / USG_TO_L, 2)
+        new_usg = st.session_state.get("ac_fuel_usg_display", stored_usg)
+        if abs(float(new_usg) - stored_usg) > 0.005:
+            st.session_state.ac_fuel_flow_lh = float(new_usg) * USG_TO_L
+
+# Banner de aeronave selecionada
+ac_color = "#1e40af" if "Piper" in st.session_state.aircraft_type else "#065f46"
+st.markdown(
+    f"<div class='ac-banner' style='background:#dbeafe;color:{ac_color};border:1.5px solid {ac_color};'>"
+    f"🛩 {st.session_state.aircraft_type} &nbsp;|&nbsp; "
+    f"Cruise {st.session_state.ac_cruise_tas:.0f} kt &nbsp;|&nbsp; "
+    f"{st.session_state.ac_fuel_flow_lh:.1f} L/h "
+    f"({st.session_state.ac_fuel_flow_lh/USG_TO_L:.1f} USG/h)"
+    f"</div>",
+    unsafe_allow_html=True
+)
+
+st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+
 with st.form("globals"):
     c1,c2,c3,c4 = st.columns(4)
     with c1:
@@ -572,7 +682,6 @@ def _load_vor_db(path: str) -> pd.DataFrame:
 if "vor_db" not in st.session_state:
     st.session_state.vor_db = _load_vor_db(VOR_CSV)
 
-# tornar VORs pesquisáveis
 vor_pts = []
 for _, r in st.session_state.vor_db.iterrows():
     vor_pts.append({
@@ -587,13 +696,11 @@ for _, r in st.session_state.vor_db.iterrows():
     })
 vor_df = pd.DataFrame(vor_pts)
 
-# juntar tudo + RASQUETE BRIDGE
 if st.session_state.db_points is None:
     base_db = pd.concat(
         [ad_df, loc_df, vor_df],
         ignore_index=True
     ).dropna(subset=["lat","lon"]).reset_index(drop=True)
-
     st.session_state.db_points = base_db.dropna(subset=["lat","lon"]).reset_index(drop=True)
 
 db = st.session_state.db_points
@@ -721,12 +828,6 @@ def _get_gist_credentials():
     return token, gist_id
 
 def _serialize_wp_for_route(wp: dict) -> dict:
-    """
-    👉 Só guardamos o ESQUELETO da rota.
-    Não vão para o Gist:
-      - vento por waypoint
-      - tempos, EFOB, etc. (só existem no dia)
-    """
     return {
         "name": wp["name"],
         "lat":  float(wp["lat"]),
@@ -738,11 +839,6 @@ def _serialize_wp_for_route(wp: dict) -> dict:
     }
 
 def _deserialize_wp_for_route(data: dict) -> dict:
-    """
-    👉 Reconstrói o esqueleto:
-      - usa o vento GLOBAL atual (vento do dia)
-      - repõe STOP / VOR fixo se existirem
-    """
     base = new_wp_dict(
         data.get("name", "WP"),
         float(data.get("lat", 0.0)),
@@ -1116,6 +1212,10 @@ def build_route_nodes(user_wps, wind_from, wind_kt, roc_fpm, rod_fpm):
     nodes = []
     if len(user_wps) < 2:
         return nodes
+
+    climb_tas   = get_climb_tas()
+    descent_tas = get_descent_tas()
+
     for i in range(len(user_wps)-1):
         A, B = user_wps[i], user_wps[i+1]
         nodes.append({
@@ -1128,8 +1228,8 @@ def build_route_nodes(user_wps, wind_from, wind_kt, roc_fpm, rod_fpm):
         })
         tc   = gc_course_tc(A["lat"], A["lon"], B["lat"], B["lon"])
         dist = gc_dist_nm(A["lat"], A["lon"], B["lat"], B["lon"])
-        _, _, gs_cl = wind_triangle(tc, CLIMB_TAS,   A.get("wind_from", wind_from), A.get("wind_kt", wind_kt))
-        _, _, gs_de = wind_triangle(tc, DESCENT_TAS, A.get("wind_from", wind_from), A.get("wind_kt", wind_kt))
+        _, _, gs_cl = wind_triangle(tc, climb_tas,   A.get("wind_from", wind_from), A.get("wind_kt", wind_kt))
+        _, _, gs_de = wind_triangle(tc, descent_tas, A.get("wind_from", wind_from), A.get("wind_kt", wind_kt))
         if B["alt"] > A["alt"]:
             dh = B["alt"] - A["alt"]
             t_need = dh / max(roc_fpm, 1.0)
@@ -1179,6 +1279,11 @@ def build_legs_from_nodes(nodes, mag_var, mag_is_e, ck_every_min):
     if len(nodes) < 2:
         return legs
 
+    climb_tas   = get_climb_tas()
+    cruise_tas  = get_cruise_tas()
+    descent_tas = get_descent_tas()
+    fuel_flow   = get_fuel_flow()
+
     base_time = None
     if st.session_state.start_clock.strip():
         try:
@@ -1208,13 +1313,13 @@ def build_legs_from_nodes(nodes, mag_var, mag_is_e, ck_every_min):
 
         if abs(B["alt"]-A["alt"])<1e-6:
             profile = "LEVEL"
-            tas = CRUISE_TAS
+            tas = cruise_tas
         elif B["alt"]>A["alt"]:
             profile = "CLIMB"
-            tas = CLIMB_TAS
+            tas = climb_tas
         else:
             profile = "DESCENT"
-            tas = DESCENT_TAS
+            tas = descent_tas
 
         _, th, gs = wind_triangle(tc, tas, wind_from_used, wind_kt_used)
         mh = apply_var(th, st.session_state.mag_var, st.session_state.mag_is_e)
@@ -1224,7 +1329,7 @@ def build_legs_from_nodes(nodes, mag_var, mag_is_e, ck_every_min):
         else:
             time_sec_raw = 0
         time_sec = rt30(time_sec_raw)
-        burn_raw = FUEL_FLOW * (time_sec/3600.0)
+        burn_raw = fuel_flow * (time_sec/3600.0)
         burn = rfuel05(burn_raw)
 
         efob_start = carry_efob
@@ -1278,7 +1383,7 @@ def build_legs_from_nodes(nodes, mag_var, mag_is_e, ck_every_min):
         stop_min = B.get("stop_min", 0.0)
         if stop_min and stop_min > 0.0:
             stop_sec = rt30(stop_min * 60.0)
-            stop_burn = rfuel05(FUEL_FLOW * (stop_sec/3600.0))
+            stop_burn = rfuel05(fuel_flow * (stop_sec/3600.0))
             efob_start2 = carry_efob
             efob_end2 = max(0.0, rfuel05(efob_start2 - stop_burn))
             clk_start2 = (
@@ -1336,12 +1441,14 @@ if st.session_state.legs:
     total_burn = rfuel05(sum(L["burn"] for L in st.session_state.legs))
     total_dist = rdist05(sum(L["Dist"] for L in st.session_state.legs))
     efob_final = st.session_state.legs[-1]["efob_end"]
+    total_burn_usg = total_burn / USG_TO_L
     st.markdown(
         "<div class='kvrow'>"
         + f"<div class='kv'>⏱️ ETE Total: <b>{hhmmss(total_sec)}</b></div>"
         + f"<div class='kv'>🧭 Distância: <b>{total_dist:.1f} nm</b></div>"
-        + f"<div class='kv'>⛽ Burn Total: <b>{total_burn:.1f} L</b></div>"
+        + f"<div class='kv'>⛽ Burn Total: <b>{total_burn:.1f} L ({total_burn_usg:.1f} USG)</b></div>"
         + f"<div class='kv'>🧯 EFOB Final: <b>{efob_final:.1f} L</b></div>"
+        + f"<div class='kv'>🛩 {st.session_state.aircraft_type}</div>"
         + f"<div class='kv'>🧮 Nº legs: <b>{len(st.session_state.legs)}</b></div>"
         + "</div>", unsafe_allow_html=True
     )
@@ -1837,14 +1944,14 @@ if use_alt and alt_choice and st.session_state.wps:
     else:
         wf = dest.get("wind_from", st.session_state.wind_from)
         wk = dest.get("wind_kt",   st.session_state.wind_kt)
-    _, th_alt, gs_alt = wind_triangle(tc_alt, CRUISE_TAS, wf, wk)
+    _, th_alt, gs_alt = wind_triangle(tc_alt, get_cruise_tas(), wf, wk)
     mh_alt = apply_var(th_alt, st.session_state.mag_var, st.session_state.mag_is_e)
     dist_alt = rdist05(gc_dist_nm(dest["lat"], dest["lon"], alt_choice["lat"], alt_choice["lon"]))
     ete_alt_sec = rt30((dist_alt / max(gs_alt,1e-9)) * 3600)
-    burn_alt = rfuel05(FUEL_FLOW * (ete_alt_sec/3600.0))
+    burn_alt = rfuel05(get_fuel_flow() * (ete_alt_sec/3600.0))
     alt_leg_info = {
         "tc":tc_alt,"th":th_alt,"mh":mh_alt,
-        "tas":CRUISE_TAS,"gs":gs_alt,
+        "tas":get_cruise_tas(),"gs":gs_alt,
         "dist":dist_alt,"ete":ete_alt_sec,
         "burn":burn_alt
     }
@@ -1922,7 +2029,7 @@ def _fill_leg_line(d:dict, idx:int, L:dict, use_point:str, acc_d:float, acc_t:in
     d[f"{prefix}{idx:02d}_Cumulative_Distance"] = f"{acc_d:.1f}"
     d[f"{prefix}{idx:02d}_Leg_ETE"]             = _pdf_mmss(L["time_sec"])
     d[f"{prefix}{idx:02d}_Cumulative_ETE"]      = _pdf_mmss(acc_t)
-    d[f"{prefix}{idx:02d}_ETO"]                 = ""   # ETO em branco
+    d[f"{prefix}{idx:02d}_ETO"]                 = ""
     d[f"{prefix}{idx:02d}_Planned_Burnoff"]     = f"{L['burn']:.1f}"
     d[f"{prefix}{idx:02d}_Estimated_FOB"]       = f"{L['efob_end']:.1f}"
 
@@ -1979,6 +2086,7 @@ def _build_payloads_main(
         "CLIMB FUEL": f"{climb_burn:.1f}",
         "OBSERVATIONS": obs,
         "Leg_Number": str(len(legs)),
+        "AIRCRAFT_TYPE": st.session_state.aircraft_type,
     }
 
     acc_d, acc_t = 0.0, 0
@@ -2108,7 +2216,7 @@ def generate_legs_briefing_pdf(path: str, rows):
     x_margin = 15 * mm
     y = height - 20 * mm
 
-    title = "Route briefing (legs)"
+    title = f"Route briefing (legs) — {st.session_state.aircraft_type}"
     c.setFont("Helvetica-Bold", 14)
     c.drawString(x_margin, y, title)
     y -= 10 * mm
@@ -2234,4 +2342,3 @@ if make_pdfs:
                 file_name="NAVLOG_LEGS_BRIEFING.csv",
                 use_container_width=True
             )
-
