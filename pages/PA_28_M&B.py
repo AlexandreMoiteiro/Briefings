@@ -1620,11 +1620,14 @@ with tab4:
                 put(nm, f"{MLW_LB:.0f}")
 
             def w_str(lb):
+                if lb == 0:
+                    return "0"
                 kg = lb / KG_TO_LB
                 return f"{lb:.0f} ({kg:.0f}kg)"
 
-            # Fuel weight: "288 (48USG/182L)"
             def fuel_w_str(fuel_lb, fuel_usg, fuel_l):
+                if fuel_lb == 0:
+                    return "0"
                 return f"{fuel_lb:.0f} ({fuel_usg:.0f}USG/{fuel_l:.0f}L)"
 
             ew_lb = wb.get("ew_lb", 0.0)
