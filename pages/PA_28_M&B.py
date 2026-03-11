@@ -563,46 +563,46 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
         c.setFillColorRGB(r, g, b)
         c.circle(x_dot, y_dot, DOT_R, fill=1, stroke=0)
 
-    # ---- Legend (bottom-right corner, compact) ----
+    # ---- Legend — top-right corner of CG chart ----
+    # A4 page (~595 x 842 pt). CG chart occupies roughly bottom 55% of page.
+    # The chart's right margin is near x=540pt; chart top is near y=390pt.
+    # We place the legend box just inside the top-right of the chart.
     legend_items = [
         ("Empty",   (0.10, 0.60, 0.15)),
         ("Takeoff", (0.10, 0.30, 0.85)),
         ("Landing", (0.85, 0.15, 0.15)),
     ]
-    box_w = 72
-    box_h = 14 * len(legend_items) + 18  # header + rows
-    leg_x = w_pt - box_w - 14
-    leg_y = 14  # near bottom-right
+    row_h = 14
+    box_w = 64
+    box_h = row_h * len(legend_items) + 17
+    # position: right side of page, vertically in the upper portion of the chart
+    leg_x = w_pt - box_w - 8
+    leg_y = h_pt * 0.38   # ~320pt from bottom = upper area of CG chart
 
-    # background rect
     c.setFillColorRGB(1, 1, 1)
-    c.setStrokeColorRGB(0.55, 0.55, 0.55)
+    c.setStrokeColorRGB(0.45, 0.45, 0.45)
     c.setLineWidth(0.6)
     c.rect(leg_x, leg_y, box_w, box_h, fill=1, stroke=1)
 
-    # header
-    c.setFillColorRGB(0.15, 0.15, 0.15)
-    c.setFont("Helvetica-Bold", 7)
-    c.drawString(leg_x + 5, leg_y + box_h - 9, "CG Envelope")
+    c.setFillColorRGB(0.10, 0.10, 0.10)
+    c.setFont("Helvetica-Bold", 6.5)
+    c.drawString(leg_x + 4, leg_y + box_h - 9, "CG Envelope")
 
-    # separator line under header
-    c.setStrokeColorRGB(0.75, 0.75, 0.75)
-    c.setLineWidth(0.4)
+    c.setStrokeColorRGB(0.70, 0.70, 0.70)
+    c.setLineWidth(0.35)
     c.line(leg_x + 3, leg_y + box_h - 11, leg_x + box_w - 3, leg_y + box_h - 11)
 
-    c.setFont("Helvetica", 7)
-    row_y = leg_y + box_h - 22
-    sq = 7  # colour square size
+    c.setFont("Helvetica", 6.5)
+    sq = 6
+    ry = leg_y + box_h - 11 - row_h + 1
     for label, (r, g, b) in legend_items:
-        # coloured square
         c.setFillColorRGB(r, g, b)
-        c.setStrokeColorRGB(r * 0.7, g * 0.7, b * 0.7)
-        c.setLineWidth(0.3)
-        c.rect(leg_x + 5, row_y, sq, sq, fill=1, stroke=1)
-        # label
-        c.setFillColorRGB(0.15, 0.15, 0.15)
-        c.drawString(leg_x + 5 + sq + 4, row_y + 1, label)
-        row_y -= 14
+        c.setStrokeColorRGB(r * 0.55, g * 0.55, b * 0.55)
+        c.setLineWidth(0.25)
+        c.rect(leg_x + 4, ry, sq, sq, fill=1, stroke=1)
+        c.setFillColorRGB(0.10, 0.10, 0.10)
+        c.drawString(leg_x + 4 + sq + 4, ry + 1, label)
+        ry -= row_h
 
     c.showPage()
     c.save()
@@ -1054,7 +1054,90 @@ def _merge_side_by_side(img_left: Image.Image, img_right: Image.Image, align_by=
     canvas_img.paste(img_right, (img_left.width + gap_px, 0))
     return canvas_img
 
-def mb_pdf_to_side_by_side_image(pdf_bytes: bytes, dpi: int, align_by="height", gap_px=0, bg=(255,255,255), sharpen=True) -> Image.Image:
+def _draw_cg_legend_on_image(img: Image.Image, items: list) -> Image.Image:
+    """Draw a compact CG legend box directly on the PIL image.
+    Positioned in the bottom-right quadrant of the LEFT half (CG chart page).
+    items: list of (label, (r_f, g_f, b_f)) with floats 0-1.
+    """
+    img = img.copy()
+    d = ImageDraw.Draw(img)
+
+    # Scale font size relative to image height
+    font_size = max(18, img.height // 120)
+    try:
+        font_bold = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
+        font_reg  = ImageFont.truetype("DejaVuSans.ttf", font_size)
+    except Exception:
+        font_bold = ImageFont.load_default()
+        font_reg  = font_bold
+
+    sq = font_size          # colour square side
+    pad_x, pad_y = 10, 8
+    row_gap = 4
+    row_h = sq + row_gap
+
+    # Measure header
+    title = "CG Envelope"
+    try:
+        hb = font_bold.getbbox(title)
+        title_w, title_h = hb[2] - hb[0], hb[3] - hb[1]
+    except Exception:
+        title_w, title_h = len(title) * font_size // 2, font_size
+
+    # Measure longest label
+    max_lbl_w = 0
+    for lbl, _ in items:
+        try:
+            bb = font_reg.getbbox(lbl)
+            max_lbl_w = max(max_lbl_w, bb[2] - bb[0])
+        except Exception:
+            max_lbl_w = max(max_lbl_w, len(lbl) * font_size // 2)
+
+    sep_h = 3
+    box_w = max(title_w, sq + 6 + max_lbl_w) + pad_x * 2
+    box_h = title_h + sep_h + pad_y + len(items) * row_h + pad_y
+
+    # Position: right edge of LEFT half page, ~65% down
+    half_w = img.width // 2
+    margin = max(12, img.width // 140)
+    bx = half_w - box_w - margin
+    by = int(img.height * 0.62)
+
+    # Shadow
+    shadow_off = 3
+    d.rectangle([bx + shadow_off, by + shadow_off,
+                 bx + box_w + shadow_off, by + box_h + shadow_off],
+                fill=(180, 180, 180))
+
+    # Box background + border
+    d.rectangle([bx, by, bx + box_w, by + box_h], fill=(255, 255, 255), outline=(100, 100, 100), width=2)
+
+    # Header
+    tx = bx + pad_x
+    ty = by + pad_y
+    d.text((tx, ty), title, font=font_bold, fill=(20, 20, 20))
+
+    # Separator
+    sep_y = ty + title_h + 3
+    d.line([(bx + 4, sep_y), (bx + box_w - 4, sep_y)], fill=(180, 180, 180), width=1)
+
+    # Rows
+    ry = sep_y + sep_h + 2
+    for label, (rf, gf, bf) in items:
+        color = (int(rf * 255), int(gf * 255), int(bf * 255))
+        dark  = (int(rf * 140), int(gf * 140), int(bf * 140))
+        d.rectangle([tx, ry, tx + sq, ry + sq], fill=color, outline=dark, width=1)
+        d.text((tx + sq + 6, ry), label, font=font_reg, fill=(20, 20, 20))
+        ry += row_h
+
+    return img
+
+
+def mb_pdf_to_side_by_side_image(
+    pdf_bytes: bytes, dpi: int,
+    align_by="height", gap_px=0, bg=(255, 255, 255), sharpen=True,
+    cg_legend_items: list = None,
+) -> Image.Image:
     pdf_bytes = _preprocess_pdf_for_raster(pdf_bytes)
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         if doc.page_count < 1:
@@ -1064,6 +1147,9 @@ def mb_pdf_to_side_by_side_image(pdf_bytes: bytes, dpi: int, align_by="height", 
         merged = _merge_side_by_side(i1, i2, align_by=align_by, gap_px=gap_px, bg=bg)
         if sharpen:
             merged = merged.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=3))
+        # Draw CG legend directly on the PIL image (reliable, DPI-aware)
+        if cg_legend_items:
+            merged = _draw_cg_legend_on_image(merged, cg_legend_items)
         return merged
 
 def image_to_single_page_pdf(img: Image.Image, dpi: int) -> bytes:
@@ -1625,10 +1711,10 @@ with tab4:
             kg = lb / KG_TO_LB
             return f"{lb:.0f} ({kg:.0f}kg)"
 
-        # FIX 2: fuel string — abbreviated format to avoid text overflow in PDF fields
-        # Format: "48.0USG / 182L" (no leading weight in lbs, just the volume info)
+        # FIX 2: fuel string — very short to avoid PDF field overflow
+        # Just USG and L, no lbs — e.g. "48.0USG/182L"
         def fuel_w_str(fuel_lb, fuel_usg, fuel_l):
-            return f"{fuel_lb:.0f}lb ({fuel_usg:.1f}USG/{fuel_l:.0f}L)"
+            return f"{fuel_usg:.1f}USG/{fuel_l:.0f}L"
 
         ew_lb = wb.get("ew_lb", 0.0)
         ew_mom = wb.get("ew_mom", 0.0)
@@ -1757,6 +1843,11 @@ with tab4:
         mb_pdf = draw_cg_overlay_on_page0(base_filled, chart_points)
 
         # Side-by-side raster as first (and only base) page
+        cg_legend = [
+            ("Empty",   (0.10, 0.60, 0.15)),
+            ("Takeoff", (0.10, 0.30, 0.85)),
+            ("Landing", (0.85, 0.15, 0.15)),
+        ]
         sbs_img = mb_pdf_to_side_by_side_image(
             mb_pdf,
             dpi=SBS_DPI,
@@ -1764,6 +1855,7 @@ with tab4:
             gap_px=SBS_GAP_PX,
             bg=SBS_BG,
             sharpen=SBS_SHARPEN,
+            cg_legend_items=cg_legend,
         )
         final_pdf = image_to_single_page_pdf(sbs_img, dpi=SBS_DPI)
 
