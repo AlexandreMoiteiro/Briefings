@@ -30,9 +30,9 @@ AIRCRAFT_PROFILES = {
         "fuel_flow_lh": 20.0,   # L/h
     },
     "Piper PA-28": {
-        "climb_tas":   76,
+        "climb_tas":   100.0,
         "cruise_tas":  115.0,
-        "descent_tas": 100,
+        "descent_tas": 115.0,
         "fuel_flow_lh": 38.0,   # L/h
     },
 }
@@ -1860,12 +1860,20 @@ with tab_fpl:
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 st.header("📄 NAVLOG — Cabeçalho & PDF")
 
-REG_OPTIONS = ["CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW","CS-ECC","CS-ECD"]
+REG_OPTIONS_TECNAM = ["CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW","CS-ECC","CS-ECD"]
+REG_OPTIONS_PIPER  = ["OE-KPD","OE-KPE","OE-KPG","OE-KPP"]
+
+reg_options = (
+    REG_OPTIONS_PIPER
+    if "Piper" in st.session_state.aircraft_type
+    else REG_OPTIONS_TECNAM
+)
+
 c0,c1,c2,c3,c4 = st.columns(5)
 with c0:
     callsign = st.text_input("Callsign", "RVP")
 with c1:
-    registration = st.selectbox("Registration", REG_OPTIONS, index=0)
+    registration = st.selectbox("Registration", reg_options, index=0)
 with c2:
     student = st.text_input("Student", "AMOIT")
 with c3:
