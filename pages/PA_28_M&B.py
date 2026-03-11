@@ -1623,9 +1623,9 @@ with tab4:
                 kg = lb / KG_TO_LB
                 return f"{lb:.0f} ({kg:.0f}kg)"
 
-            # Fuel weight: "88lb (48USG/182L)" — compact, lbs always shown
+            # Fuel weight: "48USG/182L" — no lbs, fits the field
             def fuel_w_str(fuel_lb, fuel_usg, fuel_l):
-                return f"{fuel_lb:.0f}lb ({fuel_usg:.0f}USG/{fuel_l:.0f}L)"
+                return f"{fuel_usg:.0f}USG/{fuel_l:.0f}L"
 
             ew_lb = wb.get("ew_lb", 0.0)
             ew_mom = wb.get("ew_mom", 0.0)
@@ -1698,7 +1698,7 @@ with tab4:
             def fuel_str(liters):
                 liters = float(liters)
                 usg = float(FUEL_USABLE_USG) if abs(liters - float(FUEL_USABLE_L)) < 0.5 else liters * L_TO_USG
-                return f"{usg:.1f}U/{liters:.0f}L"
+                return f"{usg:.1f}USG/{liters:.0f}L"
 
             put("Start-up_and_Taxi_TIME",  fmt_hm(int(fuel.get("taxi_min", 0))))
             put("Start-up_and_Taxi_FUEL",  fuel_str(float(fuel.get("taxi_l", 0.0))))
