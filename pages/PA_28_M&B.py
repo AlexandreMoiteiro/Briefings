@@ -948,6 +948,7 @@ def _img_to_jpeg_reader(img: Image.Image, quality: int = 80) -> io.BytesIO:
     return buf
 
 
+def append_perf_pages(base_pdf_bytes: bytes, perf_by_role: dict) -> bytes:
     """Append 2 landscape pages: each page has 2 airfields × 3 charts."""
     reader = PdfReader(io.BytesIO(base_pdf_bytes))
     writer = PdfWriter()
