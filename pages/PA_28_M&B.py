@@ -74,7 +74,7 @@ st.markdown(
 )
 
 st.markdown(
-    '<div class="hdr">Piper PA28 Archer III — M&B + Weather + Performance + PDF</div>',
+    '<div class="hdr">Piper PA28 Archer III — M&amp;B + Weather + Performance + PDF</div>',
     unsafe_allow_html=True
 )
 
@@ -533,6 +533,11 @@ def xy_from_cg_weight(cg_in: float, weight_lb: float):
     frac = (cg - lo) / (hi - lo)
     return (x0 + frac * (x1 - x0), y0 + frac * (y1 - y0))
 
+
+# =========================================================
+# FIX 1: CG legend — compact, positioned bottom-right of chart
+# Uses a clean bordered box with coloured squares + labels
+# =========================================================
 def draw_cg_overlay_on_page0(template_bytes: bytes, points):
     reader = PdfReader(io.BytesIO(template_bytes))
     page0 = reader.pages[0]
@@ -558,27 +563,46 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
         c.setFillColorRGB(r, g, b)
         c.circle(x_dot, y_dot, DOT_R, fill=1, stroke=0)
 
-    # legend
-    legend_x = 500
-    legend_y = 300
-    c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(legend_x, legend_y + 70, "Legend")
-    c.setFont("Helvetica", 10)
-
-    items = [
-        ("Empty",    (0.10, 0.60, 0.15)),
-        ("Takeoff",  (0.10, 0.30, 0.85)),
-        ("Landing",  (0.85, 0.15, 0.15)),
+    # ---- Legend (bottom-right corner, compact) ----
+    legend_items = [
+        ("Empty",   (0.10, 0.60, 0.15)),
+        ("Takeoff", (0.10, 0.30, 0.85)),
+        ("Landing", (0.85, 0.15, 0.15)),
     ]
-    y = legend_y + 50
-    for name, rgb in items:
-        r, g, b = rgb
+    box_w = 72
+    box_h = 14 * len(legend_items) + 18  # header + rows
+    leg_x = w_pt - box_w - 14
+    leg_y = 14  # near bottom-right
+
+    # background rect
+    c.setFillColorRGB(1, 1, 1)
+    c.setStrokeColorRGB(0.55, 0.55, 0.55)
+    c.setLineWidth(0.6)
+    c.rect(leg_x, leg_y, box_w, box_h, fill=1, stroke=1)
+
+    # header
+    c.setFillColorRGB(0.15, 0.15, 0.15)
+    c.setFont("Helvetica-Bold", 7)
+    c.drawString(leg_x + 5, leg_y + box_h - 9, "CG Envelope")
+
+    # separator line under header
+    c.setStrokeColorRGB(0.75, 0.75, 0.75)
+    c.setLineWidth(0.4)
+    c.line(leg_x + 3, leg_y + box_h - 11, leg_x + box_w - 3, leg_y + box_h - 11)
+
+    c.setFont("Helvetica", 7)
+    row_y = leg_y + box_h - 22
+    sq = 7  # colour square size
+    for label, (r, g, b) in legend_items:
+        # coloured square
         c.setFillColorRGB(r, g, b)
-        c.rect(legend_x, y - 7, 10, 10, fill=1, stroke=0)
-        c.setFillColorRGB(0, 0, 0)
-        c.drawString(legend_x + 16, y - 5, name)
-        y -= 18
+        c.setStrokeColorRGB(r * 0.7, g * 0.7, b * 0.7)
+        c.setLineWidth(0.3)
+        c.rect(leg_x + 5, row_y, sq, sq, fill=1, stroke=1)
+        # label
+        c.setFillColorRGB(0.15, 0.15, 0.15)
+        c.drawString(leg_x + 5 + sq + 4, row_y + 1, label)
+        row_y -= 14
 
     c.showPage()
     c.save()
@@ -615,21 +639,21 @@ ASSETS = {
         "bg_default": "to_ground_roll.jpg",
         "json_default": "to_ground_roll.json",
         "bg_kind": "image",
-        "round_to": 10,   # ft
+        "round_to": 10,
     },
     "climb": {
         "title": "Climb Performance",
         "bg_default": "climb_perf.jpg",
         "json_default": "climb_perf.json",
         "bg_kind": "image",
-        "round_to": 10,  # fpm
+        "round_to": 10,
     },
     "landing": {
         "title": "Landing Ground Roll",
         "bg_default": "ldg_ground_roll.pdf",
         "json_default": "ldg_ground_roll.json",
         "bg_kind": "pdf",
-        "round_to": 10,   # ft
+        "round_to": 10,
     },
 }
 
@@ -818,7 +842,6 @@ def solve_ground_roll(cap, mode, oat_c, pa_ft, weight_lb, wind_kt):
 
     out_val = axis_value(ax_out_a, ax_out_b, y_out)
 
-    # path segments for drawing
     segs = []
     left_panel = panels.get("left") or []
     right_panel = panels.get("right") or []
@@ -862,9 +885,8 @@ def solve_climb(cap, oat_c, pa_ft):
 
 
 # =========================================================
-# Simple clean drawing for performance images
-# - NO percentage on image
-# - Value label in FEET (takeoff/landing) and FPM (climb)
+# FIX 3: Performance image drawing — path only, no value badge
+# Clean: just the orange trace on the chart background
 # =========================================================
 def load_font(size: int):
     try:
@@ -879,43 +901,17 @@ def draw_path(draw: ImageDraw.ImageDraw, segs, color=(255, 140, 0), width=4):
         x, y = segs[-1][1]
         draw.ellipse((x - 7, y - 7, x + 7, y + 7), fill=color, outline=(255, 255, 255), width=2)
 
-def badge(img: Image.Image, xy: Tuple[int, int], text: str):
-    base = img.convert("RGBA")
-    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(overlay)
-    font = load_font(22)
-    x, y = xy
-    try:
-        x0, y0, x1, y1 = d.textbbox((0, 0), text, font=font)
-        tw, th = (x1 - x0), (y1 - y0)
-    except Exception:
-        tw, th = (10 * len(text), 24)
-    pad_x, pad_y = 12, 7
-    rect = [x - pad_x, y - pad_y, x + tw + pad_x, y + th + pad_y]
-    try:
-        d.rounded_rectangle(rect, radius=14, fill=(30, 41, 59, 210))
-    except Exception:
-        d.rectangle(rect, fill=(30, 41, 59, 210))
-    d.text((x, y), text, font=font, fill=(255, 255, 255))
-    return Image.alpha_composite(base, overlay).convert("RGB")
-
-def make_perf_image(bg: Image.Image, segs, label_top: str, value_text: str) -> Image.Image:
+def make_perf_image(bg: Image.Image, segs) -> Image.Image:
+    """Draw only the solution path on the chart — no labels, no badges."""
     img = bg.copy()
     d = ImageDraw.Draw(img)
-
-    # title
-    tf = load_font(22)
-    d.text((18, 14), label_top, fill=(20, 20, 20), font=tf)
-
-    # path + value badge near top-right (consistent, no smart boxes)
     if segs:
         draw_path(d, segs)
-    img = badge(img, (img.size[0] - 260, 18), value_text)
     return img
 
 
 # =========================================================
-# 4-up pages for performance (TO -> CLIMB -> LDG)
+# FIX 4: 4-up page titles — just chart type, no verbose description
 # =========================================================
 def build_perf_4up_page(images_by_role: List[Tuple[str, Image.Image]], title: str) -> bytes:
     W, H = landscape(A4)
@@ -928,7 +924,7 @@ def build_perf_4up_page(images_by_role: List[Tuple[str, Image.Image]], title: st
     cell_w = (W - 2 * margin - gap) / 2
     cell_h = (H - 2 * margin - gap - header_h) / 2
 
-    c.setFont("Helvetica-Bold", 18)
+    c.setFont("Helvetica-Bold", 16)
     c.drawString(margin, H - margin, title)
 
     top_y = H - margin - header_h
@@ -940,7 +936,7 @@ def build_perf_4up_page(images_by_role: List[Tuple[str, Image.Image]], title: st
     ]
 
     for (label, img), (x, y) in zip(images_by_role, positions):
-        c.setFont("Helvetica-Bold", 12)
+        c.setFont("Helvetica-Bold", 11)
         c.drawString(x, y + cell_h - 14, label)
 
         iw, ih = img.size
@@ -969,10 +965,11 @@ def append_perf_pages(base_pdf_bytes: bytes, perf_by_role: dict) -> bytes:
         info = perf_by_role.get(role, {})
         return info.get("label", role)
 
+    # FIX 4: clean page titles — just the chart name
     pages = [
-        ("TAKEOFF — Required (ft shown on chart)", "takeoff_img"),
-        ("CLIMB — Rate of Climb", "climb_img"),
-        ("LANDING — Required (ft shown on chart)", "landing_img"),
+        ("Takeoff",  "takeoff_img"),
+        ("Climb",    "climb_img"),
+        ("Landing",  "landing_img"),
     ]
 
     for title, key in pages:
@@ -1116,8 +1113,6 @@ if "dep_time_utc" not in st.session_state:
 if "arr_time_utc" not in st.session_state:
     st.session_state.arr_time_utc = (dt.datetime.utcnow().replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=2)).time()
 
-# Performance results keyed by role
-# perf[role] = {"to_ft":..., "ldg_ft":..., "roc_fpm":..., "todr_str_m_pct":..., "ldr_str_m_pct":..., "takeoff_img":..., ...}
 if "perf" not in st.session_state:
     st.session_state.perf = {}
 
@@ -1436,9 +1431,6 @@ with tab3:
 
 # =========================================================
 # 4) Performance
-# - No uploads (assets from folder)
-# - Chart value in FEET (no percent)
-# - Percent only for PDF fields (later)
 # =========================================================
 def pa_da(elev_ft, qnh_hpa, oat_c):
     pa_ft = float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
@@ -1463,7 +1455,7 @@ with tabP:
     with c2:
         preview_imgs = st.checkbox("Show preview images", value=True)
     with c3:
-        st.caption("Uses files from folder. Charts show result in feet; PDF fields use meters + (percent).")
+        st.caption("Uses files from folder. PDF fields show meters + (% of available distance).")
 
     if compute_perf:
         wb = st.session_state.get("_wb", None)
@@ -1495,11 +1487,11 @@ with tabP:
 
                     pa_ft, da_ft = pa_da(ad["elev_ft"], met["qnh_hpa"], met["temp_c"])
                     hw, xw, side = wind_components(rw["qfu"], met["wind_dir"], met["wind_kt"])
-                    headwind = max(0.0, float(hw))  # clamp tailwind to 0 for chart input
+                    headwind = max(0.0, float(hw))
 
                     label = f"{icao} {role.replace('_',' ').title()}"
 
-                    # Takeoff GR (ft)
+                    # Takeoff GR
                     raw_to_ft, segs_to = solve_ground_roll(
                         cap_to, mode="takeoff",
                         oat_c=float(met["temp_c"]),
@@ -1509,11 +1501,11 @@ with tabP:
                     )
                     to_ft = float(round_to_step(raw_to_ft, ASSETS["takeoff"]["round_to"]))
 
-                    # Climb ROC (fpm)
+                    # Climb ROC
                     raw_roc, segs_roc = solve_climb(cap_clb, oat_c=float(met["temp_c"]), pa_ft=float(pa_ft))
                     roc_fpm = float(round_to_step(raw_roc, ASSETS["climb"]["round_to"]))
 
-                    # Landing GR (ft)
+                    # Landing GR
                     raw_ldg_ft, segs_ldg = solve_ground_roll(
                         cap_ldg, mode="landing",
                         oat_c=float(met["temp_c"]),
@@ -1523,16 +1515,16 @@ with tabP:
                     )
                     ldg_ft = float(round_to_step(raw_ldg_ft, ASSETS["landing"]["round_to"]))
 
-                    # For PDF: meters + (percent)
+                    # PDF fields: meters + percent
                     to_m = _ft_to_m(to_ft)
                     ldg_m = _ft_to_m(ldg_ft)
                     to_m_pct = fmt_m_with_pct(to_m, rw.get("toda", 0.0))
                     ldg_m_pct = fmt_m_with_pct(ldg_m, rw.get("lda", 0.0))
 
-                    # Images (value in feet/fpm only — NO percent)
-                    to_img = make_perf_image(bg_to, segs_to, label, f"{to_ft:.0f} ft")
-                    clb_img = make_perf_image(bg_clb, segs_roc, label, f"{roc_fpm:.0f} fpm")
-                    ldg_img = make_perf_image(bg_ldg, segs_ldg, label, f"{ldg_ft:.0f} ft")
+                    # FIX 3: images — no badge, no label, just the path
+                    to_img  = make_perf_image(bg_to,  segs_to)
+                    clb_img = make_perf_image(bg_clb, segs_roc)
+                    ldg_img = make_perf_image(bg_ldg, segs_ldg)
 
                     perf_by_role[role] = {
                         "label": label,
@@ -1553,7 +1545,7 @@ with tabP:
 
     perf = st.session_state.get("perf", {}) or {}
     if perf:
-        st.markdown("##### Results (charts in feet; PDF in meters + %)")
+        st.markdown("##### Results")
         order = ["DEPARTURE", "ARRIVAL", "ALTERNATE_1", "ALTERNATE_2"]
         rows = []
         for r in order:
@@ -1577,18 +1569,18 @@ with tabP:
         )
 
         if preview_imgs:
-            st.markdown("##### Preview images (Takeoff → Climb → Landing)")
+            st.markdown("##### Preview")
             for r in ["DEPARTURE", "ARRIVAL", "ALTERNATE_1", "ALTERNATE_2"]:
                 if r not in perf:
                     continue
                 st.markdown(f"**{perf[r]['label']}**")
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.image(perf[r]["takeoff_img"], caption="Takeoff (ft)", use_container_width=True)
+                    st.image(perf[r]["takeoff_img"], caption="Takeoff", use_container_width=True)
                 with c2:
-                    st.image(perf[r]["climb_img"], caption="Climb (fpm)", use_container_width=True)
+                    st.image(perf[r]["climb_img"], caption="Climb", use_container_width=True)
                 with c3:
-                    st.image(perf[r]["landing_img"], caption="Landing (ft)", use_container_width=True)
+                    st.image(perf[r]["landing_img"], caption="Landing", use_container_width=True)
                 st.divider()
     else:
         st.info("Compute performance to populate values and images.")
@@ -1596,9 +1588,6 @@ with tabP:
 
 # =========================================================
 # 5) PDF
-# - Final PDF first page is ONLY side-by-side (p0 + p1 raster)
-# - Optional: append 3 pages 4-up (TO / CLIMB / LDG)
-# - Fill TODR/LDR fields (meters + (percent)) and ROC (fpm) using your template names
 # =========================================================
 with tab4:
     st.markdown("#### Generate PDF")
@@ -1631,13 +1620,15 @@ with tab4:
         for nm in ["MLW", "MLW_LB", "Max_Landing_Weight", "Maximum_Landing_Weight", "MaxLandingWeight", "Max_Landing_Wt"]:
             put(nm, f"{MLW_LB:.0f}")
 
-        # W&B page 0
+        # W&B
         def w_str(lb):
             kg = lb / KG_TO_LB
             return f"{lb:.0f} ({kg:.0f}kg)"
 
+        # FIX 2: fuel string — abbreviated format to avoid text overflow in PDF fields
+        # Format: "48.0USG / 182L" (no leading weight in lbs, just the volume info)
         def fuel_w_str(fuel_lb, fuel_usg, fuel_l):
-            return f"{fuel_lb:.0f} ({fuel_usg:.1f}USG/{fuel_l:.0f}L)"
+            return f"{fuel_lb:.0f}lb ({fuel_usg:.1f}USG/{fuel_l:.0f}L)"
 
         ew_lb = wb.get("ew_lb", 0.0)
         ew_mom = wb.get("ew_mom", 0.0)
@@ -1654,9 +1645,9 @@ with tab4:
         put("Moment_REAR", f"{(wb.get('rear_lb',0.0) * ARM_REAR):.0f}")
 
         fuel_usg = wb.get("fuel_usg", 0.0)
-        fuel_l = wb.get("fuel_l", 0.0)
+        fuel_l_val = wb.get("fuel_l", 0.0)
         fuel_lb = wb.get("fuel_lb", 0.0)
-        put("Weight_FUEL", fuel_w_str(fuel_lb, fuel_usg, fuel_l))
+        put("Weight_FUEL", fuel_w_str(fuel_lb, fuel_usg, fuel_l_val))
         put("Moment_FUEL", f"{(fuel_lb * ARM_FUEL):.0f}")
 
         put("Weight_BAGGAGE", w_str(wb.get("bag_lb", 0.0)))
@@ -1670,8 +1661,8 @@ with tab4:
         put("Moment_TAKEOFF", f"{wb.get('takeoff_m',0.0):.0f}")
         put("Datum_TAKEOFF", f"{wb.get('takeoff_cg',0.0):.1f}")
 
-        # Airfield blocks + performance fields (TODR/LDR/ROC) with your exact names
-        def pa_da(elev_ft, qnh_hpa, oat_c):
+        # Airfield blocks + performance
+        def pa_da_local(elev_ft, qnh_hpa, oat_c):
             pa_ft = float(elev_ft) + (1013.0 - float(qnh_hpa)) * 30.0
             isa = 15.0 - 2.0 * (float(elev_ft) / 1000.0)
             da_ft = pa_ft + 120.0 * (float(oat_c) - isa)
@@ -1700,27 +1691,27 @@ with tab4:
             put(f"TODA_{suf}", f"{rw['toda']:.0f}")
             put(f"LDA_{suf}", f"{rw['lda']:.0f}")
 
-            pa_ft, da_ft = pa_da(ad["elev_ft"], met["qnh_hpa"], met["temp_c"])
+            pa_ft, da_ft = pa_da_local(ad["elev_ft"], met["qnh_hpa"], met["temp_c"])
             put(f"Density_Alt_{suf}", f"{da_ft:.0f}")
             if f"Pressure_Alt_{suf}" in fieldset:
                 put(f"Pressure_Alt_{suf}", f"{pa_ft:.0f}")
             elif suf == "DEPARTURE" and "Pressure_Alt _DEPARTURE" in fieldset:
                 put("Pressure_Alt _DEPARTURE", f"{pa_ft:.0f}")
 
-            # ---- Performance -> PDF (meters + % for TODR/LDR; ROC in fpm)
             if suf in perf:
-                put(f"TODR_{suf}", perf[suf]["todr_str_m_pct"])  # meters + (percent)
-                put(f"LDR_{suf}",  perf[suf]["ldr_str_m_pct"])   # meters + (percent)
-                put(f"ROC_{suf}",  f"{perf[suf]['roc_fpm']:.0f}")  # fpm
+                put(f"TODR_{suf}", perf[suf]["todr_str_m_pct"])
+                put(f"LDR_{suf}",  perf[suf]["ldr_str_m_pct"])
+                put(f"ROC_{suf}",  f"{perf[suf]['roc_fpm']:.0f}")
 
-        # Fuel planning fields
+        # FIX 2: fuel planning fields — compact format "X.XU/XXXL" to save space
         def fuel_str(liters):
             liters = float(liters)
             if abs(liters - float(FUEL_USABLE_L)) < 0.5:
                 usg = float(FUEL_USABLE_USG)
             else:
                 usg = liters * L_TO_USG
-            return f"{usg:.1f} ({liters:.1f}L)"
+            # Compact: "48.0U/182L" style — fits narrow PDF fields
+            return f"{usg:.1f}U/{liters:.0f}L"
 
         put("Start-up_and_Taxi_TIME", fmt_hm(int(fuel.get("taxi_min", 0))))
         put("Start-up_and_Taxi_FUEL", fuel_str(float(fuel.get("taxi_l", 0.0))))
@@ -1755,7 +1746,7 @@ with tab4:
         put("Total_TIME", fmt_hm(int(fuel.get("total_min", 0))))
         put("Total_FUEL", fuel_str(float(fuel.get("total_l", 0.0))))
 
-        # Fill PDF then overlay CG on page 0
+        # Fill PDF + CG overlay
         base_filled = fill_pdf(template_bytes, f)
 
         chart_points = [
@@ -1765,7 +1756,7 @@ with tab4:
         ]
         mb_pdf = draw_cg_overlay_on_page0(base_filled, chart_points)
 
-        # FINAL PDF must NOT include original pages — only side-by-side as first page
+        # Side-by-side raster as first (and only base) page
         sbs_img = mb_pdf_to_side_by_side_image(
             mb_pdf,
             dpi=SBS_DPI,
@@ -1776,7 +1767,7 @@ with tab4:
         )
         final_pdf = image_to_single_page_pdf(sbs_img, dpi=SBS_DPI)
 
-        # Optional: add 4-up perf pages
+        # Optional 4-up performance pages
         if include_perf_pages and len(perf) == 4:
             final_pdf = append_perf_pages(final_pdf, perf)
 
