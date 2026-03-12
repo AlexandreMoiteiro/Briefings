@@ -263,8 +263,8 @@ def simple_order_key(item: Dict[str, Any]) -> Tuple[int, str]:
 
 ss_init("pilot", "Alexandre Moiteiro")
 ss_init("callsign", "RVP")
-ss_init("aircraft_type", "Tecnam P2008")
-ss_init("registration", "CS-DHS")
+ss_init("aircraft_type", "PA28")
+ss_init("registration", "OE-KPE")
 ss_init("mission_no", "")
 ss_init("flight_date", None)
 ss_init("time_utc", "")
@@ -281,7 +281,7 @@ with tab_mission:
         st.session_state.callsign = st.text_input("Mission callsign", st.session_state.callsign)
     with colB:
         st.session_state.aircraft_type = st.text_input("Aircraft type", st.session_state.aircraft_type)
-        regs = ["CS-DHS", "CS-DHT", "CS-DHU", "CS-DHV", "CS-DHW", "CS-ECC", "CS-ECD"]
+        regs = ["OE-KPE","OE-KPJ","OE-KPJ","OE-KPP","OE-KPG","CS-DHS", "CS-DHT", "CS-DHU", "CS-DHV", "CS-DHW", "CS-ECC", "CS-ECD"]
         idx = regs.index(st.session_state.registration) if st.session_state.registration in regs else 0
         st.session_state.registration = st.selectbox("Registration", regs, index=idx)
     with colC:
