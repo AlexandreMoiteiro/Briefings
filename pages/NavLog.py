@@ -31,8 +31,8 @@ AIRCRAFT_PROFILES = {
     },
     "Piper PA-28": {
         "climb_tas":   100.0,
-        "cruise_tas":  115.0,
-        "descent_tas": 115.0,
+        "cruise_tas":  110.0,
+        "descent_tas": 110.0,
         "fuel_flow_lh": 38.0,   # L/h
     },
 }
