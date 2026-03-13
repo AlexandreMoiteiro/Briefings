@@ -388,9 +388,9 @@ def ens(k, v): return st.session_state.setdefault(k, v)
 
 # ---- Aeronave ----
 ens("aircraft_type", "Piper PA-28")
-ens("ac_climb_tas",   100.0)
+ens("ac_climb_tas",   76.0)
 ens("ac_cruise_tas",  115.0)
-ens("ac_descent_tas", 115.0)
+ens("ac_descent_tas", 100.0)
 ens("ac_fuel_flow_lh", 38.0)
 
 ens("wind_from", 0)
@@ -401,7 +401,7 @@ ens("mag_is_e", False)
 ens("roc_fpm", 600)
 ens("rod_fpm", 500)
 ens("start_clock", "")
-ens("start_efob", 85.0)
+ens("start_efob", 180)
 ens("ck_default", 2)
 
 ens("wps", [])
