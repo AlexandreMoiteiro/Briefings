@@ -5,9 +5,9 @@
 #
 # Assets expected in same folder:
 #   - RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf   (template)
-#   - to_ground_roll.jpg + to_ground_roll.json
+#   - to_perf.pdf + to_perf.json
 #   - climb_perf.jpg + climb_perf.json
-#   - ldg_ground_roll.pdf + ldg_ground_roll.json
+#   - ldg_perf.pdf + ldg_perf.json
 #
 # Optional (Fleet via GitHub Gist):
 #   - st.secrets["GITHUB_GIST_TOKEN"]
@@ -165,13 +165,12 @@ MLW_LB = 2550.0
 PDF_TEMPLATE_PATHS = ["RVP.CFI.067.02PiperPA28MBandPerformanceSheet.pdf"]
 
 # Side-by-side fixed settings
-SBS_DPI = 200          # was 500 — main driver of file size
+SBS_DPI = 200
 SBS_ALIGN = "height"
 SBS_GAP_PX = 0
 SBS_BG = (255, 255, 255)
 SBS_SHARPEN = True
 
-# Landing background render zoom fixed (no UI control)
 LANDING_BG_ZOOM = 2.3
 
 
@@ -240,7 +239,6 @@ def build_aerodromes_db(icaos):
 
         db[icao] = {"name": name, "lat": lat, "lon": lon, "elev_ft": elev_ft, "runways": runways}
 
-    # Overrides (as per your operational data)
     if "LPSO" in db:
         db["LPSO"]["name"] = "Ponte de Sôr"
         db["LPSO"]["runways"] = [
@@ -536,7 +534,6 @@ def xy_from_cg_weight(cg_in: float, weight_lb: float):
 
 # =========================================================
 # FIX 1: CG legend — compact, positioned bottom-right of chart
-# Uses a clean bordered box with coloured squares + labels
 # =========================================================
 def draw_cg_overlay_on_page0(template_bytes: bytes, points):
     reader = PdfReader(io.BytesIO(template_bytes))
@@ -594,11 +591,12 @@ def draw_cg_overlay_on_page0(template_bytes: bytes, points):
 # =========================================================
 ASSETS = {
     "takeoff": {
-        "title": "Takeoff Ground Roll",
-        "bg_default": "to_ground_roll.jpg",
-        "json_default": "to_ground_roll.json",
-        "bg_kind": "image",
-        "round_to": 10,
+        "title": "Takeoff Distance Over 50 ft",
+        "bg_default": "to_perf.pdf",
+        "json_default": "to_perf.json",
+        "bg_kind": "pdf",
+        "round_to": 5,
+        "out_axis_key": "takeoff_50ft_ft",
     },
     "climb": {
         "title": "Climb Performance",
@@ -608,11 +606,12 @@ ASSETS = {
         "round_to": 10,
     },
     "landing": {
-        "title": "Landing Ground Roll",
-        "bg_default": "ldg_ground_roll.pdf",
-        "json_default": "ldg_ground_roll.json",
+        "title": "Landing Distance Over 50 ft",
+        "bg_default": "ldg_perf.pdf",
+        "json_default": "ldg_perf.json",
         "bg_kind": "pdf",
-        "round_to": 10,
+        "round_to": 5,
+        "out_axis_key": "landing_50ft_ft",
     },
 }
 
@@ -621,10 +620,13 @@ def load_json_asset(mode: str) -> Dict[str, Any]:
     p = _here(info["json_default"])
     if not p:
         raise FileNotFoundError(f"Missing {info['json_default']} in folder.")
-    return json.loads(p.read_text(encoding="utf-8"))
+    raw = p.read_text(encoding="utf-8").strip()
+    if not raw:
+        raise ValueError(f"{info['json_default']} is empty.")
+    return json.loads(raw)
 
 @st.cache_data(show_spinner=False)
-def render_pdf_to_image(pdf_bytes: bytes, page_index: int, zoom: float) -> Image.Image:
+def render_perf_pdf_to_image(pdf_bytes: bytes, page_index: int, zoom: float) -> Image.Image:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     page = doc.load_page(page_index)
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
@@ -634,16 +636,14 @@ def render_pdf_to_image(pdf_bytes: bytes, page_index: int, zoom: float) -> Image
 
 def load_background_asset(mode: str, page_index: int = 0, zoom: float = 2.3) -> Image.Image:
     info = ASSETS[mode]
-    if info["bg_kind"] == "pdf":
-        p = _here(info["bg_default"])
-        if not p:
-            raise FileNotFoundError(f"Missing {info['bg_default']} in folder.")
-        return render_pdf_to_image(p.read_bytes(), page_index=page_index, zoom=zoom)
     p = _here(info["bg_default"])
     if not p:
         raise FileNotFoundError(f"Missing {info['bg_default']} in folder.")
-    return Image.open(p).convert("RGB")
 
+    if info["bg_kind"] == "pdf":
+        return render_perf_pdf_to_image(p.read_bytes(), page_index=page_index, zoom=zoom)
+
+    return Image.open(p).convert("RGB")
 
 def pt_xy(p: Any) -> Tuple[float, float]:
     if isinstance(p, dict):
@@ -670,7 +670,9 @@ def normalize_panels(cap: Dict[str, Any]) -> Dict[str, List[Dict[str, float]]]:
         out[k] = normalize_panel(pts)
     return out
 
-def fit_axis_value_from_ticks(ticks: List[Dict[str, float]], coord: str) -> Tuple[float, float]:
+def fit_axis_value_from_ticks(ticks: List[Dict[str, float]], coord: str, axis_name: str = "axis") -> Tuple[float, float]:
+    if len(ticks) < 2:
+        raise ValueError(f"O eixo '{axis_name}' precisa de pelo menos 2 ticks, mas só tem {len(ticks)}.")
     xs = np.array([float(t[coord]) for t in ticks], dtype=float)
     vs = np.array([float(t["value"]) for t in ticks], dtype=float)
     A = np.vstack([xs, np.ones_like(xs)]).T
@@ -730,52 +732,100 @@ def round_to_step(x: float, step: float) -> float:
 def x_of_vertical_ref(seg: Dict[str, float]) -> float:
     return 0.5 * (float(seg["x1"]) + float(seg["x2"]))
 
-def interp_guides_y(guides, x_ref, y_ref, x_target):
-    if not guides:
+def _seg_endpoints(seg: Dict[str, float]) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    return (float(seg["x1"]), float(seg["y1"])), (float(seg["x2"]), float(seg["y2"]))
+
+def _same_point(a: Tuple[float, float], b: Tuple[float, float], tol: float = 1.5) -> bool:
+    return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+def group_guides_polyline_pairs(segments: List[Dict[str, float]]) -> List[List[Dict[str, float]]]:
+    groups: List[List[Dict[str, float]]] = []
+    i = 0
+    while i < len(segments):
+        if i + 1 < len(segments):
+            s1 = segments[i]
+            s2 = segments[i + 1]
+            _, b1 = _seg_endpoints(s1)
+            a2, _ = _seg_endpoints(s2)
+            if _same_point(b1, a2):
+                groups.append([s1, s2])
+                i += 2
+                continue
+        groups.append([segments[i]])
+        i += 1
+    return groups
+
+def polyline_y_at_x(poly: List[Dict[str, float]], x: float) -> float:
+    if not poly:
+        raise ValueError("Polyline vazia.")
+    if len(poly) == 1:
+        return line_y_at_x(poly[0], x)
+
+    candidates = []
+    for seg in poly:
+        x1, x2 = float(seg["x1"]), float(seg["x2"])
+        xmin, xmax = min(x1, x2), max(x1, x2)
+        in_range = xmin - 1e-9 <= x <= xmax + 1e-9
+        dist = 0.0 if in_range else min(abs(x - xmin), abs(x - xmax))
+        candidates.append((dist, in_range, seg))
+
+    candidates.sort(key=lambda t: (t[0], 0 if t[1] else 1))
+    best_seg = candidates[0][2]
+    return line_y_at_x(best_seg, x)
+
+def interp_guides_y(guide_groups, x_ref, y_ref, x_target):
+    if not guide_groups:
         return y_ref, {"used": "none"}
+
     rows = []
-    for g in guides:
-        yr = line_y_at_x(g, x_ref)
-        yt = line_y_at_x(g, x_target)
-        rows.append((yr, yt))
+    for poly in guide_groups:
+        yr = polyline_y_at_x(poly, x_ref)
+        yt = polyline_y_at_x(poly, x_target)
+        rows.append((yr, yt, len(poly)))
+
     rows.sort(key=lambda t: t[0])
 
     if y_ref <= rows[0][0]:
-        return float(rows[0][1]), {"used": "clamp_low"}
+        return float(rows[0][1]), {"used": "clamp_low", "poly_len": rows[0][2]}
     if y_ref >= rows[-1][0]:
-        return float(rows[-1][1]), {"used": "clamp_high"}
+        return float(rows[-1][1]), {"used": "clamp_high", "poly_len": rows[-1][2]}
 
     for i in range(len(rows) - 1):
-        y0_ref, y0_tgt = rows[i]
-        y1_ref, y1_tgt = rows[i + 1]
+        y0_ref, y0_tgt, n0 = rows[i]
+        y1_ref, y1_tgt, n1 = rows[i + 1]
         if y0_ref <= y_ref <= y1_ref:
             denom = (y1_ref - y0_ref)
             a = 0.0 if abs(denom) < 1e-12 else (y_ref - y0_ref) / denom
             y_tgt = (1 - a) * y0_tgt + a * y1_tgt
-            return float(y_tgt), {"used": "interp", "alpha": float(a)}
+            return float(y_tgt), {
+                "used": "interp",
+                "alpha": float(a),
+                "poly_lens": [n0, n1],
+            }
+
     return y_ref, {"used": "fallback"}
 
 def pick_guides(cap: Dict[str, Any], mode: str):
     g = cap.get("guides", {}) or {}
+    mid_raw = g.get("middle", []) or []
+    right_raw = g.get("right", []) or []
+
     if mode == "takeoff":
-        return g.get("guides_weight", []) or [], g.get("guides_wind", []) or []
-    mid = g.get("middle", []) or []
-    rgt = g.get("right", []) or []
-    if len(mid) == 0 and len(rgt) == 0:
-        return g.get("guides_weight", []) or [], g.get("guides_wind", []) or []
-    return mid, rgt
+        return group_guides_polyline_pairs(mid_raw), [[s] for s in right_raw]
+
+    return [[s] for s in mid_raw], [[s] for s in right_raw]
 
 def solve_ground_roll(cap, mode, oat_c, pa_ft, weight_lb, wind_kt):
     ticks = cap["axis_ticks"]
     lines = cap["lines"]
     panels = normalize_panels(cap)
 
-    ax_oat_a, ax_oat_b = fit_axis_value_from_ticks(ticks["oat_c"], "x")
-    ax_wt_a, ax_wt_b = fit_axis_value_from_ticks(ticks["weight_x100_lb"], "x")
-    ax_wind_a, ax_wind_b = fit_axis_value_from_ticks(ticks["wind_kt"], "x")
+    ax_oat_a, ax_oat_b = fit_axis_value_from_ticks(ticks["oat_c"], "x", "oat_c")
+    ax_wt_a, ax_wt_b = fit_axis_value_from_ticks(ticks["weight_x100_lb"], "x", "weight_x100_lb")
+    ax_wind_a, ax_wind_b = fit_axis_value_from_ticks(ticks["wind_kt"], "x", "wind_kt")
 
-    out_axis_key = "takeoff_gr_ft" if mode == "takeoff" else "ground_roll_ft"
-    ax_out_a, ax_out_b = fit_axis_value_from_ticks(ticks[out_axis_key], "y")
+    out_axis_key = ASSETS[mode]["out_axis_key"]
+    ax_out_a, ax_out_b = fit_axis_value_from_ticks(ticks[out_axis_key], "y", out_axis_key)
 
     if not lines.get("weight_ref_line") or not lines.get("wind_ref_zero"):
         raise ValueError("Missing weight_ref_line or wind_ref_zero in JSON lines.")
@@ -821,8 +871,8 @@ def solve_climb(cap, oat_c, pa_ft):
     lines = cap["lines"]
     panels = normalize_panels(cap)
 
-    ax_oat_a, ax_oat_b = fit_axis_value_from_ticks(ticks["oat_c"], "x")
-    ax_roc_a, ax_roc_b = fit_axis_value_from_ticks(ticks["roc_fpm"], "y")
+    ax_oat_a, ax_oat_b = fit_axis_value_from_ticks(ticks["oat_c"], "x", "oat_c")
+    ax_roc_a, ax_roc_b = fit_axis_value_from_ticks(ticks["roc_fpm"], "y", "roc_fpm")
 
     x_oat = axis_coord_from_value(ax_oat_a, ax_oat_b, oat_c)
     pa_levels = parse_pa_levels_ft(lines)
@@ -845,7 +895,6 @@ def solve_climb(cap, oat_c, pa_ft):
 
 # =========================================================
 # FIX 3: Performance image drawing — path only, no value badge
-# Clean: just the orange trace on the chart background
 # =========================================================
 def load_font(size: int):
     try:
@@ -861,7 +910,6 @@ def draw_path(draw: ImageDraw.ImageDraw, segs, color=(255, 140, 0), width=4):
         draw.ellipse((x - 7, y - 7, x + 7, y + 7), fill=color, outline=(255, 255, 255), width=2)
 
 def make_perf_image(bg: Image.Image, segs) -> Image.Image:
-    """Draw only the solution path on the chart — no labels, no badges."""
     img = bg.copy()
     d = ImageDraw.Draw(img)
     if segs:
@@ -870,24 +918,17 @@ def make_perf_image(bg: Image.Image, segs) -> Image.Image:
 
 
 # =========================================================
-# =========================================================
 # Performance pages — 2 pages, 2 airfields each
-# Each airfield = 1 row with 3 charts (Takeoff | Climb | Landing)
 # =========================================================
 def build_perf_2aerodromes_page(pairs: List[Tuple[str, dict]]) -> bytes:
-    """
-    One A4 landscape page with 2 airfields.
-    Each airfield occupies one row; columns = Takeoff, Climb, Landing.
-    pairs: list of (label, perf_info_dict), max 2 items.
-    """
     W, H = landscape(A4)
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(W, H))
 
     MARGIN   = 22
-    GAP_COL  = 10   # gap between chart columns
-    GAP_ROW  = 18   # gap between the two airfield rows
-    ROW_LBL  = 14   # height reserved for the airfield label text
+    GAP_COL  = 10
+    GAP_ROW  = 18
+    ROW_LBL  = 14
     N_COLS   = 3
     COL_KEYS = ["takeoff_img", "climb_img", "landing_img"]
 
@@ -905,17 +946,14 @@ def build_perf_2aerodromes_page(pairs: List[Tuple[str, dict]]) -> bytes:
         row_top = top_y - ri * (row_h + GAP_ROW)
         row_bot = row_top - row_h
 
-        # Airfield label — plain bold text, no coloured bar
         c.setFillColorRGB(0.15, 0.15, 0.15)
         c.setFont("Helvetica-Bold", 10)
         c.drawString(MARGIN, row_top - ROW_LBL + 3, label)
 
-        # Thin separator line under label
         c.setStrokeColorRGB(0.65, 0.65, 0.65)
         c.setLineWidth(0.4)
         c.line(MARGIN, row_top - ROW_LBL, MARGIN + usable_w, row_top - ROW_LBL)
 
-        # Charts — JPEG compressed for smaller PDF
         for ci, col_key in enumerate(COL_KEYS):
             cx = MARGIN + ci * (cell_w + GAP_COL)
             cy = row_bot
@@ -941,7 +979,6 @@ def build_perf_2aerodromes_page(pairs: List[Tuple[str, dict]]) -> bytes:
 
 
 def _img_to_jpeg_reader(img: Image.Image, quality: int = 80) -> io.BytesIO:
-    """Convert PIL image to JPEG bytes for compact PDF embedding."""
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
     buf.seek(0)
@@ -949,7 +986,6 @@ def _img_to_jpeg_reader(img: Image.Image, quality: int = 80) -> io.BytesIO:
 
 
 def append_perf_pages(base_pdf_bytes: bytes, perf_by_role: dict) -> bytes:
-    """Append 2 landscape pages: each page has 2 airfields × 3 charts."""
     reader = PdfReader(io.BytesIO(base_pdf_bytes))
     writer = PdfWriter()
     for p in reader.pages:
@@ -958,7 +994,6 @@ def append_perf_pages(base_pdf_bytes: bytes, perf_by_role: dict) -> bytes:
     order = ["DEPARTURE", "ARRIVAL", "ALTERNATE_1", "ALTERNATE_2"]
     available = [(r, perf_by_role[r]) for r in order if r in perf_by_role]
 
-    # Group into pairs of 2
     for i in range(0, len(available), 2):
         chunk = available[i:i+2]
         pairs = [(info.get("label", role.replace("_", " ").title()), info)
@@ -1057,7 +1092,6 @@ def image_to_single_page_pdf(img: Image.Image, dpi: int, jpeg_quality: int = 82)
     w_px, h_px = img.size
     w_pt = (w_px / dpi) * 72.0
     h_pt = (h_px / dpi) * 72.0
-    # Compress to JPEG first — massive size reduction vs raw PIL embed
     jpeg_buf = io.BytesIO()
     img.convert("RGB").save(jpeg_buf, format="JPEG", quality=jpeg_quality, optimize=True)
     jpeg_buf.seek(0)
@@ -1459,7 +1493,7 @@ with tabP:
                     cap_to  = load_json_asset("takeoff")
                     cap_clb = load_json_asset("climb")
                     cap_ldg = load_json_asset("landing")
-                    bg_to   = load_background_asset("takeoff", page_index=0, zoom=1.0)
+                    bg_to   = load_background_asset("takeoff", page_index=0, zoom=2.3)
                     bg_clb  = load_background_asset("climb",   page_index=0, zoom=1.0)
                     bg_ldg  = load_background_asset("landing", page_index=0, zoom=LANDING_BG_ZOOM)
 
@@ -1590,7 +1624,6 @@ with tab4:
     if generate_pdf:
         try:
             n_perf = len(st.session_state.get("perf", {}) or {})
-            # steps: fill fields, CG overlay, raster, perf pages, finalise
             total_pdf_steps = 5 + (2 if include_perf_pages and n_perf else 0)
             pdf_prog = st.progress(0, text="Filling form fields…")
 
@@ -1609,7 +1642,6 @@ with tab4:
                 if name in fieldset:
                     f[name] = value
 
-            # header
             put("Date", date_str)
             for candidate in ["Aircraft_Reg", "Aircraft_Reg.", "Aircraft Reg.", "Aircraft_Reg__", "Aircraft_Reg_"]:
                 put(candidate, reg)
@@ -1728,7 +1760,6 @@ with tab4:
 
             pdf_prog.progress(1 / total_pdf_steps, text="Filling form fields… done. Applying CG overlay…")
 
-            # CG overlay
             base_filled = fill_pdf(template_bytes, f)
             chart_points = [
                 {"label": "Empty",   "cg": ew_cg,                   "w": ew_lb,                 "rgb": (0.10, 0.60, 0.15)},
@@ -1738,7 +1769,6 @@ with tab4:
             mb_pdf = draw_cg_overlay_on_page0(base_filled, chart_points)
             pdf_prog.progress(2 / total_pdf_steps, text="CG overlay done. Rendering pages…")
 
-            # Side-by-side raster
             sbs_img = mb_pdf_to_side_by_side_image(
                 mb_pdf, dpi=SBS_DPI, align_by=SBS_ALIGN,
                 gap_px=SBS_GAP_PX, bg=SBS_BG, sharpen=SBS_SHARPEN,
