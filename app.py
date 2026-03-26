@@ -281,7 +281,7 @@ with tab_mission:
         st.session_state.callsign = st.text_input("Mission callsign", st.session_state.callsign)
     with colB:
         st.session_state.aircraft_type = st.text_input("Aircraft type", st.session_state.aircraft_type)
-        regs = ["OE-KPE","OE-KPJ","OE-KPJ","OE-KPP","OE-KPG","CS-DHS", "CS-DHT", "CS-DHU", "CS-DHV", "CS-DHW", "CS-ECC", "CS-ECD"]
+        regs = ["OE-KPE","OE-KPJ","OE-KPJ","OE-KPP","OE-KPG","OE-KPF","CS-DHS", "CS-DHT", "CS-DHU", "CS-DHV", "CS-DHW", "CS-ECC", "CS-ECD"]
         idx = regs.index(st.session_state.registration) if st.session_state.registration in regs else 0
         st.session_state.registration = st.selectbox("Registration", regs, index=idx)
     with colC:
