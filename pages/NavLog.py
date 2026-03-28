@@ -1861,7 +1861,7 @@ st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 st.header("📄 NAVLOG — Cabeçalho & PDF")
 
 REG_OPTIONS_TECNAM = ["CS-DHS","CS-DHT","CS-DHU","CS-DHV","CS-DHW","CS-ECC","CS-ECD"]
-REG_OPTIONS_PIPER  = ["OE-KPD","OE-KPE","OE-KPG","OE-KPP","OE-KPJ"]
+REG_OPTIONS_PIPER  = ["OE-KPD","OE-KPE","OE-KPG","OE-KPP","OE-KPJ","OE-KPF"]
 
 reg_options = (
     REG_OPTIONS_PIPER
