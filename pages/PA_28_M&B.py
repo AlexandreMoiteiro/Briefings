@@ -56,6 +56,7 @@ st.markdown(
       .ok{color:#1d8533}.warn{color:#d8aa22}.bad{color:#c21c1c}
       .muted{color:#6b7280;font-size:.9rem}
       .box{background:#f8fafc;border:1px solid #e5e7ec;border-radius:12px;padding:12px}
+      .box-manual{background:#fff8ed;border:1px solid #f5c96b;border-radius:12px;padding:12px}
       .tbl{border-collapse:collapse;width:100%}
       .tbl th{border-bottom:2px solid #cbd0d6;text-align:left;padding:6px}
       .tbl td{border-bottom:1px dashed #e5e7ec;padding:6px}
@@ -64,6 +65,7 @@ st.markdown(
         .hdr{border-bottom:1px solid #374151;}
         .muted{color:#9ca3af;}
         .box{background:#0b1220;border:1px solid #243044;color:#e5e7eb;}
+        .box-manual{background:#1a1400;border:1px solid #7a5c00;color:#e5e7eb;}
         .chip{background:#111b2b;color:#e5e7eb;}
         .tbl th{border-bottom:2px solid #374151;color:#e5e7eb;}
         .tbl td{border-bottom:1px dashed #374151;color:#e5e7eb;}
@@ -533,7 +535,7 @@ def xy_from_cg_weight(cg_in: float, weight_lb: float):
 
 
 # =========================================================
-# FIX 1: CG legend — compact, positioned bottom-right of chart
+# CG legend — compact, positioned bottom-right of chart
 # =========================================================
 def draw_cg_overlay_on_page0(template_bytes: bytes, points):
     reader = PdfReader(io.BytesIO(template_bytes))
@@ -894,7 +896,7 @@ def solve_climb(cap, oat_c, pa_ft):
 
 
 # =========================================================
-# FIX 3: Performance image drawing — path only, no value badge
+# Performance image drawing
 # =========================================================
 def load_font(size: int):
     try:
@@ -1124,6 +1126,22 @@ def sync_with_legs():
     elif len(st.session_state.met) != n:
         old = st.session_state.met
         st.session_state.met = (old + [None] * n)[:n]
+    # Initialise manual met override flags and values
+    if "met_manual_mode" not in st.session_state or not isinstance(st.session_state.met_manual_mode, list):
+        st.session_state.met_manual_mode = [False] * n
+    elif len(st.session_state.met_manual_mode) != n:
+        old = st.session_state.met_manual_mode
+        st.session_state.met_manual_mode = (old + [False] * n)[:n]
+    if "met_manual" not in st.session_state or not isinstance(st.session_state.met_manual, list):
+        st.session_state.met_manual = [
+            {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013}
+            for _ in range(n)
+        ]
+    elif len(st.session_state.met_manual) != n:
+        default_m = {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013}
+        old = st.session_state.met_manual
+        st.session_state.met_manual = (old + [dict(default_m)] * n)[:n]
+
 sync_with_legs()
 
 if "fleet" not in st.session_state:
@@ -1141,6 +1159,20 @@ if "arr_time_utc" not in st.session_state:
 
 if "perf" not in st.session_state:
     st.session_state.perf = {}
+
+
+# =========================================================
+# Helper: get effective MET for a leg (manual or model)
+# =========================================================
+def get_effective_met(i: int) -> dict:
+    """Return the MET dict to use for leg i — manual values if manual mode is on,
+    model values if available, otherwise a safe default."""
+    if st.session_state.met_manual_mode[i]:
+        return dict(st.session_state.met_manual[i])
+    model = st.session_state.met[i]
+    if model:
+        return dict(model)
+    return {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013}
 
 
 # =========================================================
@@ -1221,11 +1253,15 @@ with tab1:
 # 2) Aerodromes & Weather
 # =========================================================
 with tab2:
-    st.markdown("#### Aerodromes (4 legs) + model weather (vector-mean wind)")
+    st.markdown("#### Aerodromes (4 legs) + Weather")
+    st.caption(
+        "Use **Fetch weather** to load model data automatically, or activate **Manual entry** "
+        "per leg to override with METAR/TAF values."
+    )
 
     colA, colB = st.columns([0.62, 0.38])
     with colB:
-        if st.button("Fetch weather for all legs", type="primary"):
+        if st.button("Fetch weather for all legs (model)", type="primary"):
             date_iso = st.session_state.flight_date.strftime("%Y-%m-%d")
             dep_target = dt.datetime.combine(st.session_state.flight_date, st.session_state.dep_time_utc).replace(tzinfo=dt.timezone.utc)
             arr_target = dt.datetime.combine(st.session_state.flight_date, st.session_state.arr_time_utc).replace(tzinfo=dt.timezone.utc)
@@ -1234,6 +1270,9 @@ with tab2:
 
             ok, err = 0, 0
             for i, leg in enumerate(st.session_state.legs):
+                # Skip legs in manual mode
+                if st.session_state.met_manual_mode[i]:
+                    continue
                 icao = leg["icao"]
                 ad = AERODROMES_DB.get(icao)
                 if not ad:
@@ -1267,48 +1306,132 @@ with tab2:
                 ok += 1
 
             if ok and not err:
-                st.success(f"Weather updated for all legs ({ok}/4).")
+                st.success(f"Weather updated for {ok} leg(s).")
             elif ok:
                 st.warning(f"Weather updated for {ok} leg(s); {err} with errors.")
-            else:
+            elif err:
                 st.error("No legs updated.")
+            else:
+                st.info("All legs are in manual mode — nothing to fetch.")
+
+    st.divider()
 
     for i, leg in enumerate(st.session_state.legs):
         role = leg["role"]
-        c1, c2, c3 = st.columns([0.35, 0.35, 0.30])
+        role_label = role.replace("_", " ").title()
 
+        # ---- Row header ----
+        hcol1, hcol2 = st.columns([0.7, 0.3])
+        with hcol1:
+            st.markdown(f"##### {role_label}")
+        with hcol2:
+            manual_on = st.toggle(
+                "Manual entry",
+                value=st.session_state.met_manual_mode[i],
+                key=f"manual_toggle_{i}",
+                help="Override model weather with manually entered values (e.g. from METAR/TAF).",
+            )
+            st.session_state.met_manual_mode[i] = manual_on
+
+        c1, c2, c3 = st.columns([0.30, 0.38, 0.32])
+
+        # ---- Column 1: ICAO selector ----
         with c1:
-            icao = st.selectbox(f"{role} ICAO", ICAO_OPTIONS, index=ICAO_OPTIONS.index(leg["icao"]), key=f"icao_{i}")
+            icao = st.selectbox(
+                f"ICAO",
+                ICAO_OPTIONS,
+                index=ICAO_OPTIONS.index(leg["icao"]),
+                key=f"icao_{i}",
+                label_visibility="collapsed",
+            )
             st.session_state.legs[i]["icao"] = icao
             ad = AERODROMES_DB[icao]
-            st.caption(f"{ad['name']} · Elev {ad['elev_ft']:.0f} ft")
+            st.caption(f"**{icao}** — {ad['name']}")
+            st.caption(f"Elev {ad['elev_ft']:.0f} ft")
 
+        # ---- Column 2: Weather (model summary OR manual inputs) ----
         with c2:
-            met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013, "label": "", "target": ""}
-            st.markdown(
-                f"<div class='box'><b>Model</b> {met.get('label','')}<br>"
-                f"<span class='muted'>Target: {met.get('target','')}</span><br>"
-                f"Wind: <b>{met['wind_dir']:03d}/{met['wind_kt']:02d}</b> kt<br>"
-                f"OAT: <b>{met['temp_c']}</b> °C · QNH: <b>{met['qnh_hpa']}</b> hPa</div>",
-                unsafe_allow_html=True,
-            )
+            if manual_on:
+                # Manual entry widgets — values stored in session_state.met_manual[i]
+                m = st.session_state.met_manual[i]
+                st.markdown("<span style='font-size:.8rem;color:#b07000;font-weight:600'>✏️ Manual weather</span>", unsafe_allow_html=True)
 
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    wdir_val = st.number_input(
+                        "Wind dir (°)",
+                        min_value=0, max_value=360, step=10,
+                        value=int(m.get("wind_dir", 240)),
+                        key=f"m_wdir_{i}",
+                    )
+                    temp_val = st.number_input(
+                        "OAT (°C)",
+                        min_value=-40, max_value=50, step=1,
+                        value=int(m.get("temp_c", 15)),
+                        key=f"m_temp_{i}",
+                    )
+                with mc2:
+                    wkt_val = st.number_input(
+                        "Wind speed (kt)",
+                        min_value=0, max_value=60, step=1,
+                        value=int(m.get("wind_kt", 8)),
+                        key=f"m_wkt_{i}",
+                    )
+                    qnh_val = st.number_input(
+                        "QNH (hPa)",
+                        min_value=900, max_value=1050, step=1,
+                        value=int(m.get("qnh_hpa", 1013)),
+                        key=f"m_qnh_{i}",
+                    )
+
+                # Persist updated manual values
+                st.session_state.met_manual[i] = {
+                    "wind_dir": int(wdir_val),
+                    "wind_kt": int(wkt_val),
+                    "temp_c": int(temp_val),
+                    "qnh_hpa": int(qnh_val),
+                }
+
+            else:
+                # Show model summary
+                model = st.session_state.met[i]
+                if model:
+                    st.markdown(
+                        f"<div class='box'><b>Model</b> {model.get('label','')}<br>"
+                        f"<span class='muted'>Target: {model.get('target','')}</span><br>"
+                        f"Wind: <b>{model['wind_dir']:03d}/{model['wind_kt']:02d}</b> kt<br>"
+                        f"OAT: <b>{model['temp_c']}</b> °C &nbsp;·&nbsp; QNH: <b>{model['qnh_hpa']}</b> hPa</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        "<div class='box muted'>No model data yet.<br>Press <b>Fetch weather</b> or switch to <b>Manual entry</b>.</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        # ---- Column 3: Best runway computed from effective MET ----
         with c3:
-            met = st.session_state.met[i] or {"wind_dir": 240, "wind_kt": 8, "temp_c": 15, "qnh_hpa": 1013}
+            eff_met = get_effective_met(i)
             ad = AERODROMES_DB[st.session_state.legs[i]["icao"]]
-            best = choose_best_runway_by_wind(ad, met["wind_dir"], met["wind_kt"])
+            best = choose_best_runway_by_wind(ad, eff_met["wind_dir"], eff_met["wind_kt"])
 
             if not best:
                 st.markdown("<div class='box warn'><b>No runway data for this aerodrome.</b></div>", unsafe_allow_html=True)
             else:
                 rw = best["rw"]
-                hw, xw, side = wind_components(rw["qfu"], met["wind_dir"], met["wind_kt"])
+                hw, xw, side = wind_components(rw["qfu"], eff_met["wind_dir"], eff_met["wind_kt"])
+                src_label = "Manual" if manual_on else "Model"
+                box_class = "box-manual" if manual_on else "box"
                 st.markdown(
-                    f"<div class='box'><b>Auto RWY</b>: {rw['id']} <span class='chip'>QFU {rw['qfu']:03.0f}°</span><br>"
-                    f"HW {hw:.0f} kt · XW {side} {xw:.0f} kt<br>"
-                    f"TODA {rw['toda']:.0f} m · LDA {rw['lda']:.0f} m</div>",
+                    f"<div class='{box_class}'>"
+                    f"<span class='muted' style='font-size:.78rem'>Auto RWY ({src_label})</span><br>"
+                    f"<b>{rw['id']}</b> <span class='chip'>QFU {rw['qfu']:03.0f}°</span><br>"
+                    f"HW {hw:.0f} kt &nbsp;·&nbsp; XW {side} {xw:.0f} kt<br>"
+                    f"TODA {rw['toda']:.0f} m &nbsp;·&nbsp; LDA {rw['lda']:.0f} m</div>",
                     unsafe_allow_html=True,
                 )
+
+        st.divider()
 
 
 # =========================================================
@@ -1505,7 +1628,8 @@ with tabP:
                         if not ad:
                             continue
 
-                        met = st.session_state.met[i] or {"wind_dir":240,"wind_kt":8,"temp_c":15,"qnh_hpa":1013}
+                        # Use effective MET (manual or model)
+                        met = get_effective_met(i)
                         best = choose_best_runway_by_wind(ad, met["wind_dir"], met["wind_kt"])
                         if not best:
                             continue
@@ -1705,7 +1829,8 @@ with tab4:
                 ad = AERODROMES_DB.get(icao, None)
                 if not ad:
                     continue
-                met = st.session_state.met[i] or {"wind_dir":240,"wind_kt":8,"temp_c":15,"qnh_hpa":1013}
+                # Use effective MET (manual or model) for PDF fields
+                met = get_effective_met(i)
                 best = choose_best_runway_by_wind(ad, met["wind_dir"], met["wind_kt"])
                 if not best:
                     continue
