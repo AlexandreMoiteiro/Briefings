@@ -532,6 +532,9 @@ def xy_from_cg_weight(cg_in: float, weight_lb: float):
     return (x0 + frac * (x1 - x0), y0 + frac * (y1 - y0))
 
 
+# =========================================================
+# FIX 1: CG legend — compact, positioned bottom-right of chart
+# =========================================================
 def draw_cg_overlay_on_page0(template_bytes: bytes, points):
     reader = PdfReader(io.BytesIO(template_bytes))
     page0 = reader.pages[0]
@@ -810,45 +813,15 @@ def pick_guides(cap: Dict[str, Any], mode: str):
     if mode == "takeoff":
         return group_guides_polyline_pairs(mid_raw), [[s] for s in right_raw]
 
-    # landing and others: simple segments
     return [[s] for s in mid_raw], [[s] for s in right_raw]
 
-
-# =========================================================
-# *** CORRECTED solve_ground_roll ***
-#
-# Root cause for landing:
-#   - Weight axis is REVERSED (25→20 left-to-right, slope < 0)
-#   - Middle guides run RIGHT→LEFT: x1≈882 (max weight side)
-#                                   x2≈667 (ref line side)
-#   - y_entry from OAT/PA panel must enter guides at x2 (ref line, left side)
-#     and exit at x1 (weight side, right side) — opposite to what x_ref/x_target
-#     were doing before.
-#
-# Fix: for landing, swap x_ref and x_target in interp_guides_y for the middle panel.
-#   x_ref  = x_ref_mid  (≈667, left side = where y_entry arrives)  ← entry side
-#   x_target = x_wt     (≈676-883, weight-dependent)               ← exit side
-#
-# This was already the correct pair — the real bug was that x_wt was landing
-# outside the guide x-range because weight_x100_lb=25 maps to x≈689 (left of
-# guides at x1≈882) while the guides span x∈[667, 882].
-# For landing_w ≈ 2550 lb → 25.5 × 100 lb, axis_coord gives x < 689, i.e. < x2
-# of every guide — so interp_guides_y evaluated yr AND yt both at the x2 end,
-# producing no deflection.
-#
-# Correct approach: x_ref = right end of guides (x where weight=max, x≈882)
-#                  x_target = actual weight pixel x_wt
-# This matches the physical chart traversal:
-#   1. Enter middle panel from y_entry at the RIGHT edge (weight=max reference)
-#   2. Follow guide to x_wt (actual weight), reading off y_mid
-# =========================================================
 def solve_ground_roll(cap, mode, oat_c, pa_ft, weight_lb, wind_kt):
     ticks = cap["axis_ticks"]
     lines = cap["lines"]
     panels = normalize_panels(cap)
 
     ax_oat_a, ax_oat_b = fit_axis_value_from_ticks(ticks["oat_c"], "x", "oat_c")
-    ax_wt_a, ax_wt_b   = fit_axis_value_from_ticks(ticks["weight_x100_lb"], "x", "weight_x100_lb")
+    ax_wt_a, ax_wt_b = fit_axis_value_from_ticks(ticks["weight_x100_lb"], "x", "weight_x100_lb")
     ax_wind_a, ax_wind_b = fit_axis_value_from_ticks(ticks["wind_kt"], "x", "wind_kt")
 
     out_axis_key = ASSETS[mode]["out_axis_key"]
@@ -857,10 +830,9 @@ def solve_ground_roll(cap, mode, oat_c, pa_ft, weight_lb, wind_kt):
     if not lines.get("weight_ref_line") or not lines.get("wind_ref_zero"):
         raise ValueError("Missing weight_ref_line or wind_ref_zero in JSON lines.")
 
-    x_ref_mid   = x_of_vertical_ref(lines["weight_ref_line"][0])
+    x_ref_mid = x_of_vertical_ref(lines["weight_ref_line"][0])
     x_ref_right = x_of_vertical_ref(lines["wind_ref_zero"][0])
 
-    # --- OAT → PA line intersection (y_entry) ---
     x_oat = axis_coord_from_value(ax_oat_a, ax_oat_b, oat_c)
 
     pa_levels = parse_pa_levels_ft(lines)
@@ -869,69 +841,30 @@ def solve_ground_roll(cap, mode, oat_c, pa_ft, weight_lb, wind_kt):
     seg_hi = lines[k_hi][0]
     y_entry = (1 - alpha) * line_y_at_x(seg_lo, x_oat) + alpha * line_y_at_x(seg_hi, x_oat)
 
-    # --- Weight pixel ---
     x_wt = axis_coord_from_value(ax_wt_a, ax_wt_b, weight_lb / 100.0)
 
-    # --- Middle panel guides ---
     g_mid, g_right = pick_guides(cap, mode=mode)
+    y_mid, _ = interp_guides_y(g_mid, x_ref=x_ref_mid, y_ref=y_entry, x_target=x_wt)
 
-    if mode == "landing":
-        # Landing middle guides run RIGHT (max-weight side, x≈882) → LEFT (ref line, x≈667).
-        # Physical traversal: arrive at the RIGHT edge with y_entry, follow guide to x_wt.
-        #
-        # Find the x-coordinate of the RIGHT edge of the middle guides.
-        # We use the weight tick with the SMALLEST value (lightest = rightmost in landing).
-        # weight_x100_lb tick minimum value → largest x pixel.
-        wt_ticks = ticks["weight_x100_lb"]
-        # The tick with the minimum weight value gives the rightmost x (reversed axis).
-        min_wt_value = min(float(t["value"]) for t in wt_ticks)
-        x_guide_entry = axis_coord_from_value(ax_wt_a, ax_wt_b, min_wt_value)
-        # x_guide_entry ≈ 883 (rightmost side of middle panel, weight=2000 lb in landing)
-
-        y_mid, _ = interp_guides_y(g_mid, x_ref=x_guide_entry, y_ref=y_entry, x_target=x_wt)
-    else:
-        # Takeoff: guides run LEFT (ref line) → RIGHT (weight side). Standard traversal.
-        y_mid, _ = interp_guides_y(g_mid, x_ref=x_ref_mid, y_ref=y_entry, x_target=x_wt)
-
-    # --- Wind panel ---
     x_wind = axis_coord_from_value(ax_wind_a, ax_wind_b, wind_kt)
     y_out, _ = interp_guides_y(g_right, x_ref=x_ref_right, y_ref=y_mid, x_target=x_wind)
 
     out_val = axis_value(ax_out_a, ax_out_b, y_out)
 
-    # --- Visual path segments ---
     segs = []
-    left_panel  = panels.get("left") or []
+    left_panel = panels.get("left") or []
     right_panel = panels.get("right") or []
-
     if left_panel and right_panel:
         y_bottom_left = float(left_panel[2]["y"])
-        x_right_edge  = float(right_panel[1]["x"])
-
-        if mode == "landing":
-            # Traversal direction matches chart:
-            #   OAT (bottom) → y_entry on PA line
-            #   horizontal to ref line (x_ref_mid)
-            #   diagonal through middle guide to x_wt (y_mid)
-            #   horizontal to wind ref (x_ref_right)
-            #   diagonal through wind guide to x_wind (y_out)
-            #   horizontal to right edge (result)
-            segs.append(((x_oat,      y_bottom_left), (x_oat,      y_entry)))
-            segs.append(((x_oat,      y_entry),       (x_ref_mid,  y_entry)))
-            segs.append(((x_ref_mid,  y_entry),       (x_wt,       y_mid)))
-            segs.append(((x_wt,       y_mid),         (x_ref_right, y_mid)))
-            segs.append(((x_ref_right, y_mid),        (x_wind,     y_out)))
-            segs.append(((x_wind,     y_out),         (x_right_edge, y_out)))
-        else:
-            segs.append(((x_oat,      y_bottom_left), (x_oat,      y_entry)))
-            segs.append(((x_oat,      y_entry),       (x_ref_mid,  y_entry)))
-            segs.append(((x_ref_mid,  y_entry),       (x_wt,       y_mid)))
-            segs.append(((x_wt,       y_mid),         (x_ref_right, y_mid)))
-            segs.append(((x_ref_right, y_mid),        (x_wind,     y_out)))
-            segs.append(((x_wind,     y_out),         (x_right_edge, y_out)))
+        x_right_edge = float(right_panel[1]["x"])
+        segs.append(((x_oat, y_bottom_left), (x_oat, y_entry)))
+        segs.append(((x_oat, y_entry), (x_ref_mid, y_entry)))
+        segs.append(((x_ref_mid, y_entry), (x_wt, y_mid)))
+        segs.append(((x_wt, y_mid), (x_ref_right, y_mid)))
+        segs.append(((x_ref_right, y_mid), (x_wind, y_out)))
+        segs.append(((x_wind, y_out), (x_right_edge, y_out)))
 
     return out_val, segs
-
 
 def solve_climb(cap, oat_c, pa_ft):
     ticks = cap["axis_ticks"]
@@ -961,7 +894,7 @@ def solve_climb(cap, oat_c, pa_ft):
 
 
 # =========================================================
-# Performance image drawing
+# FIX 3: Performance image drawing — path only, no value badge
 # =========================================================
 def load_font(size: int):
     try:
