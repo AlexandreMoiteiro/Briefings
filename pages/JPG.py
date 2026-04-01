@@ -273,16 +273,22 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
     for i, (li, ri) in enumerate(pairs_indices):
         left  = render_page(doc.load_page(li), dpi, bg)
         right = render_page(doc.load_page(ri), dpi, bg) if ri is not None else Image.new("RGB", left.size, bg)
-        merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
-        if sharpen:
-            merged = apply_sharpen(merged)
         if do_crop:
-            merged = scale_and_crop_marks(
-                merged,
+            left  = scale_and_crop_marks(
+                left,
                 content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
                 dpi=dpi, margin_cm=opts["crop_margin"],
                 mark_len_cm=opts["crop_marklen"], bg=bg,
             )
+            right = scale_and_crop_marks(
+                right,
+                content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
+                dpi=dpi, margin_cm=opts["crop_margin"],
+                mark_len_cm=opts["crop_marklen"], bg=bg,
+            )
+        merged = merge_side_by_side(left, right, align_by="height", gap_px=gap, bg=bg)
+        if sharpen:
+            merged = apply_sharpen(merged)
         merged_images.append(merged)
         progress.progress((i + 1) / n_pairs, text=f"Par {i + 1}/{n_pairs}…")
 
@@ -330,16 +336,22 @@ def process_dual(pdf_a: bytes, pdf_b: bytes, opts: dict):
         right = render_page(db.load_page(0), dpi, bg)
     progress.progress(0.9, text="A juntar…")
 
-    merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
-    if sharpen:
-        merged = apply_sharpen(merged)
     if opts.get("crop_marks", False):
-        merged = scale_and_crop_marks(
-            merged,
+        left  = scale_and_crop_marks(
+            left,
             content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
             dpi=dpi, margin_cm=opts["crop_margin"],
             mark_len_cm=opts["crop_marklen"], bg=bg,
         )
+        right = scale_and_crop_marks(
+            right,
+            content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
+            dpi=dpi, margin_cm=opts["crop_margin"],
+            mark_len_cm=opts["crop_marklen"], bg=bg,
+        )
+    merged = merge_side_by_side(left, right, align_by="height", gap_px=gap, bg=bg)
+    if sharpen:
+        merged = apply_sharpen(merged)
     progress.empty()
 
     out  = encode_image(merged, fmt)
