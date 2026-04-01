@@ -161,8 +161,9 @@ def thumb_to_bytes(img: Image.Image) -> bytes:
 def fit_two_cards_on_a4(
     left: Image.Image,
     right: Image.Image,
-    card_w_cm: float = 13.3,
+    card_w_cm: float = 13.0,
     card_h_cm: float = 20.5,
+    img_scale: float = 1.0,
     dpi: int = 500,
     mark_len_cm: float = 0.4,
     mark_offset_cm: float = 0.15,
@@ -172,29 +173,37 @@ def fit_two_cards_on_a4(
 ) -> tuple:
     """
     Coloca duas cartas num canvas A4 paisagem (29.7x21 cm).
-    Se as cartas forem maiores que o A4, usa o canvas das cartas e desenha
-    as marcas de corte por cima da imagem (com linha semi-transparente).
+    - card_w_cm / card_h_cm: dimensões do cartão (onde ficam as marcas de corte)
+    - img_scale: escala da imagem DENTRO do cartão (1.0 = preenche, <1 = mais margem)
+    Se as cartas forem maiores que o A4, o canvas expande e as marcas ficam por cima.
     Devolve (Image, overflow: bool).
     """
     def cm2px(cm): return int(round(cm * dpi / 2.54))
 
     a4_w = cm2px(29.7)
     a4_h = cm2px(21.0)
-    cw   = cm2px(card_w_cm)
-    ch   = cm2px(card_h_cm)
+    cw   = cm2px(card_w_cm)   # largura do cartão (área de corte)
+    ch   = cm2px(card_h_cm)   # altura do cartão (área de corte)
     ml   = cm2px(mark_len_cm)
     mo   = cm2px(mark_offset_cm)
     t    = mark_thick_px
 
     def scale_card(img):
-        r = img.width / img.height; tr = cw / ch
-        nw, nh = (cw, round(cw / r)) if r > tr else (round(ch * r), ch)
+        """Escala img para caber em cw*img_scale × ch*img_scale (letterbox),
+        depois centra dentro do cartão cw×ch."""
+        target_w = int(cw * img_scale)
+        target_h = int(ch * img_scale)
+        r  = img.width / img.height
+        tr = target_w / target_h
+        nw, nh = (target_w, round(target_w / r)) if r > tr else (round(target_h * r), target_h)
+        # Clamp para não exceder o cartão
+        nw, nh = min(nw, cw), min(nh, ch)
         return img.resize((nw, nh), Image.LANCZOS)
 
     left_s  = scale_card(left)
     right_s = scale_card(right)
 
-    # Verifica se as cartas cabem no A4
+    # Verifica se os cartões cabem no A4
     min_gap_h = cm2px(0.15)
     min_gap_v = cm2px(0.1)
     natural_gap_h = (a4_w - cw * 2) // 3
@@ -202,25 +211,21 @@ def fit_two_cards_on_a4(
     overflow = natural_gap_h < min_gap_h or natural_gap_v < min_gap_v
 
     if overflow:
-        # Canvas = tamanho das cartas + margem mínima para as marcas
-        mg = cm2px(0.5)  # margem fixa para as marcas
+        mg = cm2px(0.5)
         canvas_w = mg + cw + mg + cw + mg
         canvas_h = mg + ch + mg
-        gap_h = mg
-        gap_v = mg
+        gap_h, gap_v = mg, mg
         canvas = Image.new("RGB", (canvas_w, canvas_h), bg)
-        lx1 = gap_h
-        lx2 = gap_h + cw + gap_h
-        ly  = gap_v
     else:
-        gap_h = natural_gap_h
-        gap_v = natural_gap_v
+        gap_h, gap_v = natural_gap_h, natural_gap_v
         canvas = Image.new("RGB", (a4_w, a4_h), bg)
-        lx1 = gap_h
-        lx2 = gap_h + cw + gap_h
-        ly  = gap_v
+
+    lx1 = gap_h
+    lx2 = gap_h + cw + gap_h
+    ly  = gap_v
 
     def paste_centered(img_s, ox, oy):
+        # Centra a imagem dentro da caixa do cartão (ox,oy) → (ox+cw, oy+ch)
         px = ox + (cw - img_s.width)  // 2
         py = oy + (ch - img_s.height) // 2
         canvas.paste(img_s, (px, py))
@@ -228,9 +233,8 @@ def fit_two_cards_on_a4(
     paste_centered(left_s,  lx1, ly)
     paste_centered(right_s, lx2, ly)
 
-    # Marcas de corte — se overflow, desenha por cima com linha sólida preta
-    ml_eff = min(ml, max(gap_h - mo - 2, 6), max(gap_v - mo - 2, 6))
-    ml_eff = max(ml_eff, 6)
+    # Marcas de corte nos cantos de cada cartão
+    ml_eff = max(min(ml, gap_h - mo - 2, gap_v - mo - 2), 6) if not overflow else max(ml, 6)
 
     draw = ImageDraw.Draw(canvas)
 
@@ -256,27 +260,56 @@ def fit_two_cards_on_a4(
 # Modo impressão frente/verso
 # ─────────────────────────────────────────────
 
-def reorder_for_duplex(pairs: list) -> list:
+def combine_for_duplex(images: list, opts: dict) -> list:
     """
-    Reordena para impressão frente/verso em blocos de 4 imagens (2 folhas físicas):
-      bloco de 4: [A, B, C, D] → [A, C, D, B]  (1,3,4,2)
-    Para n imagens, processa em blocos de 4 consecutivos, com o último bloco
-    podendo ter 2 ou 3 imagens:
-      n=2 → 1,2          (1 folha, sem reorder necessário)
-      n=4 → 1,3,4,2
-      n=6 → 1,3,4,2,5,6
-      n=8 → 1,3,4,2,5,7,8,6
+    Cria novas páginas A4 para impressão frente/verso.
+    Cada A4 físico leva 2 pares de cartas (4 imagens no total):
+      Frente do A4: imagem i+0 (esq) + imagem i+2 (dir)
+      Verso  do A4: imagem i+3 (esq) + imagem i+1 (dir)  ← invertido para alinhar após corte
+
+    Para 4 imagens [A,B,C,D]:
+      Frente: A + C
+      Verso:  D + B
+    Resultado PDF: [frente_A4_1, verso_A4_1, frente_A4_2, verso_A4_2, ...]
     """
+    bg      = opts.get("bg", (255, 255, 255))
+    dpi     = opts["dpi"]
+    crop_w  = opts["crop_w"]
+    crop_h  = opts["crop_h"]
+    img_scale = opts.get("img_scale", 1.0)
+    marklen = opts["crop_marklen"]
+
+    def make_a4(left_img, right_img):
+        img, _ = fit_two_cards_on_a4(
+            left_img, right_img,
+            card_w_cm=crop_w, card_h_cm=crop_h,
+            img_scale=img_scale, dpi=dpi,
+            mark_len_cm=marklen, mark_offset_cm=0.15, bg=bg,
+        )
+        return img
+
+    # Página em branco do mesmo tamanho que as outras (para blocos incompletos)
+    def blank_like(img):
+        return Image.new("RGB", img.size, bg)
+
     result = []
     i = 0
-    while i < len(pairs):
-        chunk = pairs[i:i+4]
-        if len(chunk) == 4:
-            # bloco completo: frente1, frente2, verso2, verso1
-            result += [chunk[0], chunk[2], chunk[3], chunk[1]]
-        else:
-            # bloco parcial: deixa na ordem original
-            result += chunk
+    while i < len(images):
+        chunk = images[i:i+4]
+        # Pad com brancos se necessário
+        while len(chunk) < 4:
+            chunk.append(None)
+        A, B, C, D = chunk
+
+        # Se C ou D são None, cria brancos com o mesmo tamanho de A
+        ref = A
+        C = C if C is not None else Image.new("RGB", ref.size, bg)
+        D = D if D is not None else Image.new("RGB", ref.size, bg)
+        B = B if B is not None else Image.new("RGB", ref.size, bg)
+
+        frente = make_a4(A, C)   # esq=img1, dir=img3
+        verso  = make_a4(D, B)   # esq=img4, dir=img2  (invertido)
+        result += [frente, verso]
         i += 4
     return result
 
@@ -284,6 +317,32 @@ def reorder_for_duplex(pairs: list) -> list:
 # ─────────────────────────────────────────────
 # Processadores de alto nível
 # ─────────────────────────────────────────────
+
+def combine_for_duplex_simple(images: list) -> list:
+    """
+    Modo duplex sem marcas de corte.
+    Combina pares de imagens side-by-side numa única imagem A4 paisagem:
+      Frente: img[i+0] (esq) + img[i+2] (dir)
+      Verso:  img[i+3] (esq) + img[i+1] (dir)
+    """
+    result = []
+    i = 0
+    while i < len(images):
+        chunk = images[i:i+4]
+        while len(chunk) < 4:
+            chunk.append(None)
+        A, B, C, D = chunk
+        ref_size = A.size
+        bg = (255, 255, 255)
+        C = C if C is not None else Image.new("RGB", ref_size, bg)
+        D = D if D is not None else Image.new("RGB", ref_size, bg)
+        B = B if B is not None else Image.new("RGB", ref_size, bg)
+        frente = merge_side_by_side(A, C, align_by="height", gap_px=0, bg=bg)
+        verso  = merge_side_by_side(D, B, align_by="height", gap_px=0, bg=bg)
+        result += [frente, verso]
+        i += 4
+    return result
+
 
 def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
     dpi, fmt        = opts["dpi"], opts["fmt"]
@@ -303,6 +362,7 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
             merged, overflow = fit_two_cards_on_a4(
                 left, right,
                 card_w_cm=opts["crop_w"], card_h_cm=opts["crop_h"],
+                img_scale=opts.get("img_scale", 1.0),
                 dpi=dpi,
                 mark_len_cm=opts["crop_marklen"],
                 mark_offset_cm=0.15,
@@ -319,8 +379,18 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
 
     progress.empty()
 
-    if do_duplex and len(merged_images) > 1:
-        merged_images = reorder_for_duplex(merged_images)
+    if do_duplex and do_crop and len(merged_images) > 1:
+        # Duplex + crop: recombina as imagens individuais em novas páginas A4
+        # Aqui merged_images são imagens A4 já com marcas de corte.
+        # Precisamos das imagens originais (left/right) para combinar.
+        # → processamos de novo em modo duplex combinado
+        # (as imagens já estão em merged_images como A4 individuais)
+        merged_images = combine_for_duplex(merged_images, opts)
+        had_overflow = False  # overflow já foi tratado acima
+    elif do_duplex and not do_crop and len(merged_images) > 1:
+        # Duplex sem crop: as "imagens" são os pares merged normais
+        # Trata cada par como uma "carta" e combina 2 pares por página
+        merged_images = combine_for_duplex_simple(merged_images)
 
     if len(merged_images) == 1:
         out  = encode_image(merged_images[0], fmt)
@@ -367,6 +437,7 @@ def process_dual(pdf_a: bytes, pdf_b: bytes, opts: dict):
         merged, overflow = fit_two_cards_on_a4(
             left, right,
             card_w_cm=opts["crop_w"], card_h_cm=opts["crop_h"],
+            img_scale=opts.get("img_scale", 1.0),
             dpi=dpi, mark_len_cm=opts["crop_marklen"], mark_offset_cm=0.15, bg=bg,
         )
     else:
@@ -485,7 +556,7 @@ with st.sidebar:
     st.divider()
     st.markdown("**Impressão frente/verso**")
     duplex = st.toggle("Modo frente/verso (1,3,4,2…)", value=False,
-                       help="Reordena as páginas para impressão duplex: primeiro todas as frentes, depois todos os versos.")
+                       help="Combina pares em novas páginas A4: frente=[img1+img3], verso=[img4+img2]. Requer Marcas de corte activadas para melhor resultado.")
 
     st.divider()
     st.markdown("**Marcas de corte (A4 paisagem)**")
@@ -523,9 +594,14 @@ with st.sidebar:
                 '<div class="warn-box">⚠️ Cartas maiores que o A4 — marcas ficarão por cima da imagem.</div>',
                 unsafe_allow_html=True,
             )
+        st.markdown("**Imagem dentro do cartão**")
+        img_scale = st.slider(
+            "Escala da imagem (%)", 40, 100, 95, 1,
+            help="100% = imagem preenche o cartão. Diminui para mais margem branca dentro do cartão."
+        ) / 100.0
         crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 15, 4, 1) / 10
     else:
-        crop_w, crop_h, crop_marklen = 13.0, 20.5, 0.4
+        crop_w, crop_h, crop_marklen, img_scale = 13.0, 20.5, 0.4, 1.0
     st.divider()
     st.markdown("**Preview**")
     preview_width = st.slider("Largura máx. (px)", 400, 2000, 900, 100)
@@ -533,7 +609,7 @@ with st.sidebar:
 
 OPTS = dict(dpi=dpi, fmt=fmt, align_by=align_by, gap_px=gap_px, bg=BG, sharpen=sharpen,
             crop_marks=crop_marks, crop_w=crop_w, crop_h=crop_h, crop_marklen=crop_marklen,
-            duplex=duplex)
+            img_scale=img_scale, duplex=duplex)
 
 
 # ─────────────────────────────────────────────
