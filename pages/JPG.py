@@ -301,19 +301,16 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
         left  = render_page(doc.load_page(li), dpi, bg)
         right = render_page(doc.load_page(ri), dpi, bg) if ri is not None else Image.new("RGB", left.size, bg)
         if do_crop:
-            left  = scale_and_crop_marks(
-                left,
-                content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
-                dpi=dpi, margin_cm=opts["crop_margin"],
-                mark_len_cm=opts["crop_marklen"], bg=bg,
+            merged = fit_two_cards_on_a4(
+                left, right,
+                card_w_cm=opts["crop_w"], card_h_cm=opts["crop_h"],
+                dpi=dpi,
+                mark_len_cm=opts["crop_marklen"],
+                mark_offset_cm=0.15,
+                bg=bg,
             )
-            right = scale_and_crop_marks(
-                right,
-                content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
-                dpi=dpi, margin_cm=opts["crop_margin"],
-                mark_len_cm=opts["crop_marklen"], bg=bg,
-            )
-        merged = merge_side_by_side(left, right, align_by="height", gap_px=gap, bg=bg)
+        else:
+            merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
         if sharpen:
             merged = apply_sharpen(merged)
         merged_images.append(merged)
@@ -364,19 +361,16 @@ def process_dual(pdf_a: bytes, pdf_b: bytes, opts: dict):
     progress.progress(0.9, text="A juntar…")
 
     if opts.get("crop_marks", False):
-        left  = scale_and_crop_marks(
-            left,
-            content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
-            dpi=dpi, margin_cm=opts["crop_margin"],
-            mark_len_cm=opts["crop_marklen"], bg=bg,
+        merged = fit_two_cards_on_a4(
+            left, right,
+            card_w_cm=opts["crop_w"], card_h_cm=opts["crop_h"],
+            dpi=dpi,
+            mark_len_cm=opts["crop_marklen"],
+            mark_offset_cm=0.15,
+            bg=bg,
         )
-        right = scale_and_crop_marks(
-            right,
-            content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
-            dpi=dpi, margin_cm=opts["crop_margin"],
-            mark_len_cm=opts["crop_marklen"], bg=bg,
-        )
-    merged = merge_side_by_side(left, right, align_by="height", gap_px=gap, bg=bg)
+    else:
+        merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
     if sharpen:
         merged = apply_sharpen(merged)
     progress.empty()
@@ -438,10 +432,9 @@ with st.sidebar:
             crop_w = st.number_input("Largura (cm)", value=20.5, step=0.1, format="%.1f")
         with c2:
             crop_h = st.number_input("Altura (cm)",  value=13.3, step=0.1, format="%.1f")
-        crop_margin = st.slider("Margem branca (mm)", 2, 20, 5, 1) / 10  # → cm
         crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 15, 4, 1) / 10
     else:
-        crop_w, crop_h, crop_margin, crop_marklen = 20.5, 13.3, 0.5, 0.4
+        crop_w, crop_h, crop_marklen = 13.3, 20.5, 0.4
 
     st.divider()
     st.markdown("**Preview**")
@@ -450,7 +443,7 @@ with st.sidebar:
 
 OPTS = dict(dpi=dpi, fmt=fmt, align_by=align_by, gap_px=gap_px, bg=BG, sharpen=sharpen,
             crop_marks=crop_marks, crop_w=crop_w, crop_h=crop_h,
-            crop_margin=crop_margin, crop_marklen=crop_marklen)
+            crop_marklen=crop_marklen)
 
 
 # ─────────────────────────────────────────────
