@@ -253,31 +253,46 @@ def fit_two_cards_on_a4(
     place_card(left,  0)
     place_card(right, half_w)
 
-    # Marcas de corte centradas em cada metade, na posição pedida (card_w_cm × card_h_cm)
-    # Overflow = marcas ficam fora do espaço de margem disponível
-    mark_x_margin = (half_w - cw) // 2   # margem horizontal entre borda da metade e marca
-    mark_y_margin = (a4_h  - ch) // 2    # margem vertical entre borda do canvas e marca
-    overflow = mark_x_margin < mo + ml or mark_y_margin < mo + ml
+    # Marcas de corte centradas em cada metade, na posição pedida
+    # Se cw > half_w ou ch > a4_h, as marcas ficam fora da área visível (overflow)
+    mark_x_margin = (half_w - cw) // 2
+    mark_y_margin = (a4_h  - ch) // 2
+    overflow = cw > half_w or ch > a4_h or mark_x_margin < mo + ml or mark_y_margin < mo + ml
 
     draw = ImageDraw.Draw(canvas)
 
-    def L_mark(cx, cy, dx, dy):
-        hx0, hx1 = cx + dx * mo, cx + dx * (mo + ml)
-        draw.rectangle([min(hx0,hx1), cy - t//2,
-                        max(hx0,hx1), cy + t//2], fill=mark_color)
-        vy0, vy1 = cy + dy * mo, cy + dy * (mo + ml)
-        draw.rectangle([cx - t//2, min(vy0,vy1),
-                        cx + t//2, max(vy0,vy1)], fill=mark_color)
+    def draw_line(x0, y0, x1, y1):
+        draw.rectangle([min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1)], fill=mark_color)
+
+    def crop_mark(cx, cy, go_left, go_up):
+        """
+        Desenha uma marca L num canto.
+        go_left=True → traço horizontal vai para a esquerda
+        go_up=True   → traço vertical vai para cima
+        """
+        dx = -1 if go_left else +1
+        dy = -1 if go_up   else +1
+        # traço horizontal: sai do canto para fora
+        draw_line(cx + dx * mo,        cy - t//2,
+                  cx + dx * (mo + ml), cy + t//2)
+        # traço vertical: sai do canto para fora
+        draw_line(cx - t//2, cy + dy * mo,
+                  cx + t//2, cy + dy * (mo + ml))
 
     for half_x in (0, half_w):
-        # Canto superior-esquerdo da área de corte nesta metade
-        mx = half_x + mark_x_margin
-        my = mark_y_margin
-        # 4 cantos
-        L_mark(mx,      my,      -1, -1)
-        L_mark(mx + cw, my,      +1, -1)
-        L_mark(mx,      my + ch, -1, +1)
-        L_mark(mx + cw, my + ch, +1, +1)
+        mx = half_x + mark_x_margin   # x do lado esquerdo da área de corte
+        my = mark_y_margin             # y do topo da área de corte
+        rx = mx + cw                   # x do lado direito da área de corte
+        by = my + ch                   # y da base da área de corte
+
+        # Canto superior-esquerdo: horizontal vai à esquerda, vertical vai para cima
+        crop_mark(mx, my, go_left=True,  go_up=True)
+        # Canto superior-direito: horizontal vai à direita, vertical vai para cima
+        crop_mark(rx, my, go_left=False, go_up=True)
+        # Canto inferior-esquerdo: horizontal vai à esquerda, vertical vai para baixo
+        crop_mark(mx, by, go_left=True,  go_up=False)
+        # Canto inferior-direito: horizontal vai à direita, vertical vai para baixo
+        crop_mark(rx, by, go_left=False, go_up=False)
 
     return canvas, overflow
 
