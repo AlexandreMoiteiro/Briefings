@@ -260,38 +260,44 @@ def fit_two_cards_on_a4(
 
     draw = ImageDraw.Draw(canvas)
 
-    def dashed_line(x0, y0, x1, y1, dash=ml, gap=max(4, ml//2)):
-        """Desenha uma linha tracejada horizontal ou vertical."""
-        if x0 == x1:  # vertical
-            y = min(y0, y1)
-            end = max(y0, y1)
-            on = True
-            while y < end:
-                seg_end = min(y + (dash if on else gap), end)
-                if on:
-                    draw.rectangle([x0 - t//2, y, x0 + t//2, seg_end], fill=mark_color)
-                y = seg_end
-                on = not on
-        else:  # horizontal
-            x = min(x0, x1)
-            end = max(x0, x1)
-            on = True
-            while x < end:
-                seg_end = min(x + (dash if on else gap), end)
-                if on:
-                    draw.rectangle([x, y0 - t//2, seg_end, y0 + t//2], fill=mark_color)
-                x = seg_end
-                on = not on
+    def seg(x0, y0, x1, y1):
+        draw.rectangle([min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1)], fill=mark_color)
+
+    def L_mark(cx, cy, go_left, go_up):
+        dx = -1 if go_left else +1
+        dy = -1 if go_up   else +1
+        seg(cx + dx*mo, cy - t//2, cx + dx*(mo+ml), cy + t//2)  # horizontal
+        seg(cx - t//2, cy + dy*mo, cx + t//2, cy + dy*(mo+ml))  # vertical
+
+    def mid_tick_h(cx, cy, go_up):
+        """Risca a meio num lado horizontal — sai para cima ou baixo."""
+        dy = -1 if go_up else +1
+        seg(cx - t//2, cy + dy*mo, cx + t//2, cy + dy*(mo+ml))
+
+    def mid_tick_v(cx, cy, go_left):
+        """Risca a meio num lado vertical — sai para a esquerda ou direita."""
+        dx = -1 if go_left else +1
+        seg(cx + dx*mo, cy - t//2, cx + dx*(mo+ml), cy + t//2)
 
     for half_x in (0, half_w):
         mx = half_x + mark_x_margin
         my = mark_y_margin
         rx = mx + cw
         by = my + ch
-        dashed_line(mx, my, rx, my)   # topo
-        dashed_line(mx, by, rx, by)   # base
-        dashed_line(mx, my, mx, by)   # esquerda
-        dashed_line(rx, my, rx, by)   # direita
+        mid_x = mx + cw // 2
+        mid_y = my + ch // 2
+
+        # 4 cantos em L
+        L_mark(mx, my, go_left=True,  go_up=True)
+        L_mark(rx, my, go_left=False, go_up=True)
+        L_mark(mx, by, go_left=True,  go_up=False)
+        L_mark(rx, by, go_left=False, go_up=False)
+
+        # Riscas a meio de cada lado
+        mid_tick_h(mid_x, my, go_up=True)    # meio do topo
+        mid_tick_h(mid_x, by, go_up=False)   # meio da base
+        mid_tick_v(mx, mid_y, go_left=True)  # meio da esquerda
+        mid_tick_v(rx, mid_y, go_left=False) # meio da direita
 
     return canvas, False
 
@@ -696,7 +702,7 @@ with st.sidebar:
             "Escala da imagem (%)", 40, 130, 100, 1,
             help="As linhas de corte não se movem. Só a imagem escala."
         ) / 100.0
-        crop_marklen = st.slider("Tamanho do traço (mm)", 2, 20, 8, 1) / 10
+        crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 20, 6, 1) / 10
 
         st.markdown("**Posição das cartas**")
         st.caption("Desloca cada carta dentro da sua metade (em cm). As marcas de corte não se movem.")
