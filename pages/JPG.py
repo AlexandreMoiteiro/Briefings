@@ -138,16 +138,17 @@ def encode_image(img: Image.Image, fmt: str) -> bytes:
 def images_to_pdf_bytes(images: list) -> bytes:
     """
     Converte lista de PIL Images → PDF via PyMuPDF.
-    Usa insert_pdf com documentos de imagem em memória — sem PIL PDF backend.
+    Cria uma página por imagem com as dimensões exactas e insere a imagem nela.
     """
     out_doc = fitz.open()
     for img in images:
+        w, h = img.size
+        # Cria página com dimensões em pontos (1 px = 1 pt a 72 dpi; usamos px directamente)
+        page = out_doc.new_page(width=w, height=h)
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=False)
         buf.seek(0)
-        img_doc = fitz.open(stream=buf.read(), filetype="png")
-        out_doc.insert_pdf(img_doc)
-        img_doc.close()
+        page.insert_image(page.rect, stream=buf.read())
     data = out_doc.tobytes(deflate=True, garbage=3)
     out_doc.close()
     return data
