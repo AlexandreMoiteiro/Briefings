@@ -165,20 +165,28 @@ def scale_and_crop_marks(
     bg=(255, 255, 255),
 ) -> Image.Image:
     """
-    Escala img para caber em content_w_cm x content_h_cm (mantendo proporcao),
-    centra num canvas branco com margem margin_cm a volta,
-    e desenha marcas de corte em L nos 4 cantos.
+    Escala img para caber em content_w_cm x content_h_cm (mantendo proporcao).
+    Centra num canvas com margem `margin_cm` em cada lado.
+    As marcas de corte em L ficam na margem, apontando para fora da area de conteudo:
+      - offset: pequeno gap entre o bordo do conteudo e o inicio do traco
+      - comprimento: dentro da margem (nunca sai do canvas)
     """
     from PIL import ImageDraw
 
     def cm2px(cm): return int(round(cm * dpi / 2.54))
 
-    cw = cm2px(content_w_cm)
-    ch = cm2px(content_h_cm)
-    mg = cm2px(margin_cm)
-    ml = cm2px(mark_len_cm)
-    mo = cm2px(mark_offset_cm)
+    cw = cm2px(content_w_cm)   # largura da area de conteudo
+    ch = cm2px(content_h_cm)   # altura da area de conteudo
+    mg = cm2px(margin_cm)      # margem branca em cada lado
+    ml = cm2px(mark_len_cm)    # comprimento do traco de corte
+    mo = cm2px(mark_offset_cm) # gap entre bordo do conteudo e inicio do traco
+    t  = mark_thick_px
 
+    # Garante que as marcas cabem na margem
+    # mo + ml deve ser <= mg; se nao, ajusta ml
+    ml = min(ml, mg - mo - 1)
+
+    # Escalar imagem para caber em cw x ch (letterbox)
     img_ratio    = img.width / img.height
     target_ratio = cw / ch
     if img_ratio > target_ratio:
@@ -187,28 +195,52 @@ def scale_and_crop_marks(
         new_w, new_h = round(ch * img_ratio), ch
     img_scaled = img.resize((new_w, new_h), Image.LANCZOS)
 
+    # Canvas total
     total_w = mg + cw + mg
     total_h = mg + ch + mg
     canvas = Image.new("RGB", (total_w, total_h), bg)
 
+    # Centrar imagem na area de conteudo
     x0 = mg + (cw - new_w) // 2
     y0 = mg + (ch - new_h) // 2
     canvas.paste(img_scaled, (x0, y0))
 
-    lx, rx = mg, mg + cw
-    ty, by = mg, mg + ch
+    # Coordenadas dos 4 cantos do rectangulo de corte
+    # (bordo da area de conteudo, dentro do canvas)
+    lx = mg          # x esquerdo do conteudo
+    rx = mg + cw     # x direito do conteudo
+    ty = mg          # y topo do conteudo
+    by = mg + ch     # y base do conteudo
+
     draw = ImageDraw.Draw(canvas)
-    t = mark_thick_px
 
     def L_mark(cx, cy, dx, dy):
-        hx0, hx1 = cx + dx * mo, cx + dx * (mo + ml)
-        draw.rectangle([min(hx0,hx1), cy - t//2, max(hx0,hx1), cy + t//2], fill=mark_color)
-        vy0, vy1 = cy + dy * mo, cy + dy * (mo + ml)
-        draw.rectangle([cx - t//2, min(vy0,vy1), cx + t//2, max(vy0,vy1)], fill=mark_color)
+        """
+        Marca em L no canto (cx, cy).
+        dx = +1 → traco horizontal aponta para a direita (fora do conteudo)
+        dx = -1 → aponta para a esquerda
+        dy = +1 → traco vertical aponta para baixo
+        dy = -1 → aponta para cima
+        Os tracos comecam a `mo` px do bordo e tem comprimento `ml`.
+        """
+        # traco horizontal: ao longo de y=cy, de cx+dx*mo ate cx+dx*(mo+ml)
+        hx0 = cx + dx * mo
+        hx1 = cx + dx * (mo + ml)
+        draw.rectangle([min(hx0, hx1), cy - t // 2,
+                        max(hx0, hx1), cy + t // 2], fill=mark_color)
+        # traco vertical: ao longo de x=cx, de cy+dy*mo ate cy+dy*(mo+ml)
+        vy0 = cy + dy * mo
+        vy1 = cy + dy * (mo + ml)
+        draw.rectangle([cx - t // 2, min(vy0, vy1),
+                        cx + t // 2, max(vy0, vy1)], fill=mark_color)
 
+    # Canto superior esquerdo: tracoes para esquerda e para cima
     L_mark(lx, ty, dx=-1, dy=-1)
+    # Canto superior direito: tracoes para direita e para cima
     L_mark(rx, ty, dx=+1, dy=-1)
+    # Canto inferior esquerdo: tracoes para esquerda e para baixo
     L_mark(lx, by, dx=-1, dy=+1)
+    # Canto inferior direito: tracoes para direita e para baixo
     L_mark(rx, by, dx=+1, dy=+1)
 
     return canvas
