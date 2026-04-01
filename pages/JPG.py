@@ -194,15 +194,13 @@ def fit_two_cards_on_a4(
     offset_right=(0.0, 0.0),
 ) -> tuple:
     """
-    Lógica:
-    - O canvas é sempre A4 paisagem (29.7 × 21 cm).
-    - Cada carta ocupa exactamente metade do canvas.
-    - A imagem é escalada por img_scale relativamente à metade.
+    - Canvas A4 paisagem.
+    - Cada carta ocupa metade da folha.
     - As marcas de corte são desenhadas numa área card_w_cm × card_h_cm
       centrada em cada metade.
-    - O risco do "meio" fica alinhado com a linha vertical de corte interna:
-        * carta esquerda  -> lado direito da carta
-        * carta direita   -> lado esquerdo da carta
+    - O risco do meio fica alinhado com a linha vertical interna de corte:
+        esquerda -> rx
+        direita  -> mx
     """
     def cm2px(cm):
         return int(round(cm * dpi / 2.54))
@@ -262,25 +260,14 @@ def fit_two_cards_on_a4(
 
     draw = ImageDraw.Draw(canvas)
 
+    def rect_safe(x0, y0, x1, y1):
+        draw.rectangle([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)], fill=mark_color)
+
     def dash_h(cx, cy):
-        x0 = cx - ml // 2
-        x1 = cx + ml // 2
-        y0 = cy - t // 2
-        y1 = cy + t // 2
-        draw.rectangle(
-            [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
-            fill=mark_color
-        )
+        rect_safe(cx - ml // 2, cy - t // 2, cx + ml // 2, cy + t // 2)
 
     def dash_v(cx, cy):
-        x0 = cx - t // 2
-        x1 = cx + t // 2
-        y0 = cy - ml // 2
-        y1 = cy + ml // 2
-        draw.rectangle(
-            [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
-            fill=mark_color
-        )
+        rect_safe(cx - t // 2, cy - ml // 2, cx + t // 2, cy + ml // 2)
 
     for half_x in (0, half_w):
         mx = half_x + mark_x_margin
@@ -297,23 +284,17 @@ def fit_two_cards_on_a4(
         ]:
             hx0 = cx + sx * mo
             hx1 = cx + sx * (mo + ml)
-            draw.rectangle(
-                [min(hx0, hx1), cy - t // 2, max(hx0, hx1), cy + t // 2],
-                fill=mark_color
-            )
+            rect_safe(hx0, cy - t // 2, hx1, cy + t // 2)
 
             vy0 = cy + sy * mo
             vy1 = cy + sy * (mo + ml)
-            draw.rectangle(
-                [cx - t // 2, min(vy0, vy1), cx + t // 2, max(vy0, vy1)],
-                fill=mark_color
-            )
+            rect_safe(cx - t // 2, vy0, cx + t // 2, vy1)
 
-        # Riscos laterais ao meio
+        # Riscos laterais centrais
         dash_v(mx - gap, mid_y)
         dash_v(rx + gap, mid_y)
 
-        # Risco do "meio" alinhado com a linha vertical interna de corte
+        # Riscos superior/inferior alinhados com a linha vertical interna de corte
         inner_x = rx if half_x == 0 else mx
         dash_h(inner_x, my - gap)
         dash_h(inner_x, by + gap)
@@ -333,10 +314,7 @@ def add_crop_marks_to_composed(
 ) -> Image.Image:
     """
     Recebe uma imagem já composta (2 cartas lado a lado) e sobrepõe
-    marcas de corte nos cantos de cada carta.
-    Calcula a posição das marcas com base nas dimensões reais da imagem
-    dividida ao meio, mas usa card_w_cm / card_h_cm para determinar onde
-    ficam as linhas de corte centradas em cada metade.
+    marcas de corte alinhadas com as linhas internas de corte.
     """
     def cm2px(cm):
         return int(round(cm * dpi / 2.54))
@@ -360,37 +338,20 @@ def add_crop_marks_to_composed(
     out = img.copy()
     draw = ImageDraw.Draw(out)
 
+    def rect_safe(x0, y0, x1, y1):
+        draw.rectangle([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)], fill=mark_color)
+
     def L_mark(cx, cy, dx, dy):
         hx0, hx1 = cx + dx * mo, cx + dx * (mo + ml)
-        draw.rectangle(
-            [min(hx0, hx1), cy - t // 2, max(hx0, hx1), cy + t // 2],
-            fill=mark_color
-        )
+        rect_safe(hx0, cy - t // 2, hx1, cy + t // 2)
         vy0, vy1 = cy + dy * mo, cy + dy * (mo + ml)
-        draw.rectangle(
-            [cx - t // 2, min(vy0, vy1), cx + t // 2, max(vy0, vy1)],
-            fill=mark_color
-        )
+        rect_safe(cx - t // 2, vy0, cx + t // 2, vy1)
 
     def dash_h(cx, cy):
-        x0 = cx - ml // 2
-        x1 = cx + ml // 2
-        y0 = cy - t // 2
-        y1 = cy + t // 2
-        draw.rectangle(
-            [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
-            fill=mark_color
-        )
+        rect_safe(cx - ml // 2, cy - t // 2, cx + ml // 2, cy + t // 2)
 
     def dash_v(cx, cy):
-        x0 = cx - t // 2
-        x1 = cx + t // 2
-        y0 = cy - ml // 2
-        y1 = cy + ml // 2
-        draw.rectangle(
-            [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
-            fill=mark_color
-        )
+        rect_safe(cx - t // 2, cy - ml // 2, cx + t // 2, cy + ml // 2)
 
     for ox in (lx1, lx2):
         rx_ = ox + cw
@@ -415,10 +376,9 @@ def add_crop_marks_to_composed(
 def combine_for_duplex_crop(raw_left: list, raw_right: list, opts: dict) -> list:
     """
     Modo duplex COM marcas de corte.
-    raw_left[i] / raw_right[i] são as faces frente/verso do par i.
     Cada A4 físico comporta 2 pares:
-      Frente do A4: par[i]_frente (esq) + par[i+1]_frente (dir)
-      Verso  do A4: par[i+1]_verso (esq) + par[i]_verso   (dir)
+      Frente: par A frente + par B frente
+      Verso : par B verso  + par A verso
     """
     bg = opts.get("bg", (255, 255, 255))
     dpi = opts["dpi"]
@@ -462,7 +422,6 @@ def combine_for_duplex_crop(raw_left: list, raw_right: list, opts: dict) -> list
 def combine_for_duplex_simple(raw_left: list, raw_right: list, opts: dict) -> list:
     """
     Modo duplex SEM marcas de corte.
-    Mesma lógica de pares: 2 pares por A4, frente/verso espelhados.
     """
     bg = opts.get("bg", (255, 255, 255))
     align_by = opts.get("align_by", "height")
@@ -527,7 +486,7 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
     else:
         merged_images = []
         had_overflow = False
-        for i, (left, right) in enumerate(zip(raw_left, raw_right)):
+        for left, right in zip(raw_left, raw_right):
             if do_crop:
                 merged, overflow = fit_two_cards_on_a4(
                     left, right,
@@ -544,7 +503,6 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
                     had_overflow = True
             else:
                 merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
-                overflow = False
             merged_images.append(merged)
 
         if len(merged_images) == 1:
@@ -592,11 +550,13 @@ def process_dual(pdf_a: bytes, pdf_b: bytes, opts: dict):
         if da.page_count < 1:
             raise ValueError("PDF A inválido.")
         left = render_page(da.load_page(0), dpi, bg)
+
     progress.progress(0.5, text="A processar PDF B…")
     with fitz.open(stream=pdf_b, filetype="pdf") as db:
         if db.page_count < 1:
             raise ValueError("PDF B inválido.")
         right = render_page(db.load_page(0), dpi, bg)
+
     progress.progress(0.9, text="A juntar…")
 
     if sharpen:
@@ -615,6 +575,7 @@ def process_dual(pdf_a: bytes, pdf_b: bytes, opts: dict):
         )
     else:
         merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
+
     progress.empty()
 
     out = encode_image(merged, fmt)
@@ -640,21 +601,14 @@ def show_result(out_bytes, mime, ext, fname, n_pages, pairs_count, dpi, overflow
     )
 
 
-def show_previews(merged_images, preview_width, preview_1to1):
-    if len(merged_images) == 1:
-        st.image(make_preview(merged_images[0], preview_width, preview_1to1))
-    else:
-        cols = st.columns(min(len(merged_images), 3))
-        for idx, img in enumerate(merged_images):
-            with cols[idx % 3]:
-                st.image(make_preview(img, preview_width // 3, False), caption=f"Pág. {idx + 1}")
-
-
 def show_download(out_bytes, mime, fname, key):
     st.download_button(
-        f"⬇️  Descarregar {fname}", data=out_bytes,
-        file_name=fname, mime=mime,
-        use_container_width=True, key=key,
+        f"⬇️  Descarregar {fname}",
+        data=out_bytes,
+        file_name=fname,
+        mime=mime,
+        use_container_width=True,
+        key=key,
     )
 
 
@@ -670,14 +624,18 @@ def _init_state():
     if "crop_ratio" not in st.session_state:
         st.session_state["crop_ratio"] = st.session_state["crop_h"] / st.session_state["crop_w"]
 
+
 def _on_crop_w_change():
     st.session_state["crop_h"] = round(st.session_state["crop_w"] * st.session_state["crop_ratio"], 1)
+
 
 def _on_crop_h_change():
     st.session_state["crop_w"] = round(st.session_state["crop_h"] / st.session_state["crop_ratio"], 1)
 
+
 def _on_ratio_toggle():
     st.session_state["crop_ratio"] = st.session_state["crop_h"] / max(st.session_state["crop_w"], 0.1)
+
 
 _init_state()
 
@@ -688,10 +646,14 @@ _init_state()
 with st.sidebar:
     st.markdown("## ⚙️  Opções")
     st.divider()
-    dpi = st.slider("DPI", 72, 600, 300, 50,
-                    help="Resolução de rasterização. Valores altos = mais qualidade e mais tempo.")
+
+    dpi = st.slider(
+        "DPI", 72, 600, 300, 50,
+        help="Resolução de rasterização. Valores altos = mais qualidade e mais tempo."
+    )
     if dpi > 400:
         st.caption("⚠️ DPI alto — processamento pode ser lento em PDFs com muitas páginas.")
+
     fmt = st.radio("Formato de saída", ["PNG", "JPG"], horizontal=True)
     align_by = st.radio("Alinhar por", ["height", "width"], horizontal=True)
     gap_px = st.slider("Espaço entre páginas (px)", 0, 200, 0, 4)
@@ -701,20 +663,27 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**Impressão frente/verso**")
-    duplex = st.toggle("Modo frente/verso", value=False,
-                       help=(
-                           "Cada par (frente/verso) ocupa metade de um A4.\n"
-                           "O A4 leva 2 pares: frente=[par1 + par2], verso=[par2 + par1] (espelhado).\n"
-                           "Imprime frente/verso e corta o A4 ao meio."
-                       ))
+    duplex = st.toggle(
+        "Modo frente/verso",
+        value=False,
+        help=(
+            "Cada par (frente/verso) ocupa metade de um A4.\n"
+            "O A4 leva 2 pares: frente=[par1 + par2], verso=[par2 + par1] (espelhado).\n"
+            "Imprime frente/verso e corta o A4 ao meio."
+        )
+    )
 
     st.divider()
     st.markdown("**Marcas de corte (A4 paisagem)**")
-    crop_marks = st.toggle("Activar marcas de corte", value=False,
-                           help="Posiciona duas cartas num A4 paisagem com marcas de corte nos cantos.")
+    crop_marks = st.toggle(
+        "Activar marcas de corte",
+        value=False,
+        help="Posiciona duas cartas num A4 paisagem com marcas de corte nos cantos."
+    )
+
     if crop_marks:
-        ratio_lock = st.toggle("🔒 Manter proporção", value=True, key="ratio_lock",
-                               on_change=_on_ratio_toggle)
+        ratio_lock = st.toggle("🔒 Manter proporção", value=True, key="ratio_lock", on_change=_on_ratio_toggle)
+
         c1, c2 = st.columns(2)
         with c1:
             st.number_input(
@@ -732,6 +701,7 @@ with st.sidebar:
                 key="crop_h",
                 on_change=_on_crop_h_change if ratio_lock else None,
             )
+
         crop_w = st.session_state["crop_w"]
         crop_h = st.session_state["crop_h"]
 
@@ -739,12 +709,9 @@ with st.sidebar:
         st.caption(
             "Ajusta o tamanho da imagem relativamente às linhas de corte. "
             "100% = preenche exatamente. Abaixo de 100% = margem branca interior. "
-            "Acima de 100% = sangria (bleed) — a imagem ultrapassa ligeiramente a linha de corte."
+            "Acima de 100% = sangria (bleed)."
         )
-        img_scale = st.slider(
-            "Escala da imagem (%)", 40, 130, 100, 1,
-            help="As linhas de corte não se movem. Só a imagem escala."
-        ) / 100.0
+        img_scale = st.slider("Escala da imagem (%)", 40, 130, 100, 1) / 100.0
         crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 20, 6, 1) / 10
 
         st.markdown("**Posição das cartas**")
@@ -767,11 +734,13 @@ with st.sidebar:
     preview_width = st.slider("Largura máx. (px)", 400, 2000, 900, 100)
     preview_1to1 = st.toggle("Mostrar 1:1", value=False)
 
-OPTS = dict(dpi=dpi, fmt=fmt, align_by=align_by, gap_px=gap_px, bg=BG, sharpen=sharpen,
-            crop_marks=crop_marks, crop_w=crop_w, crop_h=crop_h, crop_marklen=crop_marklen,
-            img_scale=img_scale, duplex=duplex,
-            offset_lx=offset_lx, offset_ly=offset_ly,
-            offset_rx=offset_rx, offset_ry=offset_ry)
+OPTS = dict(
+    dpi=dpi, fmt=fmt, align_by=align_by, gap_px=gap_px, bg=BG, sharpen=sharpen,
+    crop_marks=crop_marks, crop_w=crop_w, crop_h=crop_h, crop_marklen=crop_marklen,
+    img_scale=img_scale, duplex=duplex,
+    offset_lx=offset_lx, offset_ly=offset_ly,
+    offset_rx=offset_rx, offset_ry=offset_ry,
+)
 
 
 # ─────────────────────────────────────────────
@@ -839,9 +808,11 @@ with tab_normal:
 
             res = st.session_state.get(fkey)
             if res:
-                show_result(res["out_bytes"], res["mime"], res["ext"],
-                            res["fname"], res["n_pages"], res["n_pairs"], dpi,
-                            overflow=res.get("overflow", False))
+                show_result(
+                    res["out_bytes"], res["mime"], res["ext"],
+                    res["fname"], res["n_pages"], res["n_pairs"], dpi,
+                    overflow=res.get("overflow", False)
+                )
                 if len(res["preview_bytes"]) == 1:
                     st.image(res["preview_bytes"][0])
                 else:
@@ -882,12 +853,15 @@ with tab_dual:
         dkey = f"dual_res_{file_a.name}_{file_a.size}_{file_b.name}_{file_b.size}_{opts_sig_d}"
 
         if dkey not in st.session_state:
-            old_keys = [k for k in st.session_state if k.startswith(f"dual_res_{file_a.name}_{file_a.size}_{file_b.name}_{file_b.size}_")]
+            old_keys = [k for k in st.session_state if k.startswith(
+                f"dual_res_{file_a.name}_{file_a.size}_{file_b.name}_{file_b.size}_"
+            )]
             for k in old_keys:
                 del st.session_state[k]
             try:
                 out_bytes, mime, ext, merged_img, overflow = process_dual(
-                    st.session_state[ba_key], st.session_state[bb_key], OPTS)
+                    st.session_state[ba_key], st.session_state[bb_key], OPTS
+                )
                 name_a = file_a.name.rsplit(".", 1)[0]
                 name_b = file_b.name.rsplit(".", 1)[0]
                 fname = f"{name_a}+{name_b}.{ext}"
@@ -900,8 +874,7 @@ with tab_dual:
 
         res = st.session_state.get(dkey)
         if res:
-            show_result(res["out_bytes"], res["mime"], res["ext"], res["fname"],
-                        None, 1, dpi, overflow=res.get("overflow", False))
+            show_result(res["out_bytes"], res["mime"], res["ext"], res["fname"], None, 1, dpi, overflow=res.get("overflow", False))
             st.image(res["preview"])
             show_download(res["out_bytes"], res["mime"], res["fname"], f"dl_{dkey}")
     elif file_a or file_b:
@@ -914,9 +887,7 @@ with tab_dual:
 # Tab Arranjo
 # ══════════════════════════════════════════════
 with tab_arrange:
-    st.markdown(
-        "Carregue um PDF, **arraste** as páginas para os pares e clique **Gerar**."
-    )
+    st.markdown("Carregue um PDF, **arraste** as páginas para os pares e clique **Gerar**.")
 
     arr_file = st.file_uploader("Escolher PDF", type=["pdf"], key="arrange_up")
 
@@ -1058,6 +1029,7 @@ function renderPairs() {{
       <button class="pair-delete" onclick="removePair(${{pi}})">✕</button>`;
     list.appendChild(row);
   }});
+
   document.querySelectorAll('.pair-slot').forEach(slot => {{
     slot.addEventListener('dragover', e => {{ e.preventDefault(); slot.classList.add('over'); }});
     slot.addEventListener('dragleave', () => slot.classList.remove('over'));
@@ -1065,17 +1037,18 @@ function renderPairs() {{
       e.preventDefault(); slot.classList.remove('over');
       if (dragSrc === null) return;
       const pi = parseInt(slot.dataset.pair), side = slot.dataset.side;
-      if (dragSrc.origin === 'slot') pairs[dragSrc.pairIdx][dragSrc.side==='L'?0:1] = -1;
-      pairs[pi][side==='L'?0:1] = dragSrc.pageIdx;
+      if (dragSrc.origin === 'slot') pairs[dragSrc.pairIdx][dragSrc.side === 'L' ? 0 : 1] = -1;
+      pairs[pi][side === 'L' ? 0 : 1] = dragSrc.pageIdx;
       dragSrc = null; render();
     }});
   }});
+
   document.querySelectorAll('.pair-slot.filled').forEach(slot => {{
     const pi = parseInt(slot.dataset.pair), side = slot.dataset.side;
-    const pgIdx = pairs[pi][side==='L'?0:1];
+    const pgIdx = pairs[pi][side === 'L' ? 0 : 1];
     slot.setAttribute('draggable','true');
     slot.addEventListener('dragstart', e => {{
-      dragSrc = {{pageIdx:pgIdx, origin:'slot', pairIdx:pi, side}};
+      dragSrc = {{pageIdx: pgIdx, origin:'slot', pairIdx:pi, side}};
       slot.classList.add('dragging');
     }});
     slot.addEventListener('dragend', () => slot.classList.remove('dragging'));
@@ -1083,35 +1056,41 @@ function renderPairs() {{
 }}
 
 function slotHTML(pi, side) {{
-  const pageIdx = side==='L' ? pairs[pi][0] : pairs[pi][1];
+  const pageIdx = side === 'L' ? pairs[pi][0] : pairs[pi][1];
   const filled = pageIdx >= 0;
-  return `<div class="pair-slot ${{filled?'filled':''}}" data-pair="${{pi}}" data-side="${{side}}">
+  return `<div class="pair-slot ${{filled ? 'filled' : ''}}" data-pair="${{pi}}" data-side="${{side}}">
     ${{filled ? `<img src="data:image/png;base64,${{THUMBS[pageIdx]}}" draggable="false">
       <div class="slot-lbl">Pág. ${{pageIdx+1}}</div>
       <div class="slot-rm" onclick="clearSlot(${{pi}},'${{side}}')">✕</div>`
-      : `<span>${{side==='L'?'Esquerda':'Direita'}}</span>`}}
+      : `<span>${{side === 'L' ? 'Esquerda' : 'Direita'}}</span>`}}
   </div>`;
 }}
 
 function addChipDrag(chip, pageIdx, origin, pairIdx, side) {{
   chip.addEventListener('dragstart', e => {{
-    dragSrc = {{pageIdx, origin, pairIdx, side}}; chip.classList.add('dragging');
+    dragSrc = {{pageIdx, origin, pairIdx, side}};
+    chip.classList.add('dragging');
   }});
   chip.addEventListener('dragend', () => chip.classList.remove('dragging'));
 }}
 
-function clearSlot(pi, side) {{ pairs[pi][side==='L'?0:1]=-1; render(); }}
-function removePair(pi) {{ pairs.splice(pi,1); render(); }}
-function addPair() {{ pairs.push([-1,-1]); render(); }}
+function clearSlot(pi, side) {{ pairs[pi][side === 'L' ? 0 : 1] = -1; render(); }}
+function removePair(pi) {{ pairs.splice(pi, 1); render(); }}
+function addPair() {{ pairs.push([-1, -1]); render(); }}
 function resetPairs() {{
-  pairs=[];
-  for(let i=0;i<Math.ceil(N/2);i++) pairs.push([i*2, i*2+1<N?i*2+1:-1]);
+  pairs = [];
+  for (let i = 0; i < Math.ceil(N / 2); i++) {{
+    pairs.push([i * 2, i * 2 + 1 < N ? i * 2 + 1 : -1]);
+  }}
   render();
 }}
 function emitPairs() {{
-  const invalid = pairs.some(p=>p[0]<0);
-  if(invalid) {{ document.getElementById('output').textContent='⚠️ Todos os pares precisam de uma página à esquerda.'; return; }}
-  document.getElementById('output').textContent='✓ Pares prontos — confirme abaixo e clique Gerar ficheiro.';
+  const invalid = pairs.some(p => p[0] < 0);
+  if (invalid) {{
+    document.getElementById('output').textContent = '⚠️ Todos os pares precisam de uma página à esquerda.';
+    return;
+  }}
+  document.getElementById('output').textContent = '✓ Pares prontos — confirme abaixo e clique Gerar ficheiro.';
   window.parent.postMessage({{type:'streamlit:setComponentValue', value: JSON.stringify(pairs)}}, '*');
 }}
 render();
@@ -1127,14 +1106,15 @@ render();
         st.caption("Clique 🚀 Gerar no editor acima, depois clique **Gerar ficheiro** abaixo.")
 
         pairs_json_edit = st.text_area(
-            "Pares (JSON)", value=json.dumps(saved_pairs),
-            height=68, key=f"pairs_json_{cache_key}",
+            "Pares (JSON)",
+            value=json.dumps(saved_pairs),
+            height=68,
+            key=f"pairs_json_{cache_key}",
         )
 
         try:
             edited_pairs = json.loads(pairs_json_edit)
-            assert isinstance(edited_pairs, list) and all(
-                isinstance(p, list) and len(p) == 2 for p in edited_pairs)
+            assert isinstance(edited_pairs, list) and all(isinstance(p, list) and len(p) == 2 for p in edited_pairs)
             st.session_state[cache_key + "_pairs"] = edited_pairs
         except Exception:
             st.warning("JSON inválido.", icon="⚠️")
@@ -1172,9 +1152,11 @@ render();
 
         res = st.session_state.get(cache_key + "_result")
         if res:
-            show_result(res["out_bytes"], res["mime"], res["ext"],
-                        res["fname"], res["n_pages"], res["n_pairs"], dpi,
-                        overflow=res.get("overflow", False))
+            show_result(
+                res["out_bytes"], res["mime"], res["ext"],
+                res["fname"], res["n_pages"], res["n_pairs"], dpi,
+                overflow=res.get("overflow", False)
+            )
             if len(res["preview_bytes"]) == 1:
                 st.image(res["preview_bytes"][0])
             else:
@@ -1226,7 +1208,8 @@ with tab_marks:
                         page_img = render_page(doc_m.load_page(pi), dpi, (255, 255, 255))
                         marked = add_crop_marks_to_composed(
                             page_img,
-                            card_w_cm=crop_w, card_h_cm=crop_h,
+                            card_w_cm=crop_w,
+                            card_h_cm=crop_h,
                             dpi=dpi,
                             mark_len_cm=crop_marklen,
                         )
