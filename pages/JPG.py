@@ -1,3 +1,7 @@
+# app.py — PDF Side-by-Side
+# Requisitos: streamlit, pymupdf (fitz), pillow
+# Execução: streamlit run app.py
+
 import io
 import math
 import base64
@@ -166,6 +170,65 @@ def thumb_to_bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+def draw_crop_marks_sparse(
+    draw: ImageDraw.ImageDraw,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    mark_len_px: int,
+    mark_thick_px: int = 3,
+    mark_color=(0, 0, 0),
+    include_middle: bool = True,
+):
+    """
+    Desenha marcas de corte SPARSE:
+    - cantos: pequenos segmentos horizontais + verticais
+    - meio: um segmento ao centro de cada lado
+    Em vez de tracejar a volta toda.
+    """
+    t = max(1, mark_thick_px)
+    seg = max(mark_len_px * 2, 12)
+
+    def hseg(xa, xb, y):
+        draw.rectangle(
+            [min(xa, xb), y - t // 2, max(xa, xb), y + t // 2],
+            fill=mark_color
+        )
+
+    def vseg(x, ya, yb):
+        draw.rectangle(
+            [x - t // 2, min(ya, yb), x + t // 2, max(ya, yb)],
+            fill=mark_color
+        )
+
+    # Cantos
+    hseg(x1, x1 + seg, y1)  # topo esq
+    vseg(x1, y1, y1 + seg)
+
+    hseg(x2 - seg, x2, y1)  # topo dir
+    vseg(x2, y1, y1 + seg)
+
+    hseg(x1, x1 + seg, y2)  # base esq
+    vseg(x1, y2 - seg, y2)
+
+    hseg(x2 - seg, x2, y2)  # base dir
+    vseg(x2, y2 - seg, y2)
+
+    if include_middle:
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        mid_seg = max(int(seg * 0.8), 10)
+
+        # meio topo / base
+        hseg(cx - mid_seg // 2, cx + mid_seg // 2, y1)
+        hseg(cx - mid_seg // 2, cx + mid_seg // 2, y2)
+
+        # meio esquerda / direita
+        vseg(x1, cy - mid_seg // 2, cy + mid_seg // 2)
+        vseg(x2, cy - mid_seg // 2, cy + mid_seg // 2)
+
+
 def fit_two_cards_on_a4(
     left: Image.Image,
     right: Image.Image,
@@ -243,37 +306,12 @@ def fit_two_cards_on_a4(
 
     draw = ImageDraw.Draw(canvas)
 
-    def h_mark(cx, cy, length):
-        draw.rectangle(
-            [cx - length // 2, cy - t // 2, cx + length // 2, cy + t // 2],
-            fill=mark_color
-        )
-
-    def v_mark(cx, cy, length):
-        draw.rectangle(
-            [cx - t // 2, cy - length // 2, cx + t // 2, cy + length // 2],
-            fill=mark_color
-        )
-
-    def L_mark(cx, cy, dx, dy):
-        """
-        Marca em L num canto.
-        dx = -1 ou +1  -> horizontal vai para esquerda/direita
-        dy = -1 ou +1  -> vertical vai para cima/baixo
-        """
-        hx0 = cx + dx * mo
-        hx1 = cx + dx * (mo + ml)
-        draw.rectangle(
-            [min(hx0, hx1), cy - t // 2, max(hx0, hx1), cy + t // 2],
-            fill=mark_color
-        )
-
-        vy0 = cy + dy * mo
-        vy1 = cy + dy * (mo + ml)
-        draw.rectangle(
-            [cx - t // 2, min(vy0, vy1), cx + t // 2, max(vy0, vy1)],
-            fill=mark_color
-        )
+    overflow = (
+        mark_x_margin < 0 or
+        mark_y_margin < 0 or
+        (mark_x_margin + cw) > half_w or
+        (mark_y_margin + ch) > a4_h
+    )
 
     for half_x in (0, half_w):
         mx = half_x + mark_x_margin
@@ -281,22 +319,16 @@ def fit_two_cards_on_a4(
         rx = mx + cw
         by = my + ch
 
-        mid_x = (mx + rx) // 2
-        mid_y = (my + by) // 2
+        draw_crop_marks_sparse(
+            draw,
+            mx, my, rx, by,
+            mark_len_px=ml,
+            mark_thick_px=t,
+            mark_color=mark_color,
+            include_middle=True,
+        )
 
-        # 4 cantos
-        L_mark(mx, my, -1, -1)
-        L_mark(rx, my, +1, -1)
-        L_mark(mx, by, -1, +1)
-        L_mark(rx, by, +1, +1)
-
-        # meio dos 4 lados
-        h_mark(mid_x, my - mo - ml // 2, ml)
-        h_mark(mid_x, by + mo + ml // 2, ml)
-        v_mark(mx - mo - ml // 2, mid_y, ml)
-        v_mark(rx + mo + ml // 2, mid_y, ml)
-
-    return canvas, False
+    return canvas, overflow
 
 
 def add_crop_marks_to_composed(
@@ -311,13 +343,12 @@ def add_crop_marks_to_composed(
 ) -> Image.Image:
     """
     Recebe uma imagem já composta (2 cartas lado a lado) e sobrepõe
-    marcas de corte nos cantos e a meio de cada lado.
+    marcas de corte apenas nos cantos e a meio de cada lado.
     """
     def cm2px(cm): return int(round(cm * dpi / 2.54))
 
     W, H = img.size
     ml  = cm2px(mark_len_cm)
-    mo  = cm2px(mark_offset_cm)
     t   = mark_thick_px
     cw  = cm2px(card_w_cm)
     ch  = cm2px(card_h_cm)
@@ -326,56 +357,24 @@ def add_crop_marks_to_composed(
     margin_x = (half_w - cw) // 2
     margin_y = (H - ch) // 2
 
+    lx1 = margin_x
+    lx2 = half_w + margin_x
+    ty  = margin_y
+    by  = margin_y + ch
+
     out = img.copy()
     draw = ImageDraw.Draw(out)
 
-    def h_mark(cx, cy, length):
-        draw.rectangle(
-            [cx - length // 2, cy - t // 2, cx + length // 2, cy + t // 2],
-            fill=mark_color
+    for ox in (lx1, lx2):
+        rx_ = ox + cw
+        draw_crop_marks_sparse(
+            draw,
+            ox, ty, rx_, by,
+            mark_len_px=ml,
+            mark_thick_px=t,
+            mark_color=mark_color,
+            include_middle=True,
         )
-
-    def v_mark(cx, cy, length):
-        draw.rectangle(
-            [cx - t // 2, cy - length // 2, cx + t // 2, cy + length // 2],
-            fill=mark_color
-        )
-
-    def L_mark(cx, cy, dx, dy):
-        hx0 = cx + dx * mo
-        hx1 = cx + dx * (mo + ml)
-        draw.rectangle(
-            [min(hx0, hx1), cy - t // 2, max(hx0, hx1), cy + t // 2],
-            fill=mark_color
-        )
-
-        vy0 = cy + dy * mo
-        vy1 = cy + dy * (mo + ml)
-        draw.rectangle(
-            [cx - t // 2, min(vy0, vy1), cx + t // 2, max(vy0, vy1)],
-            fill=mark_color
-        )
-
-    for half_start_x in (0, half_w):
-        mx = half_start_x + margin_x
-        my = margin_y
-        rx = mx + cw
-        by = my + ch
-
-        mid_x = (mx + rx) // 2
-        mid_y = (my + by) // 2
-
-        # cantos
-        L_mark(mx, my, -1, -1)
-        L_mark(rx, my, +1, -1)
-        L_mark(mx, by, -1, +1)
-        L_mark(rx, by, +1, +1)
-
-        # meios
-        h_mark(mid_x, my - mo - ml // 2, ml)
-        h_mark(mid_x, by + mo + ml // 2, ml)
-        v_mark(mx - mo - ml // 2, mid_y, ml)
-        v_mark(rx + mo + ml // 2, mid_y, ml)
 
     return out
 
