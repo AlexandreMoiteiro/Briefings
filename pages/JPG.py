@@ -425,13 +425,13 @@ with st.sidebar:
     st.divider()
     st.markdown("**Escala + Marcas de corte**")
     crop_marks = st.toggle("Escalar e adicionar marcas de corte", value=False,
-                           help="Escala cada imagem para 13.3×20.5 cm e adiciona marcas de corte em L.")
+                           help="Escala cada carta para caber em card_w × card_h cm (portrait) e posiciona duas num A4 paisagem com marcas de corte em L.")
     if crop_marks:
         c1, c2 = st.columns(2)
         with c1:
-            crop_w = st.number_input("Largura (cm)", value=20.5, step=0.1, format="%.1f")
+            crop_w = st.number_input("Largura (cm)", value=13.3, step=0.1, format="%.1f")
         with c2:
-            crop_h = st.number_input("Altura (cm)",  value=13.3, step=0.1, format="%.1f")
+            crop_h = st.number_input("Altura (cm)",  value=20.5, step=0.1, format="%.1f")
         crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 15, 4, 1) / 10
     else:
         crop_w, crop_h, crop_marklen = 13.3, 20.5, 0.4
