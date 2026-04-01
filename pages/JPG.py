@@ -129,15 +129,29 @@ def encode_image(img: Image.Image, fmt: str) -> bytes:
     return bio.getvalue()
 
 
-def images_to_pdf_bytes(images: list) -> bytes:
+def images_to_pdf_bytes(images: list, dpi: int = 300) -> bytes:
+    """
+    Converte imagens para PDF com dimensões físicas correctas.
+    A página é definida em pontos (pt) com base no DPI de rasterização,
+    para que a impressora não tente reescalar.
+    72 pt = 1 polegada → page_width_pt = pixel_width * 72 / dpi
+    """
     out_doc = fitz.open()
     for img in images:
-        w, h = img.size
-        page = out_doc.new_page(width=w, height=h)
+        w_px, h_px = img.size
+        # Converter pixels → pontos usando o DPI real
+        w_pt = w_px * 72.0 / dpi
+        h_pt = h_px * 72.0 / dpi
+        page = out_doc.new_page(width=w_pt, height=h_pt)
         buf  = io.BytesIO()
         img.save(buf, format="PNG", optimize=False)
         buf.seek(0)
         page.insert_image(page.rect, stream=buf.read())
+    # Metadados que dizem à impressora: não escales, não ajustes margens
+    out_doc.set_metadata({
+        "creator": "PDF Side-by-Side",
+        "producer": "PyMuPDF",
+    })
     data = out_doc.tobytes(deflate=True, garbage=3)
     out_doc.close()
     return data
@@ -161,10 +175,10 @@ def thumb_to_bytes(img: Image.Image) -> bytes:
 def fit_two_cards_on_a4(
     left: Image.Image,
     right: Image.Image,
-    card_w_cm: float = 13.0,
-    card_h_cm: float = 20.5,
+    card_w_cm: float = 14.8,
+    card_h_cm: float = 21.0,
     img_scale: float = 1.0,
-    dpi: int = 500,
+    dpi: int = 300,
     mark_len_cm: float = 0.4,
     mark_offset_cm: float = 0.15,
     mark_thick_px: int = 3,
@@ -172,115 +186,165 @@ def fit_two_cards_on_a4(
     bg=(255, 255, 255),
 ) -> tuple:
     """
-    Coloca duas cartas num canvas A4 paisagem (29.7x21 cm).
-    - card_w_cm / card_h_cm: dimensões FIXAS do cartão (área de corte — as marcas ficam aqui)
-    - img_scale: escala da imagem DENTRO do cartão (1.0 = preenche, <1 = mais margem branca)
-      As linhas de corte NÃO se movem; só a imagem dentro delas é que escala.
-    Se as cartas forem maiores que o A4, o canvas expande e as marcas ficam por cima.
-    Devolve (Image, overflow: bool).
+    Lógica correcta:
+    - O canvas é sempre A4 paisagem (29.7 × 21 cm).
+    - Cada carta ocupa exactamente metade do canvas (A5 landscape).
+    - A imagem é escalada por img_scale relativamente à metade:
+        img_scale=1.0 → a carta preenche exactamente a metade do A4 (sem margens)
+        img_scale<1.0 → a carta fica menor, com margem branca à volta
+        img_scale>1.0 → a carta fica maior, partes ficam fora da área visível (bleed)
+    - As marcas de corte são desenhadas na posição pedida (card_w_cm × card_h_cm),
+      centradas em cada metade — independentemente da escala da imagem.
+    - A imagem NÃO é escalada para caber dentro das marcas; as marcas é que indicam
+      onde cortar, podendo ficar dentro ou fora da área da imagem.
+    Devolve (Image, overflow: bool) onde overflow indica se as marcas ficam
+    fora da margem disponível.
     """
     def cm2px(cm): return int(round(cm * dpi / 2.54))
 
+    # Canvas A4 paisagem
     a4_w = cm2px(29.7)
     a4_h = cm2px(21.0)
-    cw   = cm2px(card_w_cm)   # largura do cartão (área de corte) — FIXA
-    ch   = cm2px(card_h_cm)   # altura do cartão (área de corte) — FIXA
-    ml   = cm2px(mark_len_cm)
-    mo   = cm2px(mark_offset_cm)
-    t    = mark_thick_px
+    half_w = a4_w // 2          # largura de cada metade (onde a carta vai)
 
-    def scale_img_into_card(img):
+    # Dimensões das marcas de corte (pedidas pelo utilizador) — FIXAS
+    cw = cm2px(card_w_cm)
+    ch = cm2px(card_h_cm)
+    ml = cm2px(mark_len_cm)
+    mo = cm2px(mark_offset_cm)
+    t  = mark_thick_px
+
+    canvas = Image.new("RGB", (a4_w, a4_h), bg)
+
+    def place_card(img, half_x_start):
         """
-        Escala img para target_w × target_h = cw*img_scale × ch*img_scale (letterbox).
-        img_scale < 1.0 → margem branca dentro do cartão.
-        img_scale = 1.0 → imagem preenche exatamente o cartão.
-        img_scale > 1.0 → imagem sangra para além das linhas de corte (bleed).
-        As linhas de corte ficam sempre em cw × ch — não se movem.
+        Coloca a imagem centrada na metade do A4 indicada, escalada por img_scale.
+        img_scale aplica-se relativamente ao tamanho da metade do A4.
         """
-        target_w = max(1, int(cw * img_scale))
-        target_h = max(1, int(ch * img_scale))
+        # Dimensões alvo = metade do A4 * img_scale (letterbox)
+        target_w = max(1, int(half_w * img_scale))
+        target_h = max(1, int(a4_h  * img_scale))
         r  = img.width / img.height
         tr = target_w / target_h
         if r > tr:
             nw, nh = target_w, max(1, round(target_w / r))
         else:
             nw, nh = max(1, round(target_h * r)), target_h
-        # SEM clamp — imagem pode ultrapassar o cartão quando img_scale > 1
-        return img.resize((nw, nh), Image.LANCZOS)
 
-    left_s  = scale_img_into_card(left)
-    right_s = scale_img_into_card(right)
+        img_s = img.resize((nw, nh), Image.LANCZOS)
 
-    # Verifica se os cartões cabem no A4
-    min_gap_h = cm2px(0.15)
-    min_gap_v = cm2px(0.1)
-    natural_gap_h = (a4_w - cw * 2) // 3
-    natural_gap_v = (a4_h - ch) // 2
-    overflow = natural_gap_h < min_gap_h or natural_gap_v < min_gap_v
+        # Centra na metade do canvas
+        px = half_x_start + (half_w - nw) // 2
+        py = (a4_h - nh) // 2
 
-    if overflow:
-        mg = cm2px(0.5)
-        canvas_w = mg + cw + mg + cw + mg
-        canvas_h = mg + ch + mg
-        gap_h, gap_v = mg, mg
-        canvas = Image.new("RGB", (canvas_w, canvas_h), bg)
-    else:
-        gap_h, gap_v = natural_gap_h, natural_gap_v
-        canvas = Image.new("RGB", (a4_w, a4_h), bg)
-
-    # Origens (canto superior-esquerdo) de cada cartão no canvas
-    lx1 = gap_h
-    lx2 = gap_h + cw + gap_h
-    ly  = gap_v
-
-    def paste_centered(img_s, ox, oy):
-        """
-        Centra a imagem dentro da caixa do cartão (ox,oy)→(ox+cw, oy+ch).
-        Se img_scale > 1 a imagem é maior que o cartão — corta nas bordas do cartão
-        para não invadir a margem/outra carta.
-        """
-        px = ox + (cw - img_s.width)  // 2
-        py = oy + (ch - img_s.height) // 2
-        if img_s.width > cw or img_s.height > ch:
-            # calcular região de recorte da imagem que cabe no cartão
-            src_x = max(0, -px + ox)
-            src_y = max(0, -py + oy)
-            src_x2 = src_x + cw
-            src_y2 = src_y + ch
-            img_s = img_s.crop((src_x, src_y, min(src_x2, img_s.width), min(src_y2, img_s.height)))
-            px, py = ox, oy
+        if nw > half_w or nh > a4_h:
+            # bleed: cortar o que ultrapassa a metade
+            src_x = max(0, -px + half_x_start)
+            src_y = max(0, -py)
+            src_x2 = src_x + half_w
+            src_y2 = src_y + a4_h
+            img_s = img_s.crop((src_x, src_y,
+                                 min(src_x2, img_s.width),
+                                 min(src_y2, img_s.height)))
+            px = half_x_start
+            py = 0
         canvas.paste(img_s, (px, py))
 
-    paste_centered(left_s,  lx1, ly)
-    paste_centered(right_s, lx2, ly)
+    place_card(left,  0)
+    place_card(right, half_w)
 
-    # Marcas de corte nos cantos de cada cartão
-    # As marcas baseiam-se sempre em cw/ch (dimensões fixas do cartão)
-    ml_eff = max(min(ml, gap_h - mo - 2, gap_v - mo - 2), 6) if not overflow else max(ml, 6)
+    # Marcas de corte centradas em cada metade, na posição pedida (card_w_cm × card_h_cm)
+    # Overflow = marcas ficam fora do espaço de margem disponível
+    mark_x_margin = (half_w - cw) // 2   # margem horizontal entre borda da metade e marca
+    mark_y_margin = (a4_h  - ch) // 2    # margem vertical entre borda do canvas e marca
+    overflow = mark_x_margin < mo + ml or mark_y_margin < mo + ml
 
     draw = ImageDraw.Draw(canvas)
 
     def L_mark(cx, cy, dx, dy):
-        hx0, hx1 = cx + dx * mo, cx + dx * (mo + ml_eff)
+        hx0, hx1 = cx + dx * mo, cx + dx * (mo + ml)
         draw.rectangle([min(hx0,hx1), cy - t//2,
                         max(hx0,hx1), cy + t//2], fill=mark_color)
-        vy0, vy1 = cy + dy * mo, cy + dy * (mo + ml_eff)
+        vy0, vy1 = cy + dy * mo, cy + dy * (mo + ml)
         draw.rectangle([cx - t//2, min(vy0,vy1),
                         cx + t//2, max(vy0,vy1)], fill=mark_color)
 
-    for ox in (lx1, lx2):
-        rx_ = ox + cw; ty_ = ly; by_ = ly + ch
-        L_mark(ox,  ty_, -1, -1)
-        L_mark(rx_, ty_, +1, -1)
-        L_mark(ox,  by_, -1, +1)
-        L_mark(rx_, by_, +1, +1)
+    for half_x in (0, half_w):
+        # Canto superior-esquerdo da área de corte nesta metade
+        mx = half_x + mark_x_margin
+        my = mark_y_margin
+        # 4 cantos
+        L_mark(mx,      my,      -1, -1)
+        L_mark(mx + cw, my,      +1, -1)
+        L_mark(mx,      my + ch, -1, +1)
+        L_mark(mx + cw, my + ch, +1, +1)
 
     return canvas, overflow
 
 
-# ─────────────────────────────────────────────
-# Modo impressão frente/verso
-# ─────────────────────────────────────────────
+def add_crop_marks_to_composed(
+    img: Image.Image,
+    card_w_cm: float = 13.0,
+    card_h_cm: float = 20.5,
+    dpi: int = 300,
+    mark_len_cm: float = 0.4,
+    mark_offset_cm: float = 0.15,
+    mark_thick_px: int = 3,
+    mark_color=(0, 0, 0),
+) -> Image.Image:
+    """
+    Recebe uma imagem já composta (2 cartas lado a lado) e sobrepõe
+    marcas de corte nos cantos de cada carta.
+    Calcula a posição das marcas com base nas dimensões reais da imagem
+    dividida ao meio (carta esq = metade esquerda, carta dir = metade direita),
+    mas usa card_w_cm / card_h_cm para determinar onde ficam as linhas de corte
+    centradas em cada metade.
+    """
+    def cm2px(cm): return int(round(cm * dpi / 2.54))
+
+    W, H = img.size
+    ml  = cm2px(mark_len_cm)
+    mo  = cm2px(mark_offset_cm)
+    t   = mark_thick_px
+    cw  = cm2px(card_w_cm)
+    ch  = cm2px(card_h_cm)
+
+    # Cada metade da imagem tem largura W//2
+    half_w = W // 2
+
+    # Centra a área de corte em cada metade
+    # Carta esquerda: x de 0 a half_w, centrada → margem horizontal = (half_w - cw) / 2
+    # Carta direita:  x de half_w a W, centrada
+    margin_x = (half_w - cw) // 2
+    margin_y = (H - ch) // 2
+
+    # Origens do rectângulo de corte de cada carta
+    lx1 = margin_x                  # esquerda da carta esq
+    lx2 = half_w + margin_x         # esquerda da carta dir
+    ty  = margin_y                  # topo das cartas
+    by  = margin_y + ch             # base das cartas
+
+    out = img.copy()
+    draw = ImageDraw.Draw(out)
+
+    def L_mark(cx, cy, dx, dy):
+        hx0, hx1 = cx + dx * mo, cx + dx * (mo + ml)
+        draw.rectangle([min(hx0,hx1), cy - t//2,
+                        max(hx0,hx1), cy + t//2], fill=mark_color)
+        vy0, vy1 = cy + dy * mo, cy + dy * (mo + ml)
+        draw.rectangle([cx - t//2, min(vy0,vy1),
+                        cx + t//2, max(vy0,vy1)], fill=mark_color)
+
+    for ox in (lx1, lx2):
+        rx_ = ox + cw
+        L_mark(ox,  ty, -1, -1)
+        L_mark(rx_, ty, +1, -1)
+        L_mark(ox,  by, -1, +1)
+        L_mark(rx_, by, +1, +1)
+
+    return out
+
+
 
 def combine_for_duplex_crop(raw_left: list, raw_right: list, opts: dict) -> list:
     """
@@ -424,7 +488,7 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
             ext  = "png" if fmt == "PNG" else "jpg"
             mime = "image/png" if fmt == "PNG" else "image/jpeg"
         else:
-            out  = images_to_pdf_bytes(merged_images)
+            out  = images_to_pdf_bytes(merged_images, dpi)
             ext  = "pdf"
             mime = "application/pdf"
         return out, mime, ext, merged_images, had_overflow
@@ -436,7 +500,7 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
         ext  = "png" if fmt == "PNG" else "jpg"
         mime = "image/png" if fmt == "PNG" else "image/jpeg"
     else:
-        out  = images_to_pdf_bytes(merged_images)
+        out  = images_to_pdf_bytes(merged_images, dpi)
         ext  = "pdf"
         mime = "application/pdf"
     return out, mime, ext, merged_images, had_overflow
@@ -539,9 +603,9 @@ def show_download(out_bytes, mime, fname, key):
 
 def _init_state():
     if "crop_w" not in st.session_state:
-        st.session_state["crop_w"] = 13.0
+        st.session_state["crop_w"] = 14.8
     if "crop_h" not in st.session_state:
-        st.session_state["crop_h"] = 20.5
+        st.session_state["crop_h"] = 21.0
     if "crop_ratio" not in st.session_state:
         st.session_state["crop_ratio"] = st.session_state["crop_h"] / st.session_state["crop_w"]
 
@@ -563,8 +627,10 @@ _init_state()
 with st.sidebar:
     st.markdown("## ⚙️  Opções")
     st.divider()
-    dpi      = st.slider("DPI", 72, 900, 500, 50,
+    dpi      = st.slider("DPI", 72, 600, 300, 50,
                          help="Resolução de rasterização. Valores altos = mais qualidade e mais tempo.")
+    if dpi > 400:
+        st.caption("⚠️ DPI alto — processamento pode ser lento em PDFs com muitas páginas.")
     fmt      = st.radio("Formato de saída", ["PNG", "JPG"], horizontal=True)
     align_by = st.radio("Alinhar por", ["height", "width"], horizontal=True)
     gap_px   = st.slider("Espaço entre páginas (px)", 0, 200, 0, 4)
@@ -608,15 +674,13 @@ with st.sidebar:
         crop_w    = st.session_state["crop_w"]
         crop_h    = st.session_state["crop_h"]
 
-        # Aviso visual se as cartas não cabem no A4
-        def cm2px_check(cm): return int(round(cm * 150 / 2.54))
-        a4_w_px = cm2px_check(29.7); a4_h_px = cm2px_check(21.0)
-        cw_px   = cm2px_check(crop_w); ch_px   = cm2px_check(crop_h)
-        gap_h_check = (a4_w_px - cw_px * 2) // 3
-        gap_v_check = (a4_h_px - ch_px) // 2
-        if gap_h_check < cm2px_check(0.15) or gap_v_check < cm2px_check(0.1):
+        # Aviso se as marcas ficam fora da margem disponível
+        half_a4_w = 29.7 / 2
+        mark_margin_h = (half_a4_w - crop_w) / 2
+        mark_margin_v = (21.0 - crop_h) / 2
+        if mark_margin_h < 0.3 or mark_margin_v < 0.2:
             st.markdown(
-                '<div class="warn-box">⚠️ Cartas maiores que o A4 — marcas ficarão por cima da imagem.</div>',
+                '<div class="warn-box">⚠️ Margem pequena para as marcas de corte.</div>',
                 unsafe_allow_html=True,
             )
 
@@ -627,12 +691,12 @@ with st.sidebar:
             "Acima de 100% = sangria (bleed) — a imagem ultrapassa ligeiramente a linha de corte."
         )
         img_scale = st.slider(
-            "Escala da imagem (%)", 40, 130, 95, 1,
+            "Escala da imagem (%)", 40, 130, 100, 1,
             help="As linhas de corte não se movem. Só a imagem escala."
         ) / 100.0
         crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 15, 4, 1) / 10
     else:
-        crop_w, crop_h, crop_marklen, img_scale = 13.0, 20.5, 0.4, 1.0
+        crop_w, crop_h, crop_marklen, img_scale = 14.8, 21.0, 0.4, 1.0
 
     st.divider()
     st.markdown("**Preview**")
@@ -659,10 +723,11 @@ st.divider()
 # ─────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────
-tab_normal, tab_dual, tab_arrange = st.tabs([
+tab_normal, tab_dual, tab_arrange, tab_marks = st.tabs([
     "📄  Modo normal",
     "🔀  Modo dual",
     "🎛️  Modo arranjo",
+    "✂️  Adicionar marcas",
 ])
 
 
@@ -678,11 +743,27 @@ with tab_normal:
         st.info("⬆️  Arraste ou escolha um ou mais PDFs para começar.", icon="📂")
     else:
         for f in files:
-            opts_sig = f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{img_scale}_{duplex}"
-            fkey = f"normal_{f.name}_{f.size}_{opts_sig}"
+            # Guardar bytes para não perder o stream entre reruns
+            fbytes_key = f"normal_bytes_{f.name}_{f.size}"
+            if fbytes_key not in st.session_state:
+                st.session_state[fbytes_key] = f.read()
+            pdf_bytes = st.session_state[fbytes_key]
+
+            # Chave de resultado inclui todas as opções — regenera automaticamente quando mudam
+            opts_sig = (
+                f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_"
+                f"crop{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{img_scale}_"
+                f"dup{duplex}"
+            )
+            fkey = f"normal_res_{f.name}_{f.size}_{opts_sig}"
+
             if fkey not in st.session_state:
+                # Limpar resultados antigos deste ficheiro para não acumular memória
+                old_keys = [k for k in st.session_state if k.startswith(f"normal_res_{f.name}_{f.size}_")]
+                for k in old_keys:
+                    del st.session_state[k]
                 try:
-                    out_bytes, mime, ext, n_pages, merged, overflow = process_normal(f.read(), OPTS)
+                    out_bytes, mime, ext, n_pages, merged, overflow = process_normal(pdf_bytes, OPTS)
                     base  = f.name.rsplit(".", 1)[0]
                     fname = f"{base}_merged.{ext}"
                     st.session_state[fkey] = dict(
@@ -692,6 +773,7 @@ with tab_normal:
                     )
                 except Exception as e:
                     st.error(f"**{f.name}**: {e}", icon="❌")
+
             res = st.session_state.get(fkey)
             if res:
                 show_result(res["out_bytes"], res["mime"], res["ext"],
@@ -721,12 +803,28 @@ with tab_dual:
         st.markdown("**▶  PDF direito (B)**")
         file_b = st.file_uploader("PDF B", type=["pdf"], key="dual_b", label_visibility="collapsed")
 
-    opts_sig_d = f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{img_scale}_{duplex}"
-    dkey = f"dual_{getattr(file_a,'name','')}_{getattr(file_a,'size',0)}_{getattr(file_b,'name','')}_{getattr(file_b,'size',0)}_{opts_sig_d}"
     if file_a and file_b:
+        ba_key = f"dual_bytes_a_{file_a.name}_{file_a.size}"
+        bb_key = f"dual_bytes_b_{file_b.name}_{file_b.size}"
+        if ba_key not in st.session_state:
+            st.session_state[ba_key] = file_a.read()
+        if bb_key not in st.session_state:
+            st.session_state[bb_key] = file_b.read()
+
+        opts_sig_d = (
+            f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_"
+            f"crop{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{img_scale}_"
+            f"dup{duplex}"
+        )
+        dkey = f"dual_res_{file_a.name}_{file_a.size}_{file_b.name}_{file_b.size}_{opts_sig_d}"
+
         if dkey not in st.session_state:
+            old_keys = [k for k in st.session_state if k.startswith(f"dual_res_{file_a.name}_{file_a.size}_{file_b.name}_{file_b.size}_")]
+            for k in old_keys:
+                del st.session_state[k]
             try:
-                out_bytes, mime, ext, merged_img, overflow = process_dual(file_a.read(), file_b.read(), OPTS)
+                out_bytes, mime, ext, merged_img, overflow = process_dual(
+                    st.session_state[ba_key], st.session_state[bb_key], OPTS)
                 name_a = file_a.name.rsplit(".", 1)[0]
                 name_b = file_b.name.rsplit(".", 1)[0]
                 fname  = f"{name_a}+{name_b}.{ext}"
@@ -736,6 +834,7 @@ with tab_dual:
                 )
             except Exception as e:
                 st.error(f"{e}", icon="❌")
+
         res = st.session_state.get(dkey)
         if res:
             show_result(res["out_bytes"], res["mime"], res["ext"], res["fname"],
@@ -1021,3 +1120,88 @@ render();
                     with cols[idx % 3]:
                         st.image(pb, caption=f"Pág. {idx + 1}")
             show_download(res["out_bytes"], res["mime"], res["fname"], "arr_download")
+
+# ══════════════════════════════════════════════
+# Tab Marcas — PDF já composto
+# ══════════════════════════════════════════════
+with tab_marks:
+    st.markdown(
+        "Carregue um PDF **já com as duas cartas lado a lado** (gerado pelo Modo normal). "
+        "O script **sobrepõe marcas de corte** nas posições corretas sem alterar a imagem."
+    )
+    st.info(
+        "As marcas são centradas em cada metade da página com base nas dimensões "
+        "**Largura × Altura** definidas na sidebar (padrão 13 × 20,5 cm).",
+        icon="✂️"
+    )
+
+    marks_file = st.file_uploader("Escolher PDF composto", type=["pdf"], key="marks_up")
+
+    if not marks_file:
+        st.info("⬆️  Carregue o PDF gerado pelo Modo normal.", icon="📂")
+    else:
+        mbytes_key = f"marks_bytes_{marks_file.name}_{marks_file.size}"
+        if mbytes_key not in st.session_state:
+            st.session_state[mbytes_key] = marks_file.read()
+        pdf_bytes_m = st.session_state[mbytes_key]
+
+        opts_sig_m = f"{dpi}_{crop_w}_{crop_h}_{crop_marklen}"
+        mkey = f"marks_res_{marks_file.name}_{marks_file.size}_{opts_sig_m}"
+
+        if mkey not in st.session_state:
+            old_keys = [k for k in st.session_state if k.startswith(f"marks_res_{marks_file.name}_{marks_file.size}_")]
+            for k in old_keys:
+                del st.session_state[k]
+            try:
+                pdf_bytes_m = _preprocess_pdf(pdf_bytes_m)
+                progress_m = st.progress(0, text="A processar…")
+                result_imgs = []
+                with fitz.open(stream=pdf_bytes_m, filetype="pdf") as doc_m:
+                    n_m = doc_m.page_count
+                    for pi in range(n_m):
+                        page_img = render_page(doc_m.load_page(pi), dpi, (255, 255, 255))
+                        marked   = add_crop_marks_to_composed(
+                            page_img,
+                            card_w_cm=crop_w, card_h_cm=crop_h,
+                            dpi=dpi,
+                            mark_len_cm=crop_marklen,
+                        )
+                        result_imgs.append(marked)
+                        progress_m.progress((pi + 1) / n_m, text=f"Página {pi+1}/{n_m}…")
+                progress_m.empty()
+
+                if len(result_imgs) == 1:
+                    out_m  = encode_image(result_imgs[0], "PNG")
+                    ext_m, mime_m = "png", "image/png"
+                else:
+                    out_m  = images_to_pdf_bytes(result_imgs, dpi)
+                    ext_m, mime_m = "pdf", "application/pdf"
+
+                base_m = marks_file.name.rsplit(".", 1)[0]
+                fname_m = f"{base_m}_marcas.{ext_m}"
+                st.session_state[mkey] = dict(
+                    out_bytes=out_m, mime=mime_m, ext=ext_m, fname=fname_m,
+                    n_pages=n_m,
+                    preview_bytes=[make_preview(r, preview_width, False) for r in result_imgs],
+                )
+            except Exception as e:
+                st.error(f"{e}", icon="❌")
+
+        res = st.session_state.get(mkey)
+        if res:
+            size_kb  = len(res["out_bytes"]) / 1024
+            size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+            st.markdown(
+                f'<div class="result-meta"><strong>{res["fname"]}</strong>'
+                f'<span class="badge badge-pdf">{res["ext"].upper()}</span>'
+                f' &nbsp;·&nbsp; {res["n_pages"]} pág. &nbsp;·&nbsp; {dpi} dpi &nbsp;·&nbsp; {size_str}</div>',
+                unsafe_allow_html=True,
+            )
+            if len(res["preview_bytes"]) == 1:
+                st.image(res["preview_bytes"][0])
+            else:
+                cols = st.columns(min(len(res["preview_bytes"]), 3))
+                for idx, pb in enumerate(res["preview_bytes"]):
+                    with cols[idx % 3]:
+                        st.image(pb, caption=f"Pág. {idx + 1}")
+            show_download(res["out_bytes"], res["mime"], res["fname"], "marks_download")
