@@ -260,24 +260,13 @@ def fit_two_cards_on_a4(
 
     draw = ImageDraw.Draw(canvas)
 
-    def seg(x0, y0, x1, y1):
-        draw.rectangle([min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1)], fill=mark_color)
+    def dash_h(cx, cy):
+        """Pequeno traço horizontal centrado em (cx, cy)."""
+        draw.rectangle([cx - ml//2, cy - t//2, cx + ml//2, cy + t//2], fill=mark_color)
 
-    def L_mark(cx, cy, go_left, go_up):
-        dx = -1 if go_left else +1
-        dy = -1 if go_up   else +1
-        seg(cx + dx*mo, cy - t//2, cx + dx*(mo+ml), cy + t//2)  # horizontal
-        seg(cx - t//2, cy + dy*mo, cx + t//2, cy + dy*(mo+ml))  # vertical
-
-    def mid_tick_h(cx, cy, go_up):
-        """Risca a meio num lado horizontal — sai para cima ou baixo."""
-        dy = -1 if go_up else +1
-        seg(cx - t//2, cy + dy*mo, cx + t//2, cy + dy*(mo+ml))
-
-    def mid_tick_v(cx, cy, go_left):
-        """Risca a meio num lado vertical — sai para a esquerda ou direita."""
-        dx = -1 if go_left else +1
-        seg(cx + dx*mo, cy - t//2, cx + dx*(mo+ml), cy + t//2)
+    def dash_v(cx, cy):
+        """Pequeno traço vertical centrado em (cx, cy)."""
+        draw.rectangle([cx - t//2, cy - ml//2, cx + t//2, cy + ml//2], fill=mark_color)
 
     for half_x in (0, half_w):
         mx = half_x + mark_x_margin
@@ -286,18 +275,23 @@ def fit_two_cards_on_a4(
         by = my + ch
         mid_x = mx + cw // 2
         mid_y = my + ch // 2
+        gap = mo + ml // 2  # distância do bordo ao centro do traço
 
-        # 4 cantos em L
-        L_mark(mx, my, go_left=True,  go_up=True)
-        L_mark(rx, my, go_left=False, go_up=True)
-        L_mark(mx, by, go_left=True,  go_up=False)
-        L_mark(rx, by, go_left=False, go_up=False)
+        # Cantos: L (traço horizontal + vertical) saindo para fora
+        for cx, cy, sx, sy in [
+            (mx, my, -1, -1), (rx, my, +1, -1),
+            (mx, by, -1, +1), (rx, by, +1, +1),
+        ]:
+            draw.rectangle([cx + sx*mo, cy - t//2,
+                            cx + sx*(mo+ml), cy + t//2], fill=mark_color)
+            draw.rectangle([cx - t//2, cy + sy*mo,
+                            cx + t//2, cy + sy*(mo+ml)], fill=mark_color)
 
-        # Riscas a meio de cada lado
-        mid_tick_h(mid_x, my, go_up=True)    # meio do topo
-        mid_tick_h(mid_x, by, go_up=False)   # meio da base
-        mid_tick_v(mx, mid_y, go_left=True)  # meio da esquerda
-        mid_tick_v(rx, mid_y, go_left=False) # meio da direita
+        # Meio de cada lado: traço perpendicular saindo para fora
+        dash_h(mid_x, my - gap)   # meio topo — traço horizontal acima
+        dash_h(mid_x, by + gap)   # meio base — traço horizontal abaixo
+        dash_v(mx - gap, mid_y)   # meio esquerda — traço vertical à esquerda
+        dash_v(rx + gap, mid_y)   # meio direita — traço vertical à direita
 
     return canvas, False
 
