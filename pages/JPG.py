@@ -82,8 +82,8 @@ def render_page(page: fitz.Page, dpi: int, bg=(255, 255, 255)) -> Image.Image:
 
 def render_page_thumb(page: fitz.Page, max_px: int = 220) -> Image.Image:
     zoom = max_px / max(page.rect.width, page.rect.height)
-    mat  = fitz.Matrix(zoom, zoom)
-    pix  = page.get_pixmap(matrix=mat, alpha=False, annots=True, colorspace=fitz.csRGB)
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, alpha=False, annots=True, colorspace=fitz.csRGB)
     return _pixmap_to_pil(pix)
 
 
@@ -96,20 +96,26 @@ def merge_side_by_side(
 ) -> Image.Image:
     if align_by == "width":
         tw = max(left.width, right.width)
+
         def sw(img):
             return img if img.width == tw else img.resize(
-                (tw, round(img.height * tw / img.width)), Image.LANCZOS)
+                (tw, round(img.height * tw / img.width)), Image.LANCZOS
+            )
+
         left, right = sw(left), sw(right)
         H = max(left.height, right.height)
         canvas = Image.new("RGB", (tw * 2 + gap_px, H), bg)
-        canvas.paste(left,  (0,           (H - left.height)  // 2))
+        canvas.paste(left,  (0,           (H - left.height) // 2))
         canvas.paste(right, (tw + gap_px, (H - right.height) // 2))
         return canvas
 
     th = max(left.height, right.height)
+
     def sh(img):
         return img if img.height == th else img.resize(
-            (round(img.width * th / img.height), th), Image.LANCZOS)
+            (round(img.width * th / img.height), th), Image.LANCZOS
+        )
+
     left, right = sh(left), sh(right)
     canvas = Image.new("RGB", (left.width + right.width + gap_px, th), bg)
     canvas.paste(left,  (0, 0))
@@ -190,12 +196,13 @@ def fit_two_cards_on_a4(
     """
     Lógica:
     - O canvas é sempre A4 paisagem (29.7 × 21 cm).
-    - Cada carta ocupa metade do canvas.
+    - Cada carta ocupa exactamente metade do canvas.
     - A imagem é escalada por img_scale relativamente à metade.
     - As marcas de corte são desenhadas numa área card_w_cm × card_h_cm
       centrada em cada metade.
-    - Os riscos do meio (topo/base) ficam centrados na metade física do A4,
-      que é o local real de corte ao meio.
+    - O risco do "meio" fica alinhado com a linha vertical de corte interna:
+        * carta esquerda  -> lado direito da carta
+        * carta direita   -> lado esquerdo da carta
     """
     def cm2px(cm):
         return int(round(cm * dpi / 2.54))
@@ -218,7 +225,6 @@ def fit_two_cards_on_a4(
 
         target_w = max(1, int(half_w * img_scale))
         target_h = max(1, int(a4_h * img_scale))
-
         r = img.width / img.height
         tr = target_w / target_h
 
@@ -261,27 +267,27 @@ def fit_two_cards_on_a4(
         x1 = cx + ml // 2
         y0 = cy - t // 2
         y1 = cy + t // 2
-        draw.rectangle([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)], fill=mark_color)
+        draw.rectangle(
+            [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
+            fill=mark_color
+        )
 
     def dash_v(cx, cy):
         x0 = cx - t // 2
         x1 = cx + t // 2
         y0 = cy - ml // 2
         y1 = cy + ml // 2
-        draw.rectangle([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)], fill=mark_color)
+        draw.rectangle(
+            [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
+            fill=mark_color
+        )
 
     for half_x in (0, half_w):
         mx = half_x + mark_x_margin
         my = mark_y_margin
         rx = mx + cw
         by = my + ch
-
-        # Centro real da metade da folha (onde se corta o A4 ao meio)
-        mid_x = half_x + half_w // 2
-
-        # Centro da área da carta
         mid_y = my + ch // 2
-
         gap = mo + ml // 2
 
         # Cantos
@@ -303,13 +309,14 @@ def fit_two_cards_on_a4(
                 fill=mark_color
             )
 
-        # Meios dos lados da área de corte
+        # Riscos laterais ao meio
         dash_v(mx - gap, mid_y)
         dash_v(rx + gap, mid_y)
 
-        # Meio superior e inferior no centro real da metade do A4
-        dash_h(mid_x, my - gap)
-        dash_h(mid_x, by + gap)
+        # Risco do "meio" alinhado com a linha vertical interna de corte
+        inner_x = rx if half_x == 0 else mx
+        dash_h(inner_x, my - gap)
+        dash_h(inner_x, by + gap)
 
     return canvas, False
 
@@ -370,20 +377,24 @@ def add_crop_marks_to_composed(
         x1 = cx + ml // 2
         y0 = cy - t // 2
         y1 = cy + t // 2
-        draw.rectangle([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)], fill=mark_color)
+        draw.rectangle(
+            [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
+            fill=mark_color
+        )
 
     def dash_v(cx, cy):
         x0 = cx - t // 2
         x1 = cx + t // 2
         y0 = cy - ml // 2
         y1 = cy + ml // 2
-        draw.rectangle([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)], fill=mark_color)
+        draw.rectangle(
+            [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
+            fill=mark_color
+        )
 
     for ox in (lx1, lx2):
         rx_ = ox + cw
         mid_y = ty + ch // 2
-        half_start = 0 if ox == lx1 else half_w
-        mid_x = half_start + half_w // 2
         gap = mo + ml // 2
 
         L_mark(ox,  ty, -1, -1)
@@ -393,8 +404,10 @@ def add_crop_marks_to_composed(
 
         dash_v(ox - gap, mid_y)
         dash_v(rx_ + gap, mid_y)
-        dash_h(mid_x, ty - gap)
-        dash_h(mid_x, by + gap)
+
+        inner_x = rx_ if ox == lx1 else ox
+        dash_h(inner_x, ty - gap)
+        dash_h(inner_x, by + gap)
 
     return out
 
@@ -440,7 +453,7 @@ def combine_for_duplex_crop(raw_left: list, raw_right: list, opts: dict) -> list
             pB_v = blank(pA_v)
 
         frente = make_a4(pA_f, pB_f)
-        verso  = make_a4(pB_v, pA_v)
+        verso = make_a4(pB_v, pA_v)
         result += [frente, verso]
         i += 2
     return result
@@ -472,7 +485,7 @@ def combine_for_duplex_simple(raw_left: list, raw_right: list, opts: dict) -> li
             pB_v = blank(pA_v)
 
         frente = merge_side_by_side(pA_f, pB_f, align_by=align_by, gap_px=gap, bg=bg)
-        verso  = merge_side_by_side(pB_v, pA_v, align_by=align_by, gap_px=gap, bg=bg)
+        verso = merge_side_by_side(pB_v, pA_v, align_by=align_by, gap_px=gap, bg=bg)
         result += [frente, verso]
         i += 2
     return result
