@@ -152,96 +152,91 @@ def apply_sharpen(img: Image.Image) -> Image.Image:
     return img.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=3))
 
 
-def scale_and_crop_marks(
-    img: Image.Image,
-    content_w_cm: float = 20.5,
-    content_h_cm: float = 13.3,
+def fit_two_cards_on_a4(
+    left: Image.Image,
+    right: Image.Image,
+    card_w_cm: float = 13.3,
+    card_h_cm: float = 20.5,
     dpi: int = 500,
-    margin_cm: float = 0.5,
     mark_len_cm: float = 0.4,
     mark_offset_cm: float = 0.1,
-    mark_thick_px: int = 2,
+    mark_thick_px: int = 3,
     mark_color=(0, 0, 0),
     bg=(255, 255, 255),
 ) -> Image.Image:
     """
-    Escala img para caber em content_w_cm x content_h_cm (mantendo proporcao).
-    Centra num canvas com margem `margin_cm` em cada lado.
-    As marcas de corte em L ficam na margem, apontando para fora da area de conteudo:
-      - offset: pequeno gap entre o bordo do conteudo e o inicio do traco
-      - comprimento: dentro da margem (nunca sai do canvas)
+    Coloca duas cartas num canvas A4 paisagem (29.7x21 cm).
+    Cada carta e escalada para caber em card_w_cm x card_h_cm (mantendo proporcao).
+    As cartas ficam centradas no A4 com espaco igual nas bordas e entre si.
+    Marcas de corte em L sao desenhadas nos 4 cantos de cada carta.
     """
     from PIL import ImageDraw
 
     def cm2px(cm): return int(round(cm * dpi / 2.54))
 
-    cw = cm2px(content_w_cm)   # largura da area de conteudo
-    ch = cm2px(content_h_cm)   # altura da area de conteudo
-    mg = cm2px(margin_cm)      # margem branca em cada lado
-    ml = cm2px(mark_len_cm)    # comprimento do traco de corte
-    mo = cm2px(mark_offset_cm) # gap entre bordo do conteudo e inicio do traco
-    t  = mark_thick_px
+    a4_w = cm2px(29.7)
+    a4_h = cm2px(21.0)
+    cw   = cm2px(card_w_cm)
+    ch   = cm2px(card_h_cm)
+    ml   = cm2px(mark_len_cm)
+    mo   = cm2px(mark_offset_cm)
+    t    = mark_thick_px
 
-    # Garante que as marcas cabem na margem
-    # mo + ml deve ser <= mg; se nao, ajusta ml
-    ml = min(ml, mg - mo - 1)
+    def scale_card(img):
+        r  = img.width / img.height
+        tr = cw / ch
+        if r > tr:
+            nw, nh = cw, round(cw / r)
+        else:
+            nw, nh = round(ch * r), ch
+        return img.resize((nw, nh), Image.LANCZOS)
 
-    # Escalar imagem para caber em cw x ch (letterbox)
-    img_ratio    = img.width / img.height
-    target_ratio = cw / ch
-    if img_ratio > target_ratio:
-        new_w, new_h = cw, round(cw / img_ratio)
-    else:
-        new_w, new_h = round(ch * img_ratio), ch
-    img_scaled = img.resize((new_w, new_h), Image.LANCZOS)
+    left_s  = scale_card(left)
+    right_s = scale_card(right)
 
-    # Canvas total
-    total_w = mg + cw + mg
-    total_h = mg + ch + mg
-    canvas = Image.new("RGB", (total_w, total_h), bg)
+    # 3 gaps iguais: [gap][carta][gap][carta][gap]
+    gap_h = max((a4_w - cw * 2) // 3, cm2px(0.3))
+    gap_v = max((a4_h - ch)     // 2, cm2px(0.2))
 
-    # Centrar imagem na area de conteudo
-    x0 = mg + (cw - new_w) // 2
-    y0 = mg + (ch - new_h) // 2
-    canvas.paste(img_scaled, (x0, y0))
+    # As marcas ficam no espaco entre o bordo da carta e o bordo do A4
+    # Clamp para caber no espaco disponivel
+    ml_h = min(ml, gap_h - mo - 2)
+    ml_v = min(ml, gap_v - mo - 2)
+    ml   = max(min(ml_h, ml_v), 4)
 
-    # Coordenadas dos 4 cantos do rectangulo de corte
-    # (bordo da area de conteudo, dentro do canvas)
-    lx = mg          # x esquerdo do conteudo
-    rx = mg + cw     # x direito do conteudo
-    ty = mg          # y topo do conteudo
-    by = mg + ch     # y base do conteudo
+    canvas = Image.new("RGB", (a4_w, a4_h), bg)
+
+    # x do canto esquerdo de cada carta
+    lx1 = gap_h
+    lx2 = gap_h + cw + gap_h
+    ly  = gap_v
+
+    def paste_centered(img_s, ox, oy):
+        px = ox + (cw - img_s.width)  // 2
+        py = oy + (ch - img_s.height) // 2
+        canvas.paste(img_s, (px, py))
+
+    paste_centered(left_s,  lx1, ly)
+    paste_centered(right_s, lx2, ly)
 
     draw = ImageDraw.Draw(canvas)
 
     def L_mark(cx, cy, dx, dy):
-        """
-        Marca em L no canto (cx, cy).
-        dx = +1 → traco horizontal aponta para a direita (fora do conteudo)
-        dx = -1 → aponta para a esquerda
-        dy = +1 → traco vertical aponta para baixo
-        dy = -1 → aponta para cima
-        Os tracos comecam a `mo` px do bordo e tem comprimento `ml`.
-        """
-        # traco horizontal: ao longo de y=cy, de cx+dx*mo ate cx+dx*(mo+ml)
-        hx0 = cx + dx * mo
-        hx1 = cx + dx * (mo + ml)
-        draw.rectangle([min(hx0, hx1), cy - t // 2,
-                        max(hx0, hx1), cy + t // 2], fill=mark_color)
-        # traco vertical: ao longo de x=cx, de cy+dy*mo ate cy+dy*(mo+ml)
-        vy0 = cy + dy * mo
-        vy1 = cy + dy * (mo + ml)
-        draw.rectangle([cx - t // 2, min(vy0, vy1),
-                        cx + t // 2, max(vy0, vy1)], fill=mark_color)
+        hx0, hx1 = cx + dx * mo, cx + dx * (mo + ml)
+        draw.rectangle([min(hx0,hx1), cy - t//2,
+                        max(hx0,hx1), cy + t//2], fill=mark_color)
+        vy0, vy1 = cy + dy * mo, cy + dy * (mo + ml)
+        draw.rectangle([cx - t//2, min(vy0,vy1),
+                        cx + t//2, max(vy0,vy1)], fill=mark_color)
 
-    # Canto superior esquerdo: tracoes para esquerda e para cima
-    L_mark(lx, ty, dx=-1, dy=-1)
-    # Canto superior direito: tracoes para direita e para cima
-    L_mark(rx, ty, dx=+1, dy=-1)
-    # Canto inferior esquerdo: tracoes para esquerda e para baixo
-    L_mark(lx, by, dx=-1, dy=+1)
-    # Canto inferior direito: tracoes para direita e para baixo
-    L_mark(rx, by, dx=+1, dy=+1)
+    for ox in (lx1, lx2):
+        rx_ = ox + cw
+        ty_ = ly
+        by_ = ly + ch
+        L_mark(ox,  ty_, -1, -1)
+        L_mark(rx_, ty_, +1, -1)
+        L_mark(ox,  by_, -1, +1)
+        L_mark(rx_, by_, +1, +1)
 
     return canvas
 
