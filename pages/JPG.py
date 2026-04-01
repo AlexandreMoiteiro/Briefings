@@ -592,6 +592,7 @@ with st.sidebar:
         with c1:
             st.number_input(
                 "Largura (cm)", min_value=1.0, max_value=50.0,
+                value=st.session_state["crop_w"],
                 step=0.1, format="%.1f",
                 key="crop_w",
                 on_change=_on_crop_w_change if ratio_lock else None,
@@ -599,6 +600,7 @@ with st.sidebar:
         with c2:
             st.number_input(
                 "Altura (cm)", min_value=1.0, max_value=50.0,
+                value=st.session_state["crop_h"],
                 step=0.1, format="%.1f",
                 key="crop_h",
                 on_change=_on_crop_h_change if ratio_lock else None,
