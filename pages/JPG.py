@@ -154,8 +154,8 @@ def apply_sharpen(img: Image.Image) -> Image.Image:
 
 def scale_and_crop_marks(
     img: Image.Image,
-    content_w_cm: float = 13.3,
-    content_h_cm: float = 20.5,
+    content_w_cm: float = 20.5,
+    content_h_cm: float = 13.3,
     dpi: int = 500,
     margin_cm: float = 0.5,
     mark_len_cm: float = 0.4,
@@ -396,13 +396,13 @@ with st.sidebar:
     if crop_marks:
         c1, c2 = st.columns(2)
         with c1:
-            crop_w = st.number_input("Largura (cm)", value=13.3, step=0.1, format="%.1f")
+            crop_w = st.number_input("Largura (cm)", value=20.5, step=0.1, format="%.1f")
         with c2:
-            crop_h = st.number_input("Altura (cm)",  value=20.5, step=0.1, format="%.1f")
+            crop_h = st.number_input("Altura (cm)",  value=13.3, step=0.1, format="%.1f")
         crop_margin = st.slider("Margem branca (mm)", 2, 20, 5, 1) / 10  # → cm
         crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 15, 4, 1) / 10
     else:
-        crop_w, crop_h, crop_margin, crop_marklen = 13.3, 20.5, 0.5, 0.4
+        crop_w, crop_h, crop_margin, crop_marklen = 20.5, 13.3, 0.5, 0.4
 
     st.divider()
     st.markdown("**Preview**")
