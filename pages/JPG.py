@@ -599,9 +599,9 @@ def show_download(out_bytes, mime, fname, key):
 
 def _init_state():
     if "crop_w" not in st.session_state:
-        st.session_state["crop_w"] = 14.8
+        st.session_state["crop_w"] = 13.0
     if "crop_h" not in st.session_state:
-        st.session_state["crop_h"] = 21.0
+        st.session_state["crop_h"] = 20.5
     if "crop_ratio" not in st.session_state:
         st.session_state["crop_ratio"] = st.session_state["crop_h"] / st.session_state["crop_w"]
 
@@ -682,7 +682,7 @@ with st.sidebar:
         ) / 100.0
         crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 15, 4, 1) / 10
     else:
-        crop_w, crop_h, crop_marklen, img_scale = 14.8, 21.0, 0.4, 1.0
+        crop_w, crop_h, crop_marklen, img_scale = 13.0, 20.5, 0.4, 1.0
 
     st.divider()
     st.markdown("**Preview**")
