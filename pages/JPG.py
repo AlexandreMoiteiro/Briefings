@@ -406,9 +406,12 @@ with tab_dual:
 # Tab Arranjo
 # ══════════════════════════════════════════════
 with tab_arrange:
+    import base64
+    import json
+    import streamlit.components.v1 as components
+
     st.markdown(
-        "Carregue um PDF e **escolha manualmente** quais páginas ficam juntas. "
-        "Cada par produz uma imagem lado a lado; o conjunto gera um PDF."
+        "Carregue um PDF, **arraste** as páginas para os pares e clique **Gerar**."
     )
 
     arr_file = st.file_uploader("Escolher PDF", type=["pdf"], key="arrange_up")
@@ -416,127 +419,457 @@ with tab_arrange:
     if not arr_file:
         st.info("⬆️  Carregue um PDF para começar.", icon="📂")
     else:
-        # ── Carregar thumbnails (cache por nome+tamanho do ficheiro) ──────────
         arr_bytes = arr_file.read()
         arr_bytes = _preprocess_pdf(arr_bytes)
-        cache_key = f"arr_thumbs_{arr_file.name}_{len(arr_bytes)}"
+        cache_key = f"arr_{arr_file.name}_{len(arr_bytes)}"
 
+        # ── Gerar thumbnails (apenas uma vez por ficheiro) ────────────────────
         if cache_key not in st.session_state:
             with fitz.open(stream=arr_bytes, filetype="pdf") as _doc:
-                n_arr = _doc.page_count
-                thumbs = [render_page_thumb(_doc.load_page(i)) for i in range(n_arr)]
-            st.session_state[cache_key]         = thumbs
-            st.session_state[cache_key + "_n"]  = n_arr
-            st.session_state[cache_key + "_b"]  = arr_bytes
-            # Estado dos pares: lista de [left_idx, right_idx|None]
-            # Inicializa com pares sequenciais
+                n_arr  = _doc.page_count
+                thumbs = [render_page_thumb(_doc.load_page(i), max_px=220) for i in range(n_arr)]
+            # Codifica em base64 para passar ao componente HTML
+            thumbs_b64 = []
+            for t in thumbs:
+                buf = io.BytesIO()
+                t.save(buf, format="PNG")
+                thumbs_b64.append(base64.b64encode(buf.getvalue()).decode())
             default_pairs = [
-                [i * 2, i * 2 + 1 if i * 2 + 1 < n_arr else None]
+                [i * 2, i * 2 + 1 if i * 2 + 1 < n_arr else -1]
                 for i in range(math.ceil(n_arr / 2))
             ]
-            st.session_state[cache_key + "_pairs"] = default_pairs
+            st.session_state[cache_key + "_n"]      = n_arr
+            st.session_state[cache_key + "_b64"]    = thumbs_b64
+            st.session_state[cache_key + "_bytes"]  = arr_bytes
+            st.session_state[cache_key + "_pairs"]  = default_pairs
 
-        thumbs   : list        = st.session_state[cache_key]
-        n_arr    : int         = st.session_state[cache_key + "_n"]
-        arr_bytes: bytes       = st.session_state[cache_key + "_b"]
-        pairs_state: list      = st.session_state[cache_key + "_pairs"]
+        n_arr       : int   = st.session_state[cache_key + "_n"]
+        thumbs_b64  : list  = st.session_state[cache_key + "_b64"]
+        arr_bytes   : bytes = st.session_state[cache_key + "_bytes"]
+        saved_pairs : list  = st.session_state[cache_key + "_pairs"]
 
-        # ── Galeria de páginas disponíveis ────────────────────────────────────
-        st.markdown("### Páginas disponíveis")
-        st.caption("Números de página abaixo de cada thumbnail (base 1).")
-        THUMB_COLS = 6
-        g_cols = st.columns(THUMB_COLS)
-        for i, thumb in enumerate(thumbs):
-            with g_cols[i % THUMB_COLS]:
-                st.image(thumb_to_bytes(thumb), use_container_width=True)
-                st.markdown(f'<div class="thumb-label">Pág. {i + 1}</div>', unsafe_allow_html=True)
+        # ── Componente HTML drag-and-drop ─────────────────────────────────────
+        thumbs_json = json.dumps(thumbs_b64)
+        pairs_json  = json.dumps(saved_pairs)
 
+        html_component = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: 'DM Sans', 'Segoe UI', sans-serif;
+    background: transparent;
+    color: #1f2937;
+    padding: 4px 0 8px 0;
+  }}
+
+  /* ── Banco de páginas ── */
+  #bank-label {{
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #6b7280;
+    margin-bottom: 8px;
+  }}
+  #bank {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px;
+    background: #f3f4f6;
+    border: 1.5px dashed #d1d5db;
+    border-radius: 10px;
+    min-height: 80px;
+    margin-bottom: 18px;
+  }}
+  .page-chip {{
+    position: relative;
+    cursor: grab;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 2px solid #e5e7eb;
+    background: #fff;
+    transition: box-shadow .15s, border-color .15s, transform .1s;
+    user-select: none;
+    width: 80px;
+  }}
+  .page-chip:hover {{ border-color: #6366f1; box-shadow: 0 2px 8px rgba(99,102,241,.25); }}
+  .page-chip.dragging {{ opacity: .4; transform: scale(.96); }}
+  .page-chip img {{ width: 100%; display: block; }}
+  .page-chip .lbl {{
+    font-size: 0.62rem;
+    text-align: center;
+    padding: 2px 0 3px;
+    color: #6b7280;
+    background: #f9fafb;
+  }}
+  .page-chip .rm {{
+    display: none;
+    position: absolute;
+    top: 2px; right: 2px;
+    width: 16px; height: 16px;
+    background: #ef4444;
+    color: #fff;
+    border-radius: 50%;
+    font-size: 9px;
+    line-height: 16px;
+    text-align: center;
+    cursor: pointer;
+    font-weight: 700;
+  }}
+  .page-chip:hover .rm {{ display: block; }}
+
+  /* ── Pares ── */
+  #pairs-label {{
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #6b7280;
+    margin-bottom: 8px;
+  }}
+  #pairs-list {{ display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }}
+
+  .pair-row {{
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+    background: #f8f9fb;
+    border: 1.5px solid #e3e6ea;
+    border-radius: 10px;
+    padding: 8px 10px;
+  }}
+  .pair-num {{
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: #9ca3af;
+    width: 18px;
+    padding-top: 30px;
+    text-align: center;
+    flex-shrink: 0;
+  }}
+  .pair-slot {{
+    width: 100px;
+    min-height: 90px;
+    border: 2px dashed #d1d5db;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.65rem;
+    color: #9ca3af;
+    transition: border-color .15s, background .15s;
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+  }}
+  .pair-slot.over   {{ border-color: #6366f1; background: #eef2ff; }}
+  .pair-slot.filled {{ border-style: solid; border-color: #6366f1; background: #fff; }}
+  .pair-slot img    {{ width: 100%; display: block; }}
+  .pair-slot .slot-lbl {{
+    font-size: 0.6rem;
+    color: #6b7280;
+    text-align: center;
+    padding: 2px 0 3px;
+    width: 100%;
+    background: #f9fafb;
+  }}
+  .pair-slot .slot-rm {{
+    position: absolute;
+    top: 3px; right: 3px;
+    width: 17px; height: 17px;
+    background: #ef4444;
+    color: #fff;
+    border-radius: 50%;
+    font-size: 10px;
+    line-height: 17px;
+    text-align: center;
+    cursor: pointer;
+    font-weight: 700;
+    display: none;
+  }}
+  .pair-slot.filled:hover .slot-rm {{ display: block; }}
+
+  .pair-divider {{
+    font-size: 1rem;
+    color: #d1d5db;
+    align-self: center;
+    flex-shrink: 0;
+    padding: 0 2px;
+  }}
+  .pair-delete {{
+    align-self: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #d1d5db;
+    font-size: 1rem;
+    padding: 4px;
+    border-radius: 6px;
+    transition: color .15s, background .15s;
+    margin-left: auto;
+    flex-shrink: 0;
+  }}
+  .pair-delete:hover {{ color: #ef4444; background: #fee2e2; }}
+
+  /* ── Botões ── */
+  .btn-row {{ display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }}
+  .btn {{
+    padding: 6px 14px;
+    border-radius: 7px;
+    border: 1.5px solid #d1d5db;
+    background: #fff;
+    font-size: 0.78rem;
+    cursor: pointer;
+    font-weight: 500;
+    transition: border-color .15s, background .15s;
+  }}
+  .btn:hover {{ border-color: #6366f1; background: #eef2ff; color: #4f46e5; }}
+  .btn-primary {{
+    background: #111827;
+    color: #fff;
+    border-color: #111827;
+    font-weight: 600;
+  }}
+  .btn-primary:hover {{ background: #374151; border-color: #374151; color: #fff; }}
+
+  #output {{
+    font-family: monospace;
+    font-size: 0.72rem;
+    color: #6b7280;
+    margin-top: 4px;
+    word-break: break-all;
+  }}
+</style>
+</head>
+<body>
+
+<div id="bank-label">Páginas disponíveis — arraste para um par</div>
+<div id="bank"></div>
+
+<div id="pairs-label">Pares</div>
+<div id="pairs-list"></div>
+
+<div class="btn-row">
+  <button class="btn" onclick="addPair()">＋ Adicionar par</button>
+  <button class="btn" onclick="resetPairs()">↺ Repor sequencial</button>
+  <button class="btn btn-primary" onclick="emitPairs()">🚀 Gerar</button>
+</div>
+<div id="output"></div>
+
+<script>
+const THUMBS  = {thumbs_json};
+const N       = THUMBS.length;
+let   pairs   = {pairs_json};   // [[li, ri], ...]  ri=-1 → branco
+
+// ── Drag state ────────────────────────────────────────────────
+let dragSrc = null;   // {{ pageIdx, origin: 'bank'|'slot', pairIdx, side }}
+
+// ── Render ────────────────────────────────────────────────────
+function render() {{
+  renderBank();
+  renderPairs();
+}}
+
+function chipHTML(pageIdx, showRm, rmCb) {{
+  return `<div class="page-chip" draggable="true"
+    data-page="${{pageIdx}}"
+    onmousedown="event.stopPropagation()"
+  >
+    <img src="data:image/png;base64,${{THUMBS[pageIdx]}}" draggable="false">
+    <div class="lbl">Pág. ${{pageIdx+1}}</div>
+    ${{showRm ? `<div class="rm" onclick="${{rmCb}};render()">✕</div>` : ''}}
+  </div>`;
+}}
+
+function renderBank() {{
+  const bank = document.getElementById('bank');
+  bank.innerHTML = '';
+  for (let i = 0; i < N; i++) {{
+    const div = document.createElement('div');
+    div.innerHTML = chipHTML(i, false, '');
+    const chip = div.firstElementChild;
+    addChipDrag(chip, i, 'bank', null, null);
+    bank.appendChild(chip);
+  }}
+}}
+
+function slotHTML(pairIdx, side) {{
+  const ri = pairs[pairIdx][1];
+  const li = pairs[pairIdx][0];
+  const pageIdx = side === 'L' ? li : ri;
+  const filled  = pageIdx >= 0;
+  return `<div class="pair-slot ${{filled ? 'filled' : ''}}"
+    id="slot-${{pairIdx}}-${{side}}"
+    data-pair="${{pairIdx}}" data-side="${{side}}"
+  >
+    ${{filled
+      ? `<img src="data:image/png;base64,${{THUMBS[pageIdx]}}" draggable="false">
+         <div class="slot-lbl">Pág. ${{pageIdx+1}}</div>
+         <div class="slot-rm" onclick="clearSlot(${{pairIdx}},'${{side}}')">✕</div>`
+      : `<span>${{side==='L'?'Esquerda':'Direita (opcional)'}}</span>`
+    }}
+  </div>`;
+}}
+
+function renderPairs() {{
+  const list = document.getElementById('pairs-list');
+  list.innerHTML = '';
+  pairs.forEach((p, pi) => {{
+    const row = document.createElement('div');
+    row.className = 'pair-row';
+    row.innerHTML = `
+      <div class="pair-num">${{pi+1}}</div>
+      ${{slotHTML(pi,'L')}}
+      <div class="pair-divider">↔</div>
+      ${{slotHTML(pi,'R')}}
+      <button class="pair-delete" title="Remover par" onclick="removePair(${{pi}})">✕</button>
+    `;
+    list.appendChild(row);
+  }});
+  // Adiciona listeners de drop a cada slot
+  document.querySelectorAll('.pair-slot').forEach(slot => {{
+    slot.addEventListener('dragover', e => {{
+      e.preventDefault();
+      slot.classList.add('over');
+    }});
+    slot.addEventListener('dragleave', () => slot.classList.remove('over'));
+    slot.addEventListener('drop', e => {{
+      e.preventDefault();
+      slot.classList.remove('over');
+      if (dragSrc === null) return;
+      const pairIdx = parseInt(slot.dataset.pair);
+      const side    = slot.dataset.side;
+      // Limpa origem se era um slot
+      if (dragSrc.origin === 'slot') {{
+        pairs[dragSrc.pairIdx][dragSrc.side === 'L' ? 0 : 1] = -1;
+      }}
+      pairs[pairIdx][side === 'L' ? 0 : 1] = dragSrc.pageIdx;
+      dragSrc = null;
+      render();
+    }});
+  }});
+  // Chips dentro dos slots também são arrastáveis
+  document.querySelectorAll('.pair-slot.filled').forEach(slot => {{
+    const img = slot.querySelector('img');
+    if (!img) return;
+    const pi   = parseInt(slot.dataset.pair);
+    const side = slot.dataset.side;
+    const pgIdx = pairs[pi][side === 'L' ? 0 : 1];
+    slot.setAttribute('draggable', 'true');
+    slot.addEventListener('dragstart', e => {{
+      dragSrc = {{ pageIdx: pgIdx, origin: 'slot', pairIdx: pi, side }};
+      slot.classList.add('dragging');
+    }});
+    slot.addEventListener('dragend', () => slot.classList.remove('dragging'));
+  }});
+}}
+
+function addChipDrag(chip, pageIdx, origin, pairIdx, side) {{
+  chip.addEventListener('dragstart', e => {{
+    dragSrc = {{ pageIdx, origin, pairIdx, side }};
+    chip.classList.add('dragging');
+  }});
+  chip.addEventListener('dragend', () => chip.classList.remove('dragging'));
+}}
+
+function clearSlot(pairIdx, side) {{
+  pairs[pairIdx][side === 'L' ? 0 : 1] = -1;
+  render();
+}}
+
+function removePair(pi) {{
+  pairs.splice(pi, 1);
+  render();
+}}
+
+function addPair() {{
+  pairs.push([0, -1]);
+  render();
+}}
+
+function resetPairs() {{
+  pairs = [];
+  for (let i = 0; i < Math.ceil(N/2); i++) {{
+    pairs.push([i*2, i*2+1 < N ? i*2+1 : -1]);
+  }}
+  render();
+}}
+
+function emitPairs() {{
+  // Valida: todos os pares têm pelo menos a esquerda preenchida
+  const invalid = pairs.some(p => p[0] < 0);
+  if (invalid) {{
+    document.getElementById('output').textContent = '⚠️ Todos os pares precisam de uma página à esquerda.';
+    return;
+  }}
+  document.getElementById('output').textContent = 'A enviar…';
+  // Comunica com Streamlit via query param (hack compatível com st.query_params)
+  const encoded = encodeURIComponent(JSON.stringify(pairs));
+  window.parent.postMessage({{type:'streamlit:setComponentValue', value: JSON.stringify(pairs)}}, '*');
+}}
+
+render();
+</script>
+</body>
+</html>
+"""
+
+        # ── Receber valor do componente ───────────────────────────────────────
+        result = components.html(html_component, height=max(420, n_arr * 18 + 280), scrolling=True)
+
+        # Como components.html não devolve valor, usamos uma text_area hidden
+        # para o utilizador colar ou usar o botão Gerar abaixo em Python
         st.divider()
-
-        # ── Editor de pares ───────────────────────────────────────────────────
-        st.markdown("### Pares de páginas")
+        st.markdown("**Confirmar pares e gerar**")
         st.caption(
-            "Cada linha é um par. Escolha qual página fica à esquerda e à direita. "
-            "Use **Branco** no lado direito para deixar metade em branco."
+            "Depois de organizar os pares no editor acima, "
+            "confirme a lista e clique **Gerar ficheiro**. "
+            "O editor actualiza a caixa automaticamente ao clicar 🚀 Gerar — "
+            "ou edite manualmente no formato `[[0,1],[2,3],…]` (índices base 0, -1 = branco)."
         )
 
-        page_options_left  = [f"Pág. {i + 1}" for i in range(n_arr)]
-        page_options_right = ["Branco"] + [f"Pág. {i + 1}" for i in range(n_arr)]
+        pairs_json_edit = st.text_area(
+            "Pares (JSON)", value=json.dumps(saved_pairs),
+            height=68, key=f"pairs_json_{cache_key}",
+            label_visibility="visible",
+        )
 
-        new_pairs = []
-        for pair_i, pair in enumerate(pairs_state):
-            li, ri = pair
-            with st.container():
-                c1, c2, c3, c4, c5 = st.columns([0.12, 2, 0.3, 2, 0.5])
-                with c1:
-                    st.markdown(f"**{pair_i + 1}.**")
-                with c2:
-                    left_sel = st.selectbox(
-                        "Esquerda", page_options_left,
-                        index=li,
-                        key=f"pair_{cache_key}_{pair_i}_L",
-                        label_visibility="collapsed",
-                    )
-                with c3:
-                    st.markdown("<div style='text-align:center;padding-top:6px'>↔</div>", unsafe_allow_html=True)
-                with c4:
-                    right_default = 0 if ri is None else ri + 1  # offset pelo "Branco"
-                    right_sel = st.selectbox(
-                        "Direita", page_options_right,
-                        index=right_default,
-                        key=f"pair_{cache_key}_{pair_i}_R",
-                        label_visibility="collapsed",
-                    )
-                with c5:
-                    remove = st.button("✕", key=f"pair_{cache_key}_{pair_i}_del",
-                                       help="Remover este par")
+        # Tenta parsear o JSON editado
+        try:
+            edited_pairs = json.loads(pairs_json_edit)
+            assert isinstance(edited_pairs, list) and all(
+                isinstance(p, list) and len(p) == 2 for p in edited_pairs
+            )
+            st.session_state[cache_key + "_pairs"] = edited_pairs
+        except Exception:
+            st.warning("JSON inválido — corrija o formato.", icon="⚠️")
+            edited_pairs = saved_pairs
 
-            if not remove:
-                li_new = page_options_left.index(left_sel)
-                ri_new = None if right_sel == "Branco" else page_options_right.index(right_sel) - 1
-                new_pairs.append([li_new, ri_new])
-
-        # ── Botões de gestão de pares ──────────────────────────────────────────
-        bc1, bc2, bc3 = st.columns([1, 1, 2])
+        bc1, bc2 = st.columns([1, 3])
         with bc1:
-            if st.button("＋  Adicionar par", use_container_width=True):
-                new_pairs.append([0, None])
-        with bc2:
-            if st.button("↺  Repor sequencial", use_container_width=True):
-                new_pairs = [
-                    [i * 2, i * 2 + 1 if i * 2 + 1 < n_arr else None]
+            if st.button("↺  Repor", use_container_width=True, key="arr_reset"):
+                edited_pairs = [
+                    [i * 2, i * 2 + 1 if i * 2 + 1 < n_arr else -1]
                     for i in range(math.ceil(n_arr / 2))
                 ]
+                st.session_state[cache_key + "_pairs"] = edited_pairs
+                st.rerun()
 
-        # Guarda estado actualizado
-        st.session_state[cache_key + "_pairs"] = new_pairs
-
-        # ── Preview dos pares seleccionados (thumbnails) ──────────────────────
-        if new_pairs:
-            st.divider()
-            st.markdown("### Preview dos pares")
-            PAIR_COLS = min(len(new_pairs), 3)
-            p_cols = st.columns(PAIR_COLS)
-            for idx, (li, ri) in enumerate(new_pairs):
-                with p_cols[idx % PAIR_COLS]:
-                    lt = thumbs[li]
-                    rt = thumbs[ri] if ri is not None else Image.new("RGB", lt.size, (240, 242, 245))
-                    # Merge thumbnail inline
-                    merged_thumb = merge_side_by_side(lt, rt, align_by=align_by, gap_px=2, bg=(240, 242, 245))
-                    st.image(thumb_to_bytes(merged_thumb), use_container_width=True,
-                             caption=f"Par {idx + 1}: pág. {li + 1} + {'branco' if ri is None else f'pág. {ri + 1}'}")
-
-        # ── Gerar ─────────────────────────────────────────────────────────────
-        st.divider()
-        if not new_pairs:
-            st.warning("Adicione pelo menos um par para gerar.", icon="⚠️")
-        else:
-            if st.button("🚀  Gerar", type="primary", use_container_width=True):
+        if st.button("🚀  Gerar ficheiro", type="primary", use_container_width=True, key="arr_gen"):
+            valid = [p for p in edited_pairs if isinstance(p, list) and len(p) == 2 and p[0] >= 0]
+            if not valid:
+                st.error("Não há pares válidos para gerar.", icon="❌")
+            else:
                 try:
+                    pairs_tuples = [(p[0], p[1] if p[1] >= 0 else None) for p in valid]
                     with fitz.open(stream=arr_bytes, filetype="pdf") as doc:
-                        pairs_tuples = [(li, ri) for li, ri in new_pairs]
                         out_bytes, mime, ext, merged = process_pairs(pairs_tuples, doc, OPTS)
-
                     base  = arr_file.name.rsplit(".", 1)[0]
                     fname = f"{base}_arranjo.{ext}"
                     show_result(out_bytes, mime, ext, fname, n_arr, len(merged), dpi)
