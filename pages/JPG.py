@@ -175,8 +175,8 @@ def thumb_to_bytes(img: Image.Image) -> bytes:
 def fit_two_cards_on_a4(
     left: Image.Image,
     right: Image.Image,
-    card_w_cm: float = 14.8,
-    card_h_cm: float = 21.0,
+    card_w_cm: float = 13.0,
+    card_h_cm: float = 20.5,
     img_scale: float = 1.0,
     dpi: int = 300,
     mark_len_cm: float = 0.4,
@@ -184,6 +184,8 @@ def fit_two_cards_on_a4(
     mark_thick_px: int = 3,
     mark_color=(0, 0, 0),
     bg=(255, 255, 255),
+    offset_left=(0.0, 0.0),    # (dx_cm, dy_cm) para a carta esquerda
+    offset_right=(0.0, 0.0),   # (dx_cm, dy_cm) para a carta direita
 ) -> tuple:
     """
     Lógica correcta:
@@ -195,17 +197,15 @@ def fit_two_cards_on_a4(
         img_scale>1.0 → a carta fica maior, partes ficam fora da área visível (bleed)
     - As marcas de corte são desenhadas na posição pedida (card_w_cm × card_h_cm),
       centradas em cada metade — independentemente da escala da imagem.
-    - A imagem NÃO é escalada para caber dentro das marcas; as marcas é que indicam
-      onde cortar, podendo ficar dentro ou fora da área da imagem.
-    Devolve (Image, overflow: bool) onde overflow indica se as marcas ficam
-    fora da margem disponível.
+    - offset_left / offset_right deslocam a carta dentro da sua metade (em cm).
+    Devolve (Image, False).
     """
     def cm2px(cm): return int(round(cm * dpi / 2.54))
 
     # Canvas A4 paisagem
     a4_w = cm2px(29.7)
     a4_h = cm2px(21.0)
-    half_w = a4_w // 2          # largura de cada metade (onde a carta vai)
+    half_w = a4_w // 2
 
     # Dimensões das marcas de corte (pedidas pelo utilizador) — FIXAS
     cw = cm2px(card_w_cm)
@@ -216,11 +216,13 @@ def fit_two_cards_on_a4(
 
     canvas = Image.new("RGB", (a4_w, a4_h), bg)
 
-    def place_card(img, half_x_start):
+    def place_card(img, half_x_start, offset_cm):
         """
-        Coloca a imagem centrada na metade do A4 indicada, escalada por img_scale.
-        img_scale aplica-se relativamente ao tamanho da metade do A4.
+        Coloca a imagem centrada na metade do A4, com offset em cm aplicado.
         """
+        ox_px = cm2px(offset_cm[0])
+        oy_px = cm2px(offset_cm[1])
+
         # Dimensões alvo = metade do A4 * img_scale (letterbox)
         target_w = max(1, int(half_w * img_scale))
         target_h = max(1, int(a4_h  * img_scale))
@@ -233,13 +235,12 @@ def fit_two_cards_on_a4(
 
         img_s = img.resize((nw, nh), Image.LANCZOS)
 
-        # Centra na metade do canvas
-        px = half_x_start + (half_w - nw) // 2
-        py = (a4_h - nh) // 2
+        # Centra na metade + aplica offset
+        px = half_x_start + (half_w - nw) // 2 + ox_px
+        py = (a4_h - nh) // 2 + oy_px
 
         if nw > half_w or nh > a4_h:
-            # bleed: cortar o que ultrapassa a metade
-            src_x = max(0, -px + half_x_start)
+            src_x = max(0, half_x_start - px)
             src_y = max(0, -py)
             src_x2 = src_x + half_w
             src_y2 = src_y + a4_h
@@ -250,8 +251,8 @@ def fit_two_cards_on_a4(
             py = 0
         canvas.paste(img_s, (px, py))
 
-    place_card(left,  0)
-    place_card(right, half_w)
+    place_card(left,  0,      offset_left)
+    place_card(right, half_w, offset_right)
 
     # Marcas centradas em cada metade do A4, na posição pedida
     mark_x_margin = (half_w - cw) // 2
@@ -488,6 +489,8 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
                     mark_len_cm=opts["crop_marklen"],
                     mark_offset_cm=0.15,
                     bg=bg,
+                    offset_left=(opts.get("offset_lx", 0.0), opts.get("offset_ly", 0.0)),
+                    offset_right=(opts.get("offset_rx", 0.0), opts.get("offset_ry", 0.0)),
                 )
                 if overflow:
                     had_overflow = True
@@ -558,6 +561,8 @@ def process_dual(pdf_a: bytes, pdf_b: bytes, opts: dict):
             card_w_cm=opts["crop_w"], card_h_cm=opts["crop_h"],
             img_scale=opts.get("img_scale", 1.0),
             dpi=dpi, mark_len_cm=opts["crop_marklen"], mark_offset_cm=0.15, bg=bg,
+            offset_left=(opts.get("offset_lx", 0.0), opts.get("offset_ly", 0.0)),
+            offset_right=(opts.get("offset_rx", 0.0), opts.get("offset_ry", 0.0)),
         )
     else:
         merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
@@ -692,8 +697,21 @@ with st.sidebar:
             help="As linhas de corte não se movem. Só a imagem escala."
         ) / 100.0
         crop_marklen = st.slider("Tamanho do traço (mm)", 2, 20, 8, 1) / 10
+
+        st.markdown("**Posição das cartas**")
+        st.caption("Desloca cada carta dentro da sua metade (em cm). As marcas de corte não se movem.")
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            st.markdown("<div style='font-size:0.78rem;font-weight:600'>◀ Carta esquerda ▶</div>", unsafe_allow_html=True)
+            offset_lx = st.slider("← →", -3.0, 3.0, 0.0, 0.1, key="off_lx", format="%.1f cm")
+            offset_ly = st.slider("↑ ↓", -3.0, 3.0, 0.0, 0.1, key="off_ly", format="%.1f cm")
+        with oc2:
+            st.markdown("<div style='font-size:0.78rem;font-weight:600'>◀ Carta direita ▶</div>", unsafe_allow_html=True)
+            offset_rx = st.slider("← →", -3.0, 3.0, 0.0, 0.1, key="off_rx", format="%.1f cm")
+            offset_ry = st.slider("↑ ↓", -3.0, 3.0, 0.0, 0.1, key="off_ry", format="%.1f cm")
     else:
         crop_w, crop_h, crop_marklen, img_scale = 13.0, 20.5, 0.4, 1.0
+        offset_lx = offset_ly = offset_rx = offset_ry = 0.0
 
     st.divider()
     st.markdown("**Preview**")
@@ -702,7 +720,9 @@ with st.sidebar:
 
 OPTS = dict(dpi=dpi, fmt=fmt, align_by=align_by, gap_px=gap_px, bg=BG, sharpen=sharpen,
             crop_marks=crop_marks, crop_w=crop_w, crop_h=crop_h, crop_marklen=crop_marklen,
-            img_scale=img_scale, duplex=duplex)
+            img_scale=img_scale, duplex=duplex,
+            offset_lx=offset_lx, offset_ly=offset_ly,
+            offset_rx=offset_rx, offset_ry=offset_ry)
 
 
 # ─────────────────────────────────────────────
