@@ -152,6 +152,68 @@ def apply_sharpen(img: Image.Image) -> Image.Image:
     return img.filter(ImageFilter.UnsharpMask(radius=0.8, percent=120, threshold=3))
 
 
+def scale_and_crop_marks(
+    img: Image.Image,
+    content_w_cm: float = 13.3,
+    content_h_cm: float = 20.5,
+    dpi: int = 500,
+    margin_cm: float = 0.5,
+    mark_len_cm: float = 0.4,
+    mark_offset_cm: float = 0.1,
+    mark_thick_px: int = 2,
+    mark_color=(0, 0, 0),
+    bg=(255, 255, 255),
+) -> Image.Image:
+    """
+    Escala img para caber em content_w_cm x content_h_cm (mantendo proporcao),
+    centra num canvas branco com margem margin_cm a volta,
+    e desenha marcas de corte em L nos 4 cantos.
+    """
+    from PIL import ImageDraw
+
+    def cm2px(cm): return int(round(cm * dpi / 2.54))
+
+    cw = cm2px(content_w_cm)
+    ch = cm2px(content_h_cm)
+    mg = cm2px(margin_cm)
+    ml = cm2px(mark_len_cm)
+    mo = cm2px(mark_offset_cm)
+
+    img_ratio    = img.width / img.height
+    target_ratio = cw / ch
+    if img_ratio > target_ratio:
+        new_w, new_h = cw, round(cw / img_ratio)
+    else:
+        new_w, new_h = round(ch * img_ratio), ch
+    img_scaled = img.resize((new_w, new_h), Image.LANCZOS)
+
+    total_w = mg + cw + mg
+    total_h = mg + ch + mg
+    canvas = Image.new("RGB", (total_w, total_h), bg)
+
+    x0 = mg + (cw - new_w) // 2
+    y0 = mg + (ch - new_h) // 2
+    canvas.paste(img_scaled, (x0, y0))
+
+    lx, rx = mg, mg + cw
+    ty, by = mg, mg + ch
+    draw = ImageDraw.Draw(canvas)
+    t = mark_thick_px
+
+    def L_mark(cx, cy, dx, dy):
+        hx0, hx1 = cx + dx * mo, cx + dx * (mo + ml)
+        draw.rectangle([min(hx0,hx1), cy - t//2, max(hx0,hx1), cy + t//2], fill=mark_color)
+        vy0, vy1 = cy + dy * mo, cy + dy * (mo + ml)
+        draw.rectangle([cx - t//2, min(vy0,vy1), cx + t//2, max(vy0,vy1)], fill=mark_color)
+
+    L_mark(lx, ty, dx=-1, dy=-1)
+    L_mark(rx, ty, dx=+1, dy=-1)
+    L_mark(lx, by, dx=-1, dy=+1)
+    L_mark(rx, by, dx=+1, dy=+1)
+
+    return canvas
+
+
 def encode_image(img: Image.Image, fmt: str) -> bytes:
     bio = io.BytesIO()
     if fmt == "PNG":
@@ -203,6 +265,7 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
     dpi, fmt        = opts["dpi"], opts["fmt"]
     align_by, gap   = opts["align_by"], opts["gap_px"]
     bg, sharpen     = opts["bg"], opts["sharpen"]
+    do_crop         = opts.get("crop_marks", False)
     n_pairs         = len(pairs_indices)
     progress        = st.progress(0, text="A rasterizar páginas…")
     merged_images   = []
@@ -213,6 +276,13 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
         merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
         if sharpen:
             merged = apply_sharpen(merged)
+        if do_crop:
+            merged = scale_and_crop_marks(
+                merged,
+                content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
+                dpi=dpi, margin_cm=opts["crop_margin"],
+                mark_len_cm=opts["crop_marklen"], bg=bg,
+            )
         merged_images.append(merged)
         progress.progress((i + 1) / n_pairs, text=f"Par {i + 1}/{n_pairs}…")
 
@@ -263,6 +333,13 @@ def process_dual(pdf_a: bytes, pdf_b: bytes, opts: dict):
     merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
     if sharpen:
         merged = apply_sharpen(merged)
+    if opts.get("crop_marks", False):
+        merged = scale_and_crop_marks(
+            merged,
+            content_w_cm=opts["crop_w"], content_h_cm=opts["crop_h"],
+            dpi=dpi, margin_cm=opts["crop_margin"],
+            mark_len_cm=opts["crop_marklen"], bg=bg,
+        )
     progress.empty()
 
     out  = encode_image(merged, fmt)
@@ -313,11 +390,28 @@ with st.sidebar:
     sharpen  = st.toggle("Aumentar nitidez", value=True)
 
     st.divider()
+    st.markdown("**Escala + Marcas de corte**")
+    crop_marks = st.toggle("Escalar e adicionar marcas de corte", value=False,
+                           help="Escala cada imagem para 13.3×20.5 cm e adiciona marcas de corte em L.")
+    if crop_marks:
+        c1, c2 = st.columns(2)
+        with c1:
+            crop_w = st.number_input("Largura (cm)", value=13.3, step=0.1, format="%.1f")
+        with c2:
+            crop_h = st.number_input("Altura (cm)",  value=20.5, step=0.1, format="%.1f")
+        crop_margin = st.slider("Margem branca (mm)", 2, 20, 5, 1) / 10  # → cm
+        crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 15, 4, 1) / 10
+    else:
+        crop_w, crop_h, crop_margin, crop_marklen = 13.3, 20.5, 0.5, 0.4
+
+    st.divider()
     st.markdown("**Preview**")
     preview_width = st.slider("Largura máx. (px)", 400, 2000, 900, 100)
     preview_1to1  = st.toggle("Mostrar 1:1", value=False)
 
-OPTS = dict(dpi=dpi, fmt=fmt, align_by=align_by, gap_px=gap_px, bg=BG, sharpen=sharpen)
+OPTS = dict(dpi=dpi, fmt=fmt, align_by=align_by, gap_px=gap_px, bg=BG, sharpen=sharpen,
+            crop_marks=crop_marks, crop_w=crop_w, crop_h=crop_h,
+            crop_margin=crop_margin, crop_marklen=crop_marklen)
 
 
 # ─────────────────────────────────────────────
@@ -354,18 +448,35 @@ with tab_normal:
         st.info("⬆️  Arraste ou escolha um ou mais PDFs para começar.", icon="📂")
     else:
         for f in files:
-            try:
-                out_bytes, mime, ext, n_pages, merged = process_normal(f.read(), OPTS)
-                base  = f.name.rsplit(".", 1)[0]
-                fname = f"{base}_merged.{ext}"
-                show_result(out_bytes, mime, ext, fname, n_pages, len(merged), dpi)
-                show_previews(merged, preview_width, preview_1to1)
+            fkey = f"normal_{f.name}_{f.size}"
+            if fkey not in st.session_state:
+                try:
+                    out_bytes, mime, ext, n_pages, merged = process_normal(f.read(), OPTS)
+                    base  = f.name.rsplit(".", 1)[0]
+                    fname = f"{base}_merged.{ext}"
+                    st.session_state[fkey] = dict(
+                        out_bytes=out_bytes, mime=mime, ext=ext, fname=fname,
+                        n_pages=n_pages, n_pairs=len(merged),
+                        preview_bytes=[make_preview(m, preview_width, preview_1to1) for m in merged],
+                    )
+                except Exception as e:
+                    st.error(f"**{f.name}**: {e}", icon="❌")
+            res = st.session_state.get(fkey)
+            if res:
+                show_result(res["out_bytes"], res["mime"], res["ext"],
+                            res["fname"], res["n_pages"], res["n_pairs"], dpi)
+                if len(res["preview_bytes"]) == 1:
+                    st.image(res["preview_bytes"][0])
+                else:
+                    cols = st.columns(min(len(res["preview_bytes"]), 3))
+                    for idx, pb in enumerate(res["preview_bytes"]):
+                        with cols[idx % 3]:
+                            st.image(pb, caption=f"Par {idx + 1}")
                 st.download_button(
-                    f"⬇️  Descarregar {fname}", data=out_bytes,
-                    file_name=fname, mime=mime, use_container_width=True,
+                    f"⬇️  Descarregar {res['fname']}", data=res["out_bytes"],
+                    file_name=res["fname"], mime=res["mime"],
+                    use_container_width=True, key=f"dl_{fkey}",
                 )
-            except Exception as e:
-                st.error(f"**{f.name}**: {e}", icon="❌")
             st.markdown("<hr>", unsafe_allow_html=True)
 
 
@@ -382,20 +493,29 @@ with tab_dual:
         st.markdown("**▶  PDF direito (B)**")
         file_b = st.file_uploader("PDF B", type=["pdf"], key="dual_b", label_visibility="collapsed")
 
+    dkey = f"dual_{getattr(file_a,'name','') }_{getattr(file_a,'size',0)}_{getattr(file_b,'name','') }_{getattr(file_b,'size',0)}"
     if file_a and file_b:
-        try:
-            out_bytes, mime, ext, merged_img = process_dual(file_a.read(), file_b.read(), OPTS)
-            name_a = file_a.name.rsplit(".", 1)[0]
-            name_b = file_b.name.rsplit(".", 1)[0]
-            fname  = f"{name_a}+{name_b}.{ext}"
-            show_result(out_bytes, mime, ext, fname, None, 1, dpi)
-            st.image(make_preview(merged_img, preview_width, preview_1to1))
+        if dkey not in st.session_state:
+            try:
+                out_bytes, mime, ext, merged_img = process_dual(file_a.read(), file_b.read(), OPTS)
+                name_a = file_a.name.rsplit(".", 1)[0]
+                name_b = file_b.name.rsplit(".", 1)[0]
+                fname  = f"{name_a}+{name_b}.{ext}"
+                st.session_state[dkey] = dict(
+                    out_bytes=out_bytes, mime=mime, ext=ext, fname=fname,
+                    preview=make_preview(merged_img, preview_width, preview_1to1),
+                )
+            except Exception as e:
+                st.error(f"{e}", icon="❌")
+        res = st.session_state.get(dkey)
+        if res:
+            show_result(res["out_bytes"], res["mime"], res["ext"], res["fname"], None, 1, dpi)
+            st.image(res["preview"])
             st.download_button(
-                f"⬇️  Descarregar {fname}", data=out_bytes,
-                file_name=fname, mime=mime, use_container_width=True,
+                f"⬇️  Descarregar {res['fname']}", data=res["out_bytes"],
+                file_name=res["fname"], mime=res["mime"],
+                use_container_width=True, key=f"dl_{dkey}",
             )
-        except Exception as e:
-            st.error(f"{e}", icon="❌")
     elif file_a or file_b:
         st.warning(f"Falta carregar o **{'PDF direito (B)' if file_a else 'PDF esquerdo (A)'}**.", icon="⚠️")
     else:
@@ -859,6 +979,7 @@ render();
                     for i in range(math.ceil(n_arr / 2))
                 ]
                 st.session_state[cache_key + "_pairs"] = edited_pairs
+                st.session_state.pop(cache_key + "_result", None)
                 st.rerun()
 
         if st.button("🚀  Gerar ficheiro", type="primary", use_container_width=True, key="arr_gen"):
@@ -872,11 +993,30 @@ render();
                         out_bytes, mime, ext, merged = process_pairs(pairs_tuples, doc, OPTS)
                     base  = arr_file.name.rsplit(".", 1)[0]
                     fname = f"{base}_arranjo.{ext}"
-                    show_result(out_bytes, mime, ext, fname, n_arr, len(merged), dpi)
-                    show_previews(merged, preview_width, preview_1to1)
-                    st.download_button(
-                        f"⬇️  Descarregar {fname}", data=out_bytes,
-                        file_name=fname, mime=mime, use_container_width=True,
-                    )
+                    # Guarda no session_state para sobreviver ao rerun do download
+                    st.session_state[cache_key + "_result"] = {
+                        "out_bytes": out_bytes, "mime": mime, "ext": ext,
+                        "fname": fname, "n_pages": n_arr, "n_pairs": len(merged),
+                        "preview_bytes": [make_preview(m, preview_width, False) for m in merged],
+                    }
                 except Exception as e:
                     st.error(f"{e}", icon="❌")
+
+        # Mostra resultado persistido (sobrevive a reruns)
+        res = st.session_state.get(cache_key + "_result")
+        if res:
+            show_result(res["out_bytes"], res["mime"], res["ext"],
+                        res["fname"], res["n_pages"], res["n_pairs"], dpi)
+            if len(res["preview_bytes"]) == 1:
+                st.image(res["preview_bytes"][0])
+            else:
+                cols = st.columns(min(len(res["preview_bytes"]), 3))
+                for idx, pb in enumerate(res["preview_bytes"]):
+                    with cols[idx % 3]:
+                        st.image(pb, caption=f"Par {idx + 1}")
+            st.download_button(
+                f"⬇️  Descarregar {res['fname']}",
+                data=res["out_bytes"], file_name=res["fname"],
+                mime=res["mime"], use_container_width=True,
+                key="arr_download",
+            )
