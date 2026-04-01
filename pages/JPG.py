@@ -258,14 +258,19 @@ def fit_two_cards_on_a4(
 
 def reorder_for_duplex(pairs: list) -> list:
     """
-    Recebe lista de pares e reordena para impressão frente/verso:
-    Páginas ímpares (frentes): 1, 3, 5, ...
-    Páginas pares  (versos):   2, 4, 6, ...
-    → resultado: [par1, par3, par5, ..., par2, par4, par6, ...]
-    Assim ao imprimir frente/verso, o verso do par1 é o par2, etc.
+    Reordena para impressão frente/verso (duplex).
+    Padrão: 1,3,5,…,N,…,6,4,2
+      n=2 → 1,2
+      n=4 → 1,3,4,2
+      n=6 → 1,3,5,6,4,2
+      n=8 → 1,3,5,7,8,6,4,2
+    Frentes: índices base-0 pares (0,2,4,…) em ordem crescente.
+    Versos:  índices base-0 ímpares (1,3,5,…) em ordem decrescente.
     """
-    fronts = pairs[0::2]
-    backs  = pairs[1::2]
+    n      = len(pairs)
+    fronts = [pairs[i] for i in range(0, n, 2)]
+    start  = n - 1 if n % 2 == 0 else n - 2   # maior índice base-0 ímpar
+    backs  = [pairs[i] for i in range(start, -1, -2)]
     return fronts + backs
 
 
@@ -429,8 +434,9 @@ def _on_crop_w_change():
 def _on_crop_h_change():
     st.session_state["crop_w"] = round(st.session_state["crop_h"] / st.session_state["crop_ratio"], 1)
 
-def _on_ratio_unlock():
-    # Recalcula ratio com os valores actuais antes de desligar o lock
+def _on_ratio_toggle():
+    # Sempre que o lock muda (liga ou desliga), actualiza o ratio com os valores actuais
+    # Assim quando se volta a ligar, o ratio reflecte os valores correntes
     st.session_state["crop_ratio"] = st.session_state["crop_h"] / max(st.session_state["crop_w"], 0.1)
 
 _init_state()
@@ -473,7 +479,7 @@ with st.sidebar:
                            help="Escala cada carta para as dimensões definidas e posiciona duas num A4 paisagem.")
     if crop_marks:
         ratio_lock = st.toggle("🔒 Manter proporção", value=True, key="ratio_lock",
-                               on_change=_on_ratio_unlock)
+                               on_change=_on_ratio_toggle)
         c1, c2 = st.columns(2)
         with c1:
             st.number_input(
@@ -550,7 +556,8 @@ with tab_normal:
         st.info("⬆️  Arraste ou escolha um ou mais PDFs para começar.", icon="📂")
     else:
         for f in files:
-            fkey = f"normal_{f.name}_{f.size}"
+            opts_sig = f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{duplex}"
+            fkey = f"normal_{f.name}_{f.size}_{opts_sig}"
             if fkey not in st.session_state:
                 try:
                     out_bytes, mime, ext, n_pages, merged, overflow = process_normal(f.read(), OPTS)
@@ -592,7 +599,8 @@ with tab_dual:
         st.markdown("**▶  PDF direito (B)**")
         file_b = st.file_uploader("PDF B", type=["pdf"], key="dual_b", label_visibility="collapsed")
 
-    dkey = f"dual_{getattr(file_a,'name','')}_{getattr(file_a,'size',0)}_{getattr(file_b,'name','')}_{getattr(file_b,'size',0)}"
+    opts_sig_d = f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{duplex}"
+    dkey = f"dual_{getattr(file_a,'name','')}_{getattr(file_a,'size',0)}_{getattr(file_b,'name','')}_{getattr(file_b,'size',0)}_{opts_sig_d}"
     if file_a and file_b:
         if dkey not in st.session_state:
             try:
