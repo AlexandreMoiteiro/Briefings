@@ -253,11 +253,10 @@ def fit_two_cards_on_a4(
     place_card(left,  0)
     place_card(right, half_w)
 
-    # Marcas de corte centradas em cada metade, na posição pedida
-    # Se cw > half_w ou ch > a4_h, as marcas ficam fora da área visível (overflow)
+    # Marcas centradas em cada metade do A4, na posição pedida
+    # Podem ficar dentro ou fora da carta — sem overflow, a pessoa ajusta a gosto
     mark_x_margin = (half_w - cw) // 2
     mark_y_margin = (a4_h  - ch) // 2
-    overflow = cw > half_w or ch > a4_h or mark_x_margin < mo + ml or mark_y_margin < mo + ml
 
     draw = ImageDraw.Draw(canvas)
 
@@ -265,36 +264,24 @@ def fit_two_cards_on_a4(
         draw.rectangle([min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1)], fill=mark_color)
 
     def crop_mark(cx, cy, go_left, go_up):
-        """
-        Desenha uma marca L num canto.
-        go_left=True → traço horizontal vai para a esquerda
-        go_up=True   → traço vertical vai para cima
-        """
         dx = -1 if go_left else +1
         dy = -1 if go_up   else +1
-        # traço horizontal: sai do canto para fora
         draw_line(cx + dx * mo,        cy - t//2,
                   cx + dx * (mo + ml), cy + t//2)
-        # traço vertical: sai do canto para fora
         draw_line(cx - t//2, cy + dy * mo,
                   cx + t//2, cy + dy * (mo + ml))
 
     for half_x in (0, half_w):
-        mx = half_x + mark_x_margin   # x do lado esquerdo da área de corte
-        my = mark_y_margin             # y do topo da área de corte
-        rx = mx + cw                   # x do lado direito da área de corte
-        by = my + ch                   # y da base da área de corte
-
-        # Canto superior-esquerdo: horizontal vai à esquerda, vertical vai para cima
+        mx = half_x + mark_x_margin
+        my = mark_y_margin
+        rx = mx + cw
+        by = my + ch
         crop_mark(mx, my, go_left=True,  go_up=True)
-        # Canto superior-direito: horizontal vai à direita, vertical vai para cima
         crop_mark(rx, my, go_left=False, go_up=True)
-        # Canto inferior-esquerdo: horizontal vai à esquerda, vertical vai para baixo
         crop_mark(mx, by, go_left=True,  go_up=False)
-        # Canto inferior-direito: horizontal vai à direita, vertical vai para baixo
         crop_mark(rx, by, go_left=False, go_up=False)
 
-    return canvas, overflow
+    return canvas, False
 
 
 def add_crop_marks_to_composed(
@@ -586,12 +573,6 @@ def show_result(out_bytes, mime, ext, fname, n_pages, pairs_count, dpi, overflow
         f' &nbsp;·&nbsp; {pages_info} {dpi} dpi &nbsp;·&nbsp; {size_str}</div>',
         unsafe_allow_html=True,
     )
-    if overflow:
-        st.markdown(
-            '<div class="warn-box">⚠️ As cartas são maiores que o A4 — as marcas de corte '
-            'foram desenhadas por cima da imagem. Reduza as dimensões da carta na sidebar.</div>',
-            unsafe_allow_html=True,
-        )
 
 
 def show_previews(merged_images, preview_width, preview_1to1):
@@ -688,16 +669,6 @@ with st.sidebar:
             )
         crop_w    = st.session_state["crop_w"]
         crop_h    = st.session_state["crop_h"]
-
-        # Aviso se as marcas ficam fora da margem disponível
-        half_a4_w = 29.7 / 2
-        mark_margin_h = (half_a4_w - crop_w) / 2
-        mark_margin_v = (21.0 - crop_h) / 2
-        if mark_margin_h < 0.3 or mark_margin_v < 0.2:
-            st.markdown(
-                '<div class="warn-box">⚠️ Margem pequena para as marcas de corte.</div>',
-                unsafe_allow_html=True,
-            )
 
         st.markdown("**Imagem dentro do cartão**")
         st.caption(
