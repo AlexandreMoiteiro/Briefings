@@ -1,7 +1,3 @@
-# app.py — PDF Side-by-Side
-# Requisitos: streamlit, pymupdf (fitz), pillow
-# Execução: streamlit run app.py
-
 import io
 import math
 import base64
@@ -139,7 +135,6 @@ def images_to_pdf_bytes(images: list, dpi: int = 300) -> bytes:
     out_doc = fitz.open()
     for img in images:
         w_px, h_px = img.size
-        # Converter pixels → pontos usando o DPI real
         w_pt = w_px * 72.0 / dpi
         h_pt = h_px * 72.0 / dpi
         page = out_doc.new_page(width=w_pt, height=h_pt)
@@ -147,7 +142,6 @@ def images_to_pdf_bytes(images: list, dpi: int = 300) -> bytes:
         img.save(buf, format="PNG", optimize=False)
         buf.seek(0)
         page.insert_image(page.rect, stream=buf.read())
-    # Metadados que dizem à impressora: não escales, não ajustes margens
     out_doc.set_metadata({
         "creator": "PDF Side-by-Side",
         "producer": "PyMuPDF",
@@ -202,12 +196,10 @@ def fit_two_cards_on_a4(
     """
     def cm2px(cm): return int(round(cm * dpi / 2.54))
 
-    # Canvas A4 paisagem
     a4_w = cm2px(29.7)
     a4_h = cm2px(21.0)
-    half_w = a4_w // 2          # largura de cada metade (onde a carta vai)
+    half_w = a4_w // 2
 
-    # Dimensões das marcas de corte (pedidas pelo utilizador) — FIXAS
     cw = cm2px(card_w_cm)
     ch = cm2px(card_h_cm)
     ml = cm2px(mark_len_cm)
@@ -217,11 +209,6 @@ def fit_two_cards_on_a4(
     canvas = Image.new("RGB", (a4_w, a4_h), bg)
 
     def place_card(img, half_x_start):
-        """
-        Coloca a imagem centrada na metade do A4 indicada, escalada por img_scale.
-        img_scale aplica-se relativamente ao tamanho da metade do A4.
-        """
-        # Dimensões alvo = metade do A4 * img_scale (letterbox)
         target_w = max(1, int(half_w * img_scale))
         target_h = max(1, int(a4_h  * img_scale))
         r  = img.width / img.height
@@ -233,12 +220,10 @@ def fit_two_cards_on_a4(
 
         img_s = img.resize((nw, nh), Image.LANCZOS)
 
-        # Centra na metade do canvas
         px = half_x_start + (half_w - nw) // 2
         py = (a4_h - nh) // 2
 
         if nw > half_w or nh > a4_h:
-            # bleed: cortar o que ultrapassa a metade
             src_x = max(0, -px + half_x_start)
             src_y = max(0, -py)
             src_x2 = src_x + half_w
@@ -253,44 +238,63 @@ def fit_two_cards_on_a4(
     place_card(left,  0)
     place_card(right, half_w)
 
-    # Marcas centradas em cada metade do A4, na posição pedida
     mark_x_margin = (half_w - cw) // 2
     mark_y_margin = (a4_h  - ch) // 2
 
     draw = ImageDraw.Draw(canvas)
 
-    def dashed_line(x0, y0, x1, y1, dash=ml, gap=max(4, ml//2)):
-        """Desenha uma linha tracejada horizontal ou vertical."""
-        if x0 == x1:  # vertical
-            y = min(y0, y1)
-            end = max(y0, y1)
-            on = True
-            while y < end:
-                seg_end = min(y + (dash if on else gap), end)
-                if on:
-                    draw.rectangle([x0 - t//2, y, x0 + t//2, seg_end], fill=mark_color)
-                y = seg_end
-                on = not on
-        else:  # horizontal
-            x = min(x0, x1)
-            end = max(x0, x1)
-            on = True
-            while x < end:
-                seg_end = min(x + (dash if on else gap), end)
-                if on:
-                    draw.rectangle([x, y0 - t//2, seg_end, y0 + t//2], fill=mark_color)
-                x = seg_end
-                on = not on
+    def h_mark(cx, cy, length):
+        draw.rectangle(
+            [cx - length // 2, cy - t // 2, cx + length // 2, cy + t // 2],
+            fill=mark_color
+        )
+
+    def v_mark(cx, cy, length):
+        draw.rectangle(
+            [cx - t // 2, cy - length // 2, cx + t // 2, cy + length // 2],
+            fill=mark_color
+        )
+
+    def L_mark(cx, cy, dx, dy):
+        """
+        Marca em L num canto.
+        dx = -1 ou +1  -> horizontal vai para esquerda/direita
+        dy = -1 ou +1  -> vertical vai para cima/baixo
+        """
+        hx0 = cx + dx * mo
+        hx1 = cx + dx * (mo + ml)
+        draw.rectangle(
+            [min(hx0, hx1), cy - t // 2, max(hx0, hx1), cy + t // 2],
+            fill=mark_color
+        )
+
+        vy0 = cy + dy * mo
+        vy1 = cy + dy * (mo + ml)
+        draw.rectangle(
+            [cx - t // 2, min(vy0, vy1), cx + t // 2, max(vy0, vy1)],
+            fill=mark_color
+        )
 
     for half_x in (0, half_w):
         mx = half_x + mark_x_margin
         my = mark_y_margin
         rx = mx + cw
         by = my + ch
-        dashed_line(mx, my, rx, my)   # topo
-        dashed_line(mx, by, rx, by)   # base
-        dashed_line(mx, my, mx, by)   # esquerda
-        dashed_line(rx, my, rx, by)   # direita
+
+        mid_x = (mx + rx) // 2
+        mid_y = (my + by) // 2
+
+        # 4 cantos
+        L_mark(mx, my, -1, -1)
+        L_mark(rx, my, +1, -1)
+        L_mark(mx, by, -1, +1)
+        L_mark(rx, by, +1, +1)
+
+        # meio dos 4 lados
+        h_mark(mid_x, my - mo - ml // 2, ml)
+        h_mark(mid_x, by + mo + ml // 2, ml)
+        v_mark(mx - mo - ml // 2, mid_y, ml)
+        v_mark(rx + mo + ml // 2, mid_y, ml)
 
     return canvas, False
 
@@ -307,11 +311,7 @@ def add_crop_marks_to_composed(
 ) -> Image.Image:
     """
     Recebe uma imagem já composta (2 cartas lado a lado) e sobrepõe
-    marcas de corte nos cantos de cada carta.
-    Calcula a posição das marcas com base nas dimensões reais da imagem
-    dividida ao meio (carta esq = metade esquerda, carta dir = metade direita),
-    mas usa card_w_cm / card_h_cm para determinar onde ficam as linhas de corte
-    centradas em cada metade.
+    marcas de corte nos cantos e a meio de cada lado.
     """
     def cm2px(cm): return int(round(cm * dpi / 2.54))
 
@@ -322,41 +322,62 @@ def add_crop_marks_to_composed(
     cw  = cm2px(card_w_cm)
     ch  = cm2px(card_h_cm)
 
-    # Cada metade da imagem tem largura W//2
     half_w = W // 2
-
-    # Centra a área de corte em cada metade
-    # Carta esquerda: x de 0 a half_w, centrada → margem horizontal = (half_w - cw) / 2
-    # Carta direita:  x de half_w a W, centrada
     margin_x = (half_w - cw) // 2
     margin_y = (H - ch) // 2
-
-    # Origens do rectângulo de corte de cada carta
-    lx1 = margin_x                  # esquerda da carta esq
-    lx2 = half_w + margin_x         # esquerda da carta dir
-    ty  = margin_y                  # topo das cartas
-    by  = margin_y + ch             # base das cartas
 
     out = img.copy()
     draw = ImageDraw.Draw(out)
 
-    def L_mark(cx, cy, dx, dy):
-        hx0, hx1 = cx + dx * mo, cx + dx * (mo + ml)
-        draw.rectangle([min(hx0,hx1), cy - t//2,
-                        max(hx0,hx1), cy + t//2], fill=mark_color)
-        vy0, vy1 = cy + dy * mo, cy + dy * (mo + ml)
-        draw.rectangle([cx - t//2, min(vy0,vy1),
-                        cx + t//2, max(vy0,vy1)], fill=mark_color)
+    def h_mark(cx, cy, length):
+        draw.rectangle(
+            [cx - length // 2, cy - t // 2, cx + length // 2, cy + t // 2],
+            fill=mark_color
+        )
 
-    for ox in (lx1, lx2):
-        rx_ = ox + cw
-        L_mark(ox,  ty, -1, -1)
-        L_mark(rx_, ty, +1, -1)
-        L_mark(ox,  by, -1, +1)
-        L_mark(rx_, by, +1, +1)
+    def v_mark(cx, cy, length):
+        draw.rectangle(
+            [cx - t // 2, cy - length // 2, cx + t // 2, cy + length // 2],
+            fill=mark_color
+        )
+
+    def L_mark(cx, cy, dx, dy):
+        hx0 = cx + dx * mo
+        hx1 = cx + dx * (mo + ml)
+        draw.rectangle(
+            [min(hx0, hx1), cy - t // 2, max(hx0, hx1), cy + t // 2],
+            fill=mark_color
+        )
+
+        vy0 = cy + dy * mo
+        vy1 = cy + dy * (mo + ml)
+        draw.rectangle(
+            [cx - t // 2, min(vy0, vy1), cx + t // 2, max(vy0, vy1)],
+            fill=mark_color
+        )
+
+    for half_start_x in (0, half_w):
+        mx = half_start_x + margin_x
+        my = margin_y
+        rx = mx + cw
+        by = my + ch
+
+        mid_x = (mx + rx) // 2
+        mid_y = (my + by) // 2
+
+        # cantos
+        L_mark(mx, my, -1, -1)
+        L_mark(rx, my, +1, -1)
+        L_mark(mx, by, -1, +1)
+        L_mark(rx, by, +1, +1)
+
+        # meios
+        h_mark(mid_x, my - mo - ml // 2, ml)
+        h_mark(mid_x, by + mo + ml // 2, ml)
+        v_mark(mx - mo - ml // 2, mid_y, ml)
+        v_mark(rx + mo + ml // 2, mid_y, ml)
 
     return out
-
 
 
 def combine_for_duplex_crop(raw_left: list, raw_right: list, opts: dict) -> list:
@@ -399,8 +420,8 @@ def combine_for_duplex_crop(raw_left: list, raw_right: list, opts: dict) -> list
             pB_f = blank(pA_f)
             pB_v = blank(pA_v)
 
-        frente = make_a4(pA_f, pB_f)   # par_A frente (esq) + par_B frente (dir)
-        verso  = make_a4(pB_v, pA_v)   # par_B verso  (esq) + par_A verso  (dir)
+        frente = make_a4(pA_f, pB_f)
+        verso  = make_a4(pB_v, pA_v)
         result += [frente, verso]
         i += 2
     return result
@@ -448,11 +469,8 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
     n_pairs         = len(pairs_indices)
     progress        = st.progress(0, text="A rasterizar páginas…")
 
-    # ── Passo 1: renderizar todas as páginas individuais ──────────────────
-    # Guardamos sempre as imagens raw (uma por página) para o duplex poder
-    # recombinar livremente em [carta1+carta3] / [carta4+carta2].
-    raw_left  = []   # imagem da página esquerda de cada par
-    raw_right = []   # imagem da página direita de cada par (ou branco)
+    raw_left  = []
+    raw_right = []
 
     for i, (li, ri) in enumerate(pairs_indices):
         left  = render_page(doc.load_page(li), dpi, bg)
@@ -466,16 +484,12 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
 
     progress.empty()
 
-    # ── Passo 2: combinar ─────────────────────────────────────────────────
     if do_duplex:
-        # Duplex: raw_left[i]=frente do par i, raw_right[i]=verso do par i
-        # 2 pares por A4: frente=[parA_f + parB_f], verso=[parB_v + parA_v]
         if do_crop:
             merged_images = combine_for_duplex_crop(raw_left, raw_right, opts)
         else:
             merged_images = combine_for_duplex_simple(raw_left, raw_right, opts)
     else:
-        # Modo normal: cada par renderiza numa imagem (com ou sem marcas de corte)
         merged_images = []
         had_overflow  = False
         for i, (left, right) in enumerate(zip(raw_left, raw_right)):
@@ -506,8 +520,7 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
             mime = "application/pdf"
         return out, mime, ext, merged_images, had_overflow
 
-    # Duplex sempre gera PDF (múltiplas páginas)
-    had_overflow = False  # overflow tratado dentro de combine_for_duplex_crop
+    had_overflow = False
     if len(merged_images) == 1:
         out  = encode_image(merged_images[0], fmt)
         ext  = "png" if fmt == "PNG" else "jpg"
@@ -657,7 +670,7 @@ with st.sidebar:
     st.divider()
     st.markdown("**Marcas de corte (A4 paisagem)**")
     crop_marks = st.toggle("Activar marcas de corte", value=False,
-                           help="Posiciona duas cartas num A4 paisagem com marcas de corte nos cantos.")
+                           help="Posiciona duas cartas num A4 paisagem com marcas de corte nos cantos e a meio.")
     if crop_marks:
         ratio_lock = st.toggle("🔒 Manter proporção", value=True, key="ratio_lock",
                                on_change=_on_ratio_toggle)
@@ -740,13 +753,11 @@ with tab_normal:
         st.info("⬆️  Arraste ou escolha um ou mais PDFs para começar.", icon="📂")
     else:
         for f in files:
-            # Guardar bytes para não perder o stream entre reruns
             fbytes_key = f"normal_bytes_{f.name}_{f.size}"
             if fbytes_key not in st.session_state:
                 st.session_state[fbytes_key] = f.read()
             pdf_bytes = st.session_state[fbytes_key]
 
-            # Chave de resultado inclui todas as opções — regenera automaticamente quando mudam
             opts_sig = (
                 f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_"
                 f"crop{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{img_scale}_"
@@ -755,7 +766,6 @@ with tab_normal:
             fkey = f"normal_res_{f.name}_{f.size}_{opts_sig}"
 
             if fkey not in st.session_state:
-                # Limpar resultados antigos deste ficheiro para não acumular memória
                 old_keys = [k for k in st.session_state if k.startswith(f"normal_res_{f.name}_{f.size}_")]
                 for k in old_keys:
                     del st.session_state[k]
