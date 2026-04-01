@@ -173,8 +173,9 @@ def fit_two_cards_on_a4(
 ) -> tuple:
     """
     Coloca duas cartas num canvas A4 paisagem (29.7x21 cm).
-    - card_w_cm / card_h_cm: dimensões do cartão (onde ficam as marcas de corte)
-    - img_scale: escala da imagem DENTRO do cartão (1.0 = preenche, <1 = mais margem)
+    - card_w_cm / card_h_cm: dimensões FIXAS do cartão (área de corte — as marcas ficam aqui)
+    - img_scale: escala da imagem DENTRO do cartão (1.0 = preenche, <1 = mais margem branca)
+      As linhas de corte NÃO se movem; só a imagem dentro delas é que escala.
     Se as cartas forem maiores que o A4, o canvas expande e as marcas ficam por cima.
     Devolve (Image, overflow: bool).
     """
@@ -182,26 +183,32 @@ def fit_two_cards_on_a4(
 
     a4_w = cm2px(29.7)
     a4_h = cm2px(21.0)
-    cw   = cm2px(card_w_cm)   # largura do cartão (área de corte)
-    ch   = cm2px(card_h_cm)   # altura do cartão (área de corte)
+    cw   = cm2px(card_w_cm)   # largura do cartão (área de corte) — FIXA
+    ch   = cm2px(card_h_cm)   # altura do cartão (área de corte) — FIXA
     ml   = cm2px(mark_len_cm)
     mo   = cm2px(mark_offset_cm)
     t    = mark_thick_px
 
-    def scale_card(img):
-        """Escala img para caber em cw*img_scale × ch*img_scale (letterbox),
-        depois centra dentro do cartão cw×ch."""
-        target_w = int(cw * img_scale)
-        target_h = int(ch * img_scale)
+    def scale_img_into_card(img):
+        """
+        Escala img para caber em cw*img_scale × ch*img_scale (letterbox),
+        mantendo proporção. A área do cartão (cw×ch) permanece igual;
+        img_scale apenas controla quanto da área o conteúdo ocupa.
+        """
+        target_w = max(1, int(cw * img_scale))
+        target_h = max(1, int(ch * img_scale))
         r  = img.width / img.height
         tr = target_w / target_h
-        nw, nh = (target_w, round(target_w / r)) if r > tr else (round(target_h * r), target_h)
-        # Clamp para não exceder o cartão
+        if r > tr:
+            nw, nh = target_w, max(1, round(target_w / r))
+        else:
+            nw, nh = max(1, round(target_h * r)), target_h
+        # garantir que não ultrapassa o cartão (nunca deve, mas por segurança)
         nw, nh = min(nw, cw), min(nh, ch)
         return img.resize((nw, nh), Image.LANCZOS)
 
-    left_s  = scale_card(left)
-    right_s = scale_card(right)
+    left_s  = scale_img_into_card(left)
+    right_s = scale_img_into_card(right)
 
     # Verifica se os cartões cabem no A4
     min_gap_h = cm2px(0.15)
@@ -220,12 +227,13 @@ def fit_two_cards_on_a4(
         gap_h, gap_v = natural_gap_h, natural_gap_v
         canvas = Image.new("RGB", (a4_w, a4_h), bg)
 
+    # Origens (canto superior-esquerdo) de cada cartão no canvas
     lx1 = gap_h
     lx2 = gap_h + cw + gap_h
     ly  = gap_v
 
     def paste_centered(img_s, ox, oy):
-        # Centra a imagem dentro da caixa do cartão (ox,oy) → (ox+cw, oy+ch)
+        """Centra a imagem escalada dentro da caixa do cartão (ox,oy)→(ox+cw, oy+ch)."""
         px = ox + (cw - img_s.width)  // 2
         py = oy + (ch - img_s.height) // 2
         canvas.paste(img_s, (px, py))
@@ -234,6 +242,7 @@ def fit_two_cards_on_a4(
     paste_centered(right_s, lx2, ly)
 
     # Marcas de corte nos cantos de cada cartão
+    # As marcas baseiam-se sempre em cw/ch (dimensões fixas do cartão)
     ml_eff = max(min(ml, gap_h - mo - 2, gap_v - mo - 2), 6) if not overflow else max(ml, 6)
 
     draw = ImageDraw.Draw(canvas)
@@ -260,24 +269,24 @@ def fit_two_cards_on_a4(
 # Modo impressão frente/verso
 # ─────────────────────────────────────────────
 
-def combine_for_duplex(images: list, opts: dict) -> list:
+def combine_for_duplex_crop(raw_images: list, opts: dict) -> list:
     """
-    Cria novas páginas A4 para impressão frente/verso.
-    Cada A4 físico leva 2 pares de cartas (4 imagens no total):
-      Frente do A4: imagem i+0 (esq) + imagem i+2 (dir)
-      Verso  do A4: imagem i+3 (esq) + imagem i+1 (dir)  ← invertido para alinhar após corte
+    Modo duplex COM marcas de corte.
+    Cada elemento de raw_images é a imagem renderizada de UMA página (carta individual).
+    Agrupa em blocos de 4 e combina:
+      Frente do A4: carta[i+0] (esq) + carta[i+2] (dir)
+      Verso  do A4: carta[i+3] (esq) + carta[i+1] (dir)  ← invertido para alinhar após dobra/corte
 
-    Para 4 imagens [A,B,C,D]:
+    Para [A, B, C, D]:
       Frente: A + C
       Verso:  D + B
-    Resultado PDF: [frente_A4_1, verso_A4_1, frente_A4_2, verso_A4_2, ...]
     """
-    bg      = opts.get("bg", (255, 255, 255))
-    dpi     = opts["dpi"]
-    crop_w  = opts["crop_w"]
-    crop_h  = opts["crop_h"]
+    bg        = opts.get("bg", (255, 255, 255))
+    dpi       = opts["dpi"]
+    crop_w    = opts["crop_w"]
+    crop_h    = opts["crop_h"]
     img_scale = opts.get("img_scale", 1.0)
-    marklen = opts["crop_marklen"]
+    marklen   = opts["crop_marklen"]
 
     def make_a4(left_img, right_img):
         img, _ = fit_two_cards_on_a4(
@@ -288,52 +297,41 @@ def combine_for_duplex(images: list, opts: dict) -> list:
         )
         return img
 
-    # Página em branco do mesmo tamanho que as outras (para blocos incompletos)
-    def blank_like(img):
-        return Image.new("RGB", img.size, bg)
-
     result = []
     i = 0
-    while i < len(images):
-        chunk = images[i:i+4]
-        # Pad com brancos se necessário
+    while i < len(raw_images):
+        chunk = list(raw_images[i:i+4])
         while len(chunk) < 4:
             chunk.append(None)
         A, B, C, D = chunk
-
-        # Se C ou D são None, cria brancos com o mesmo tamanho de A
         ref = A
         C = C if C is not None else Image.new("RGB", ref.size, bg)
         D = D if D is not None else Image.new("RGB", ref.size, bg)
         B = B if B is not None else Image.new("RGB", ref.size, bg)
 
-        frente = make_a4(A, C)   # esq=img1, dir=img3
-        verso  = make_a4(D, B)   # esq=img4, dir=img2  (invertido)
+        frente = make_a4(A, C)   # carta1 (esq) + carta3 (dir)
+        verso  = make_a4(D, B)   # carta4 (esq) + carta2 (dir) — invertido
         result += [frente, verso]
         i += 4
     return result
 
 
-# ─────────────────────────────────────────────
-# Processadores de alto nível
-# ─────────────────────────────────────────────
-
-def combine_for_duplex_simple(images: list) -> list:
+def combine_for_duplex_simple(raw_images: list, bg=(255, 255, 255)) -> list:
     """
-    Modo duplex sem marcas de corte.
-    Combina pares de imagens side-by-side numa única imagem A4 paisagem:
-      Frente: img[i+0] (esq) + img[i+2] (dir)
-      Verso:  img[i+3] (esq) + img[i+1] (dir)
+    Modo duplex SEM marcas de corte.
+    Cada elemento de raw_images é a imagem renderizada de UMA página (carta individual).
+    Agrupa em blocos de 4 e combina side-by-side:
+      Frente: carta[i+0] (esq) + carta[i+2] (dir)
+      Verso:  carta[i+3] (esq) + carta[i+1] (dir)
     """
     result = []
     i = 0
-    while i < len(images):
-        chunk = images[i:i+4]
+    while i < len(raw_images):
+        chunk = list(raw_images[i:i+4])
         while len(chunk) < 4:
             chunk.append(None)
         A, B, C, D = chunk
         ref_size = A.size
-        bg = (255, 255, 255)
         C = C if C is not None else Image.new("RGB", ref_size, bg)
         D = D if D is not None else Image.new("RGB", ref_size, bg)
         B = B if B is not None else Image.new("RGB", ref_size, bg)
@@ -344,6 +342,10 @@ def combine_for_duplex_simple(images: list) -> list:
     return result
 
 
+# ─────────────────────────────────────────────
+# Processadores de alto nível
+# ─────────────────────────────────────────────
+
 def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
     dpi, fmt        = opts["dpi"], opts["fmt"]
     align_by, gap   = opts["align_by"], opts["gap_px"]
@@ -352,46 +354,72 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
     do_duplex       = opts.get("duplex", False)
     n_pairs         = len(pairs_indices)
     progress        = st.progress(0, text="A rasterizar páginas…")
-    merged_images   = []
-    had_overflow    = False
+
+    # ── Passo 1: renderizar todas as páginas individuais ──────────────────
+    # Guardamos sempre as imagens raw (uma por página) para o duplex poder
+    # recombinar livremente em [carta1+carta3] / [carta4+carta2].
+    raw_left  = []   # imagem da página esquerda de cada par
+    raw_right = []   # imagem da página direita de cada par (ou branco)
 
     for i, (li, ri) in enumerate(pairs_indices):
         left  = render_page(doc.load_page(li), dpi, bg)
         right = render_page(doc.load_page(ri), dpi, bg) if ri is not None else Image.new("RGB", left.size, bg)
-        if do_crop:
-            merged, overflow = fit_two_cards_on_a4(
-                left, right,
-                card_w_cm=opts["crop_w"], card_h_cm=opts["crop_h"],
-                img_scale=opts.get("img_scale", 1.0),
-                dpi=dpi,
-                mark_len_cm=opts["crop_marklen"],
-                mark_offset_cm=0.15,
-                bg=bg,
-            )
-            if overflow:
-                had_overflow = True
-        else:
-            merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
         if sharpen:
-            merged = apply_sharpen(merged)
-        merged_images.append(merged)
-        progress.progress((i + 1) / n_pairs, text=f"Par {i + 1}/{n_pairs}…")
+            left  = apply_sharpen(left)
+            right = apply_sharpen(right)
+        raw_left.append(left)
+        raw_right.append(right)
+        progress.progress((i + 1) / n_pairs * 0.5, text=f"Rasterizar {i + 1}/{n_pairs}…")
+
+    # Lista plana de cartas individuais (ordem sequencial: p1, p2, p3, p4, …)
+    raw_cards = []
+    for l, r in zip(raw_left, raw_right):
+        raw_cards.append(l)
+        raw_cards.append(r)
 
     progress.empty()
 
-    if do_duplex and do_crop and len(merged_images) > 1:
-        # Duplex + crop: recombina as imagens individuais em novas páginas A4
-        # Aqui merged_images são imagens A4 já com marcas de corte.
-        # Precisamos das imagens originais (left/right) para combinar.
-        # → processamos de novo em modo duplex combinado
-        # (as imagens já estão em merged_images como A4 individuais)
-        merged_images = combine_for_duplex(merged_images, opts)
-        had_overflow = False  # overflow já foi tratado acima
-    elif do_duplex and not do_crop and len(merged_images) > 1:
-        # Duplex sem crop: as "imagens" são os pares merged normais
-        # Trata cada par como uma "carta" e combina 2 pares por página
-        merged_images = combine_for_duplex_simple(merged_images)
+    # ── Passo 2: combinar ─────────────────────────────────────────────────
+    if do_duplex:
+        # Duplex: recombina cartas individuais em [1+3] / [4+2] por bloco de 4
+        if do_crop:
+            merged_images = combine_for_duplex_crop(raw_cards, opts)
+        else:
+            merged_images = combine_for_duplex_simple(raw_cards, bg=bg)
+    else:
+        # Modo normal: cada par renderiza numa imagem (com ou sem marcas de corte)
+        merged_images = []
+        had_overflow  = False
+        for i, (left, right) in enumerate(zip(raw_left, raw_right)):
+            if do_crop:
+                merged, overflow = fit_two_cards_on_a4(
+                    left, right,
+                    card_w_cm=opts["crop_w"], card_h_cm=opts["crop_h"],
+                    img_scale=opts.get("img_scale", 1.0),
+                    dpi=dpi,
+                    mark_len_cm=opts["crop_marklen"],
+                    mark_offset_cm=0.15,
+                    bg=bg,
+                )
+                if overflow:
+                    had_overflow = True
+            else:
+                merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
+                overflow = False
+            merged_images.append(merged)
 
+        if len(merged_images) == 1:
+            out  = encode_image(merged_images[0], fmt)
+            ext  = "png" if fmt == "PNG" else "jpg"
+            mime = "image/png" if fmt == "PNG" else "image/jpeg"
+        else:
+            out  = images_to_pdf_bytes(merged_images)
+            ext  = "pdf"
+            mime = "application/pdf"
+        return out, mime, ext, merged_images, had_overflow
+
+    # Duplex sempre gera PDF (múltiplas páginas)
+    had_overflow = False  # overflow tratado dentro de combine_for_duplex_crop
     if len(merged_images) == 1:
         out  = encode_image(merged_images[0], fmt)
         ext  = "png" if fmt == "PNG" else "jpg"
@@ -400,7 +428,6 @@ def process_pairs(pairs_indices: list, doc: fitz.Document, opts: dict):
         out  = images_to_pdf_bytes(merged_images)
         ext  = "pdf"
         mime = "application/pdf"
-
     return out, mime, ext, merged_images, had_overflow
 
 
@@ -432,6 +459,10 @@ def process_dual(pdf_a: bytes, pdf_b: bytes, opts: dict):
         right = render_page(db.load_page(0), dpi, bg)
     progress.progress(0.9, text="A juntar…")
 
+    if sharpen:
+        left  = apply_sharpen(left)
+        right = apply_sharpen(right)
+
     overflow = False
     if opts.get("crop_marks", False):
         merged, overflow = fit_two_cards_on_a4(
@@ -442,8 +473,6 @@ def process_dual(pdf_a: bytes, pdf_b: bytes, opts: dict):
         )
     else:
         merged = merge_side_by_side(left, right, align_by=align_by, gap_px=gap, bg=bg)
-    if sharpen:
-        merged = apply_sharpen(merged)
     progress.empty()
 
     out  = encode_image(merged, fmt)
@@ -502,7 +531,6 @@ def _init_state():
         st.session_state["crop_w"] = 13.0
     if "crop_h" not in st.session_state:
         st.session_state["crop_h"] = 20.5
-    # ratio inicial
     if "crop_ratio" not in st.session_state:
         st.session_state["crop_ratio"] = st.session_state["crop_h"] / st.session_state["crop_w"]
 
@@ -513,8 +541,6 @@ def _on_crop_h_change():
     st.session_state["crop_w"] = round(st.session_state["crop_h"] / st.session_state["crop_ratio"], 1)
 
 def _on_ratio_toggle():
-    # Sempre que o lock muda (liga ou desliga), actualiza o ratio com os valores actuais
-    # Assim quando se volta a ligar, o ratio reflecte os valores correntes
     st.session_state["crop_ratio"] = st.session_state["crop_h"] / max(st.session_state["crop_w"], 0.1)
 
 _init_state()
@@ -526,13 +552,9 @@ _init_state()
 with st.sidebar:
     st.markdown("## ⚙️  Opções")
 
-    # Botão de actualizar (força rerun e limpa resultados em cache)
     if st.button("🔄  Actualizar resultados", use_container_width=True,
                  help="Limpa resultados guardados e processa de novo com as opções actuais."):
-        # Chaves a preservar (estado da UI, não resultados)
-        preserve = {"crop_w", "crop_h", "crop_ratio", "ratio_lock",
-                    "arr_result_key"}
-        # Preserva também chaves de arranjo (thumbnails, pares)
+        preserve = {"crop_w", "crop_h", "crop_ratio", "ratio_lock", "arr_result_key"}
         preserve_prefixes = ("arr_",)
         keys_to_clear = [
             k for k in list(st.session_state.keys())
@@ -555,13 +577,18 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**Impressão frente/verso**")
-    duplex = st.toggle("Modo frente/verso (1,3,4,2…)", value=False,
-                       help="Combina pares em novas páginas A4: frente=[img1+img3], verso=[img4+img2]. Requer Marcas de corte activadas para melhor resultado.")
+    duplex = st.toggle("Modo frente/verso (1,3 / 4,2…)", value=False,
+                       help=(
+                           "Agrupa cartas individuais em A4 para impressão duplex:\n"
+                           "  Frente = carta 1 + carta 3\n"
+                           "  Verso  = carta 4 + carta 2\n"
+                           "Funciona com e sem Marcas de corte."
+                       ))
 
     st.divider()
     st.markdown("**Marcas de corte (A4 paisagem)**")
     crop_marks = st.toggle("Activar marcas de corte", value=False,
-                           help="Escala cada carta para as dimensões definidas e posiciona duas num A4 paisagem.")
+                           help="Posiciona duas cartas num A4 paisagem com marcas de corte nos cantos.")
     if crop_marks:
         ratio_lock = st.toggle("🔒 Manter proporção", value=True, key="ratio_lock",
                                on_change=_on_ratio_toggle)
@@ -594,14 +621,21 @@ with st.sidebar:
                 '<div class="warn-box">⚠️ Cartas maiores que o A4 — marcas ficarão por cima da imagem.</div>',
                 unsafe_allow_html=True,
             )
+
         st.markdown("**Imagem dentro do cartão**")
+        st.caption(
+            "Ajusta quanto a imagem preenche o interior do cartão, "
+            "sem alterar as linhas de corte. "
+            "100% = sem margem; diminui para adicionar margem branca."
+        )
         img_scale = st.slider(
             "Escala da imagem (%)", 40, 100, 95, 1,
-            help="100% = imagem preenche o cartão. Diminui para mais margem branca dentro do cartão."
+            help="Escala a imagem dentro das marcas de corte. As marcas não se movem."
         ) / 100.0
         crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 15, 4, 1) / 10
     else:
         crop_w, crop_h, crop_marklen, img_scale = 13.0, 20.5, 0.4, 1.0
+
     st.divider()
     st.markdown("**Preview**")
     preview_width = st.slider("Largura máx. (px)", 400, 2000, 900, 100)
@@ -646,7 +680,7 @@ with tab_normal:
         st.info("⬆️  Arraste ou escolha um ou mais PDFs para começar.", icon="📂")
     else:
         for f in files:
-            opts_sig = f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{duplex}"
+            opts_sig = f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{img_scale}_{duplex}"
             fkey = f"normal_{f.name}_{f.size}_{opts_sig}"
             if fkey not in st.session_state:
                 try:
@@ -689,7 +723,7 @@ with tab_dual:
         st.markdown("**▶  PDF direito (B)**")
         file_b = st.file_uploader("PDF B", type=["pdf"], key="dual_b", label_visibility="collapsed")
 
-    opts_sig_d = f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{duplex}"
+    opts_sig_d = f"{dpi}_{fmt}_{align_by}_{gap_px}_{bg_label}_{sharpen}_{crop_marks}_{crop_w}_{crop_h}_{crop_marklen}_{img_scale}_{duplex}"
     dkey = f"dual_{getattr(file_a,'name','')}_{getattr(file_a,'size',0)}_{getattr(file_b,'name','')}_{getattr(file_b,'size',0)}_{opts_sig_d}"
     if file_a and file_b:
         if dkey not in st.session_state:
