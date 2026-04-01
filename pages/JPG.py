@@ -258,20 +258,27 @@ def fit_two_cards_on_a4(
 
 def reorder_for_duplex(pairs: list) -> list:
     """
-    Reordena para impressão frente/verso (duplex).
-    Padrão: 1,3,5,…,N,…,6,4,2
-      n=2 → 1,2
+    Reordena para impressão frente/verso em blocos de 4 imagens (2 folhas físicas):
+      bloco de 4: [A, B, C, D] → [A, C, D, B]  (1,3,4,2)
+    Para n imagens, processa em blocos de 4 consecutivos, com o último bloco
+    podendo ter 2 ou 3 imagens:
+      n=2 → 1,2          (1 folha, sem reorder necessário)
       n=4 → 1,3,4,2
-      n=6 → 1,3,5,6,4,2
-      n=8 → 1,3,5,7,8,6,4,2
-    Frentes: índices base-0 pares (0,2,4,…) em ordem crescente.
-    Versos:  índices base-0 ímpares (1,3,5,…) em ordem decrescente.
+      n=6 → 1,3,4,2,5,6
+      n=8 → 1,3,4,2,5,7,8,6
     """
-    n      = len(pairs)
-    fronts = [pairs[i] for i in range(0, n, 2)]
-    start  = n - 1 if n % 2 == 0 else n - 2   # maior índice base-0 ímpar
-    backs  = [pairs[i] for i in range(start, -1, -2)]
-    return fronts + backs
+    result = []
+    i = 0
+    while i < len(pairs):
+        chunk = pairs[i:i+4]
+        if len(chunk) == 4:
+            # bloco completo: frente1, frente2, verso2, verso1
+            result += [chunk[0], chunk[2], chunk[3], chunk[1]]
+        else:
+            # bloco parcial: deixa na ordem original
+            result += chunk
+        i += 4
+    return result
 
 
 # ─────────────────────────────────────────────
@@ -421,7 +428,7 @@ def show_download(out_bytes, mime, fname, key):
 
 def _init_state():
     if "crop_w" not in st.session_state:
-        st.session_state["crop_w"] = 13.3
+        st.session_state["crop_w"] = 13.0
     if "crop_h" not in st.session_state:
         st.session_state["crop_h"] = 20.5
     # ratio inicial
@@ -451,9 +458,16 @@ with st.sidebar:
     # Botão de actualizar (força rerun e limpa resultados em cache)
     if st.button("🔄  Actualizar resultados", use_container_width=True,
                  help="Limpa resultados guardados e processa de novo com as opções actuais."):
-        # Remove todas as chaves de resultado do session_state
-        keys_to_clear = [k for k in st.session_state if
-                         k.endswith("_result") or k.startswith("normal_") or k.startswith("dual_")]
+        # Chaves a preservar (estado da UI, não resultados)
+        preserve = {"crop_w", "crop_h", "crop_ratio", "ratio_lock",
+                    "arr_result_key"}
+        # Preserva também chaves de arranjo (thumbnails, pares)
+        preserve_prefixes = ("arr_",)
+        keys_to_clear = [
+            k for k in list(st.session_state.keys())
+            if k not in preserve
+            and not any(k.startswith(p) for p in preserve_prefixes)
+        ]
         for k in keys_to_clear:
             del st.session_state[k]
         st.rerun()
@@ -470,7 +484,7 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**Impressão frente/verso**")
-    duplex = st.toggle("Modo frente/verso (1,3,2,4…)", value=False,
+    duplex = st.toggle("Modo frente/verso (1,3,4,2…)", value=False,
                        help="Reordena as páginas para impressão duplex: primeiro todas as frentes, depois todos os versos.")
 
     st.divider()
@@ -511,7 +525,7 @@ with st.sidebar:
             )
         crop_marklen = st.slider("Comprimento das marcas (mm)", 2, 15, 4, 1) / 10
     else:
-        crop_w, crop_h, crop_marklen = 13.3, 20.5, 0.4
+        crop_w, crop_h, crop_marklen = 13.0, 20.5, 0.4
     st.divider()
     st.markdown("**Preview**")
     preview_width = st.slider("Largura máx. (px)", 400, 2000, 900, 100)
