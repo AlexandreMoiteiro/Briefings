@@ -31,7 +31,7 @@ AIRCRAFT_PROFILES = {
     },
     "Piper PA-28": {
         "climb_tas":   76.0,
-        "cruise_tas":  110.0,
+        "cruise_tas":  110.0,   # actualizado de 115 para 110
         "descent_tas": 100.0,
         "fuel_flow_lh": 38.0,   # L/h
     },
@@ -52,6 +52,219 @@ ASPACE_COLOR     = "#FFD54A"
 CORRIDOR_COLOR   = "#9BE27A"
 FILL_OPACITY     = 0.12
 EDGE_OPACITY     = 0.9
+
+# ========= SID / STAR LPSO =========
+# Baseados em RVP.CFI.020.B.02 05Jun23
+
+# Waypoints publicados LPSO (coordenadas aproximadas a partir das cartas)
+LPSO_PUBLISHED_WPS = {
+    "LPSO":   {"lat": 39.1178, "lon": -8.1703, "alt": 390},
+    "TAGUX":  {"lat": 38.6278, "lon": -8.4694, "alt": 5500},   # FTM R149 50.8NM
+    "BORRO":  {"lat": 38.7806, "lon": -8.4000, "alt": 5500},   # NSA R198 29NM
+    "MAGUM":  {"lat": 39.2722, "lon": -8.6500, "alt": 3500},   # NSA R225 33NM
+    "ATECA":  {"lat": 38.5917, "lon": -8.8500, "alt": 3000},   # ESP R065 30NM
+    "MENDA":  {"lat": 39.2722, "lon": -8.0528, "alt": 3500},   # FTM R119 D35
+    "SALTE":  {"lat": 39.0833, "lon": -8.1389, "alt": 3000},   # NSA R198 D17
+    "NSA":    {"lat": 39.5647, "lon": -7.9147, "alt": 4500},   # NISA VOR
+    "FTM":    {"lat": 39.6656, "lon": -8.4928, "alt": 5500},   # FATIMA VOR
+    "PORCA":  {"lat": 39.1556, "lon": -8.2000, "alt": 3500},   # IAF GNSS RWY03
+    "RAKET":  {"lat": 39.1111, "lon": -8.1917, "alt": 1500},   # FAF GNSS RWY03
+    "TRAMA":  {"lat": 39.0639, "lon": -8.1889, "alt": 3500},   # IAF GNSS RWY21
+    "ROSED":  {"lat": 39.0972, "lon": -8.1833, "alt": 2000},   # FAF GNSS RWY21
+    "IFGD08": {"lat": 39.1278, "lon": -8.1917, "alt": 1500},   # IF GNSS RWY03
+    "IFGD06": {"lat": 39.0750, "lon": -8.1944, "alt": 2000},   # IF GNSS RWY21
+    "RASQUET":{"lat": 39.1444, "lon": -8.1750, "alt": 1500},   # FAF VOR RWY03
+    "GAIOS":  {"lat": 38.9278, "lon": -8.2056, "alt": 3500},   # ref point sul
+}
+
+# ----- SIDs LPSO -----
+LPSO_SIDS = {
+    # ── RWY 03 ──────────────────────────────────────────────────────
+    "NSA 2N (RWY03)": {
+        "rwy": "03",
+        "type": "SID",
+        "description": "At 1400' turn LEFT 339° Track to intercept NSA R212. Maintain 2000' until intercept NSA R212.",
+        "waypoints": ["LPSO", "NSA"],
+        "altitudes":  [390,    2000],
+    },
+    "FTM 2N (RWY03)": {
+        "rwy": "03",
+        "type": "SID",
+        "description": "Maintain RWY HDG to intercept R140 inbound FTM.",
+        "waypoints": ["LPSO", "FTM"],
+        "altitudes":  [390,    5500],
+    },
+    "MAGUM 2N (RWY03)": {
+        "rwy": "03",
+        "type": "SID",
+        "description": "Maintain RWY HDG to intercept R140 inbound FTM. At FTM D28.0 turn LEFT 238° to intercept NSA R225. Maintain 2000' until NSA ARC D30.0.",
+        "waypoints": ["LPSO", "FTM", "MAGUM"],
+        "altitudes":  [390,    3000,   3500],
+    },
+    "TAGUX 2N (RWY03)": {
+        "rwy": "03",
+        "type": "SID",
+        "description": "Maintain RWY HDG to intercept R140 inbound FTM. At FTM D28.0 turn LEFT 244° to intercept R149 from FTM to TAGUX. Cross FTM D31.0 at 3000' until FTM D40.0.",
+        "waypoints": ["LPSO", "FTM", "TAGUX"],
+        "altitudes":  [390,    3000,   5500],
+    },
+    # ── RWY 21 ──────────────────────────────────────────────────────
+    "NSA 3S (RWY21)": {
+        "rwy": "21",
+        "type": "SID",
+        "description": "At 2000' turn RIGHT 319° Track to intercept NSA R212. Maintain 2000' until crossing FTM R139.",
+        "waypoints": ["LPSO", "NSA"],
+        "altitudes":  [390,    2000],
+    },
+    "FTM 3S (RWY21)": {
+        "rwy": "21",
+        "type": "SID",
+        "description": "At 2000' turn RIGHT 319° Track to intercept NSA R212. Maintain 2000' until intercept FTM R139. Then proceed to FTM.",
+        "waypoints": ["LPSO", "FTM"],
+        "altitudes":  [390,    5500],
+    },
+    "MAGUM 3S (RWY21)": {
+        "rwy": "21",
+        "type": "SID",
+        "description": "At 2000' turn RIGHT 269° Track to intercept NSA R225. Maintain 2000' until NSA ARC D30.0.",
+        "waypoints": ["LPSO", "MAGUM"],
+        "altitudes":  [390,    3500],
+    },
+    "TAGUX 3S (RWY21)": {
+        "rwy": "21",
+        "type": "SID",
+        "description": "Maintain RWY HDG to intercept FTM R149 to TAGUX. Maintain 2000' until FTM ARC D40.0.",
+        "waypoints": ["LPSO", "TAGUX"],
+        "altitudes":  [390,    5500],
+    },
+}
+
+# ----- STARs LPSO -----
+LPSO_STARS = {
+    # ── STAR VOR/ILS → RWY 21 ───────────────────────────────────────
+    "TAGUX 2S (RWY21 ILS/VOR)": {
+        "rwy": "21",
+        "type": "STAR",
+        "iaf": "MENDA",
+        "description": "FTM R149 → TAGUX → FTM R119 D35 → MENDA (IAF). Seguir para ILS ou VOR DME RWY21.",
+        "waypoints": ["TAGUX", "MENDA", "LPSO"],
+        "altitudes":  [5500,    3500,    390],
+    },
+    "FTM 2S (RWY21 ILS/VOR)": {
+        "rwy": "21",
+        "type": "STAR",
+        "iaf": "MENDA",
+        "description": "FTM R137 D32 → FTM → MENDA (IAF). Seguir para ILS ou VOR DME RWY21.",
+        "waypoints": ["FTM", "MENDA", "LPSO"],
+        "altitudes":  [5500,   3500,   390],
+    },
+    "NSA 2S (RWY21 ILS/VOR)": {
+        "rwy": "21",
+        "type": "STAR",
+        "iaf": "SALTE",
+        "description": "NSA R198 D17 → SALTE (IAF). Seguir para ILS ou VOR DME RWY21.",
+        "waypoints": ["NSA", "SALTE", "LPSO"],
+        "altitudes":  [4500,  3000,    390],
+    },
+    "MAGUM 2S (RWY21 ILS/VOR)": {
+        "rwy": "21",
+        "type": "STAR",
+        "iaf": "MENDA",
+        "description": "MAGUM → HDG 071° 20NM → BORRO → NSA R198 29NM. Seguir para ILS ou VOR DME RWY21.",
+        "waypoints": ["MAGUM", "BORRO", "MENDA", "LPSO"],
+        "altitudes":  [3500,    5500,    3500,    390],
+    },
+    "BORRO 2S (RWY21 ILS/VOR)": {
+        "rwy": "21",
+        "type": "STAR",
+        "iaf": "SALTE",
+        "description": "BORRO → NSA R198 29NM → SALTE (IAF). Seguir para ILS ou VOR DME RWY21.",
+        "waypoints": ["BORRO", "SALTE", "LPSO"],
+        "altitudes":  [5500,    3000,    390],
+    },
+    # ── RNAV STAR → RWY 21 (GNSS) ───────────────────────────────────
+    "TAGUX 3S (RWY21 GNSS)": {
+        "rwy": "21",
+        "type": "RNAV STAR",
+        "iaf": "TRAMA",
+        "description": "TAGUX → 339° 17.6NM → BORRO 3S → 019° 26NM → TRAMA (IAF) → IFGD06 → RWY21.",
+        "waypoints": ["TAGUX", "BORRO", "TRAMA", "IFGD06", "LPSO"],
+        "altitudes":  [5500,    5500,    3500,    2000,     390],
+    },
+    "FTM 3S (RWY21 GNSS)": {
+        "rwy": "21",
+        "type": "RNAV STAR",
+        "iaf": "TRAMA",
+        "description": "FTM → 134° 31NM → TRAMA (IAF) → IFGD06 → RWY21.",
+        "waypoints": ["FTM", "TRAMA", "IFGD06", "LPSO"],
+        "altitudes":  [5500,  3500,    2000,     390],
+    },
+    "NSA 3S (RWY21 GNSS)": {
+        "rwy": "21",
+        "type": "RNAV STAR",
+        "iaf": "TRAMA",
+        "description": "NSA → 195° 16NM → TRAMA (IAF) → IFGD06 → RWY21.",
+        "waypoints": ["NSA", "TRAMA", "IFGD06", "LPSO"],
+        "altitudes":  [4500,  3500,    2000,     390],
+    },
+    "MAGUM 3S (RWY21 GNSS)": {
+        "rwy": "21",
+        "type": "RNAV STAR",
+        "iaf": "TRAMA",
+        "description": "MAGUM → 080° 16.1NM → TRAMA (IAF) → IFGD06 → RWY21.",
+        "waypoints": ["MAGUM", "TRAMA", "IFGD06", "LPSO"],
+        "altitudes":  [3500,    3500,    2000,     390],
+    },
+    "BORRO 3S (RWY21 GNSS)": {
+        "rwy": "21",
+        "type": "RNAV STAR",
+        "iaf": "TRAMA",
+        "description": "BORRO → 019° 26NM → TRAMA (IAF) → IFGD06 → RWY21.",
+        "waypoints": ["BORRO", "TRAMA", "IFGD06", "LPSO"],
+        "altitudes":  [5500,    3500,    2000,     390],
+    },
+    # ── RNAV STAR → RWY 03 (GNSS) ───────────────────────────────────
+    "TAGUX 3N (RWY03 GNSS)": {
+        "rwy": "03",
+        "type": "RNAV STAR",
+        "iaf": "PORCA",
+        "description": "TAGUX → 310° 13.1NM → BORRO 3N → 011° 18NM → PORCA (IAF) → RAKET → RWY03.",
+        "waypoints": ["TAGUX", "BORRO", "PORCA", "RAKET", "LPSO"],
+        "altitudes":  [5500,    5500,    3500,    1500,    390],
+    },
+    "FTM 3N (RWY03 GNSS)": {
+        "rwy": "03",
+        "type": "RNAV STAR",
+        "iaf": "PORCA",
+        "description": "FTM → 145° 34NM → PORCA (IAF) → RAKET → RWY03.",
+        "waypoints": ["FTM", "PORCA", "RAKET", "LPSO"],
+        "altitudes":  [5500,  3500,    1500,    390],
+    },
+    "NSA 3N (RWY03 GNSS)": {
+        "rwy": "03",
+        "type": "RNAV STAR",
+        "iaf": "PORCA",
+        "description": "NSA → 199° 22.7NM → PORCA (IAF) → RAKET → RWY03.",
+        "waypoints": ["NSA", "PORCA", "RAKET", "LPSO"],
+        "altitudes":  [4500,  3500,    1500,    390],
+    },
+    "MAGUM 3N (RWY03 GNSS)": {
+        "rwy": "03",
+        "type": "RNAV STAR",
+        "iaf": "PORCA",
+        "description": "MAGUM → 083° 15.6NM → PORCA (IAF) → RAKET → RWY03.",
+        "waypoints": ["MAGUM", "PORCA", "RAKET", "LPSO"],
+        "altitudes":  [3500,    3500,    1500,    390],
+    },
+    "BORRO 3N (RWY03 GNSS)": {
+        "rwy": "03",
+        "type": "RNAV STAR",
+        "iaf": "PORCA",
+        "description": "BORRO → 011° 18NM → PORCA (IAF) → RAKET → RWY03.",
+        "waypoints": ["BORRO", "PORCA", "RAKET", "LPSO"],
+        "altitudes":  [5500,    3500,    1500,    390],
+    },
+}
 
 # ========= ÁREAS PRÉ-DEFINIDAS =========
 PRESET_AIRSPACES = {
@@ -272,6 +485,11 @@ st.markdown("""
 .row{display:flex;gap:8px;align-items:center}
 .badge{font-weight:700;border:1px solid #111;border-radius:8px;padding:2px 6px;margin-right:6px}
 .ac-banner{border-radius:10px;padding:8px 14px;font-weight:700;font-size:14px;margin-bottom:6px;display:inline-block}
+.sid-card{border:2px solid #3b82f6;border-radius:12px;padding:10px 14px;margin:6px 0;background:#eff6ff}
+.star-card{border:2px solid #8b5cf6;border-radius:12px;padding:10px 14px;margin:6px 0;background:#f5f3ff}
+.proc-badge-sid{background:#3b82f6;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}
+.proc-badge-star{background:#8b5cf6;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}
+.proc-badge-rnav{background:#06b6d4;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}
 </style>
 """, unsafe_allow_html=True)
 
@@ -389,7 +607,7 @@ def ens(k, v): return st.session_state.setdefault(k, v)
 # ---- Aeronave ----
 ens("aircraft_type", "Piper PA-28")
 ens("ac_climb_tas",   76.0)
-ens("ac_cruise_tas",  115.0)
+ens("ac_cruise_tas",  110.0)
 ens("ac_descent_tas", 100.0)
 ens("ac_fuel_flow_lh", 38.0)
 
@@ -439,6 +657,10 @@ ens("leg_filter_ids", [])
 
 ens("saved_routes", {})
 
+# ---- SID/STAR state ----
+ens("selected_sid", "")
+ens("selected_star", "")
+
 # ========= HELPERS aeronave (usados no cálculo) =========
 def get_climb_tas():   return float(st.session_state.ac_climb_tas)
 def get_cruise_tas():  return float(st.session_state.ac_cruise_tas)
@@ -447,7 +669,7 @@ def get_fuel_flow():   return float(st.session_state.ac_fuel_flow_lh)
 
 # ========= FORM GLOBAL =========
 
-# ---- Selector de aeronave (fora do form para reagir imediatamente e recarregar defaults) ----
+# ---- Selector de aeronave ----
 st.markdown("### ✈️ Aeronave")
 ac_names = list(AIRCRAFT_PROFILES.keys())
 ac_choice = st.selectbox(
@@ -457,8 +679,6 @@ ac_choice = st.selectbox(
     if st.session_state.aircraft_type in ac_names else 0,
     key="aircraft_select_widget",
 )
-# Quando muda o tipo, carrega os defaults e faz rerun para que o form
-# mostre os novos valores correctos nos number_input
 if ac_choice != st.session_state.aircraft_type:
     st.session_state.aircraft_type = ac_choice
     p = AIRCRAFT_PROFILES[ac_choice]
@@ -468,7 +688,6 @@ if ac_choice != st.session_state.aircraft_type:
     st.session_state.ac_fuel_flow_lh = p["fuel_flow_lh"]
     st.rerun()
 
-# Banner de aeronave selecionada (sempre visível, acima do form)
 ac_color = "#1e40af" if "Piper" in st.session_state.aircraft_type else "#065f46"
 st.markdown(
     f"<div class='ac-banner' style='background:#dbeafe;color:{ac_color};border:1.5px solid {ac_color};'>"
@@ -482,7 +701,6 @@ st.markdown(
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
 with st.form("globals"):
-    # ---- Parâmetros de aeronave (dentro do form → só aplicam ao clicar "Aplicar") ----
     st.markdown("**Parâmetros da aeronave**")
     ac_col1, ac_col2, ac_col3, ac_col4 = st.columns(4)
     with ac_col1:
@@ -789,8 +1007,47 @@ def new_wp_dict(name, lat, lon, alt, src=None):
 def append_wp(name, lat, lon, alt, src=None):
     st.session_state.wps.append(new_wp_dict(name, lat, lon, alt, src))
 
-# ========= ROTAS PADRÃO (GIST) =========
+# ========= SID/STAR helpers =========
+def _build_wps_from_procedure(proc_dict: dict) -> list:
+    """Constrói lista de WP dicts a partir de uma SID ou STAR."""
+    wps_out = []
+    names = proc_dict["waypoints"]
+    alts  = proc_dict["altitudes"]
+    for nm, alt in zip(names, alts):
+        info = LPSO_PUBLISHED_WPS.get(nm)
+        if info is None:
+            st.warning(f"Waypoint «{nm}» não encontrado na base LPSO. Ignorado.")
+            continue
+        wps_out.append(new_wp_dict(nm, info["lat"], info["lon"], float(alt)))
+    return wps_out
 
+def apply_sid(sid_name: str):
+    """Adiciona os WPs da SID selecionada ao início da rota."""
+    proc = LPSO_SIDS.get(sid_name)
+    if not proc:
+        return
+    new_wps = _build_wps_from_procedure(proc)
+    # Remove LPSO duplicado no início se já existir
+    existing_names = [w["name"] for w in st.session_state.wps]
+    if existing_names and existing_names[0] == "LPSO":
+        st.session_state.wps = new_wps + st.session_state.wps[1:]
+    else:
+        st.session_state.wps = new_wps + st.session_state.wps
+
+def apply_star(star_name: str):
+    """Adiciona os WPs da STAR selecionada ao fim da rota."""
+    proc = LPSO_STARS.get(star_name)
+    if not proc:
+        return
+    new_wps = _build_wps_from_procedure(proc)
+    # Remove LPSO duplicado no fim se já existir
+    existing_names = [w["name"] for w in st.session_state.wps]
+    if existing_names and existing_names[-1] == "LPSO":
+        st.session_state.wps = st.session_state.wps[:-1] + new_wps
+    else:
+        st.session_state.wps = st.session_state.wps + new_wps
+
+# ========= ROTAS PADRÃO (GIST) =========
 def _get_gist_credentials():
     token = (
         getattr(st, "secrets", {}).get("GITHUB_TOKEN")
@@ -1015,6 +1272,111 @@ with st.expander("🛡 Espaço aéreo / restrições"):
 
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
+# ========= SID / STAR LPSO UI =========
+with st.expander("🛫 SID / STAR LPSO (Ponte de Sor) — RVP.CFI.020.B.02", expanded=False):
+
+    st.markdown("""
+    <div style='background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:10px 14px;margin-bottom:10px;font-size:13px'>
+    ℹ️ Seleciona uma <b>SID</b> para inserir no <b>início</b> da rota, ou uma <b>STAR</b> para inserir no <b>fim</b>.
+    Os waypoints são adicionados com as altitudes publicadas nas cartas LPSO.
+    <br>⚠️ <i>Para VFR training apenas. Confirma sempre com as cartas oficiais.</i>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_sid, col_star = st.columns(2)
+
+    with col_sid:
+        st.markdown("#### 🛫 SID — Departure")
+
+        # Agrupar por RWY
+        sid_rwy03 = {k: v for k, v in LPSO_SIDS.items() if v["rwy"] == "03"}
+        sid_rwy21 = {k: v for k, v in LPSO_SIDS.items() if v["rwy"] == "21"}
+
+        st.markdown("**RWY 03 Departures** *(Initial climb 2000')*")
+        for sid_name, sid_data in sid_rwy03.items():
+            badge_class = "proc-badge-sid"
+            st.markdown(
+                f"<div class='sid-card'>"
+                f"<span class='{badge_class}'>SID</span> "
+                f"<b style='margin-left:6px'>{sid_name}</b>"
+                f"<div style='margin-top:4px;font-size:12px;color:#374151'>{sid_data['description']}</div>"
+                f"<div style='margin-top:4px;font-size:11px;color:#6b7280'>WPs: {' → '.join(sid_data['waypoints'])}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+            if st.button(f"✚ Inserir {sid_name}", key=f"sid_{sid_name}", use_container_width=True):
+                apply_sid(sid_name)
+                st.session_state.selected_sid = sid_name
+                st.success(f"SID «{sid_name}» adicionada ao início da rota.")
+                st.rerun()
+
+        st.markdown("**RWY 21 Departures** *(Initial climb 2000')*")
+        for sid_name, sid_data in sid_rwy21.items():
+            badge_class = "proc-badge-sid"
+            st.markdown(
+                f"<div class='sid-card'>"
+                f"<span class='{badge_class}'>SID</span> "
+                f"<b style='margin-left:6px'>{sid_name}</b>"
+                f"<div style='margin-top:4px;font-size:12px;color:#374151'>{sid_data['description']}</div>"
+                f"<div style='margin-top:4px;font-size:11px;color:#6b7280'>WPs: {' → '.join(sid_data['waypoints'])}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+            if st.button(f"✚ Inserir {sid_name}", key=f"sid_{sid_name}", use_container_width=True):
+                apply_sid(sid_name)
+                st.session_state.selected_sid = sid_name
+                st.success(f"SID «{sid_name}» adicionada ao início da rota.")
+                st.rerun()
+
+    with col_star:
+        st.markdown("#### 🛬 STAR — Arrival")
+
+        star_rwy21_conv = {k: v for k, v in LPSO_STARS.items() if v["rwy"] == "21" and v["type"] == "STAR"}
+        star_rwy21_gnss = {k: v for k, v in LPSO_STARS.items() if v["rwy"] == "21" and v["type"] == "RNAV STAR"}
+        star_rwy03_gnss = {k: v for k, v in LPSO_STARS.items() if v["rwy"] == "03" and v["type"] == "RNAV STAR"}
+
+        def _render_stars(star_dict, label):
+            st.markdown(f"**{label}**")
+            for star_name, star_data in star_dict.items():
+                iaf = star_data.get("iaf","")
+                badge_class = "proc-badge-rnav" if "GNSS" in star_name or star_data["type"] == "RNAV STAR" else "proc-badge-star"
+                type_lbl = "RNAV" if star_data["type"] == "RNAV STAR" else "STAR"
+                st.markdown(
+                    f"<div class='star-card'>"
+                    f"<span class='{badge_class}'>{type_lbl}</span> "
+                    f"<b style='margin-left:6px'>{star_name}</b>"
+                    f"{'<span style=\"margin-left:8px;font-size:11px;color:#7c3aed\">(IAF: ' + iaf + ')</span>' if iaf else ''}"
+                    f"<div style='margin-top:4px;font-size:12px;color:#374151'>{star_data['description']}</div>"
+                    f"<div style='margin-top:4px;font-size:11px;color:#6b7280'>WPs: {' → '.join(star_data['waypoints'])}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+                if st.button(f"✚ Inserir {star_name}", key=f"star_{star_name}", use_container_width=True):
+                    apply_star(star_name)
+                    st.session_state.selected_star = star_name
+                    st.success(f"STAR «{star_name}» adicionada ao fim da rota.")
+                    st.rerun()
+
+        _render_stars(star_rwy21_conv, "RWY 21 — ILS / VOR DME")
+        _render_stars(star_rwy21_gnss, "RWY 21 — GNSS (RNAV)")
+        _render_stars(star_rwy03_gnss, "RWY 03 — GNSS (RNAV)")
+
+    # Mostrar procedimentos ativos
+    if st.session_state.selected_sid or st.session_state.selected_star:
+        st.markdown("---")
+        active_parts = []
+        if st.session_state.selected_sid:
+            active_parts.append(f"🛫 SID: **{st.session_state.selected_sid}**")
+        if st.session_state.selected_star:
+            active_parts.append(f"🛬 STAR: **{st.session_state.selected_star}**")
+        st.markdown("**Procedimentos ativos:** " + "  |  ".join(active_parts))
+
+        if st.button("🗑 Limpar seleção SID/STAR"):
+            st.session_state.selected_sid = ""
+            st.session_state.selected_star = ""
+
+st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
+
 # ========= ROTAS PADRÃO UI =========
 with st.expander("📁 Rotas padrão (Gist)", expanded=False):
     if not st.session_state.saved_routes:
@@ -1083,7 +1445,16 @@ if st.session_state.wps:
             with c4:
                 alt  = st.number_input(f"Alt (ft) — WP{i+1}", 0.0, 18000.0, float(w["alt"]), step=50.0, key=f"wpalt_{w['id']}")
 
-            stop_min = st.number_input(f"STOP neste WP (min)", 0.0, 60.0, float(w.get("stop_min", 0.0)), step=0.5, key=f"wpstop_{w['id']}")
+            # STOP ilimitado — máximo 600 min (10 horas), sem limite de 60 min
+            stop_min = st.number_input(
+                f"STOP neste WP (min) — sem limite de hora",
+                min_value=0.0,
+                max_value=600.0,   # até 10 horas de espera
+                value=float(w.get("stop_min", 0.0)),
+                step=0.5,
+                key=f"wpstop_{w['id']}",
+                help="Tempo de espera neste ponto (ex: holding, touch-and-go, reabastecimento). Máx 600 min."
+            )
 
             if not st.session_state.use_global_wind:
                 c5,c6 = st.columns(2)
@@ -1371,6 +1742,14 @@ def build_legs_from_nodes(nodes, mag_var, mag_is_e, ck_every_min):
                 (base_time + dt.timedelta(seconds=t_cursor+stop_sec)).strftime('%H:%M')
                 if base_time else f"T+{mmss(t_cursor+stop_sec)}"
             )
+            # Mostrar tempo de stop de forma legível (horas se > 60 min)
+            stop_total_min = int(round(stop_sec / 60.0))
+            if stop_total_min >= 60:
+                h_s, m_s = divmod(stop_total_min, 60)
+                stop_label = f"STOP {h_s}h{m_s:02d}m"
+            else:
+                stop_label = f"STOP {stop_total_min}min"
+
             legs.append({
                 "i":len(legs)+1,
                 "A":B,
@@ -1386,6 +1765,7 @@ def build_legs_from_nodes(nodes, mag_var, mag_is_e, ck_every_min):
                 "clock_start":clk_start2,
                 "clock_end":clk_end2,
                 "cps":[],
+                "stop_label": stop_label,
                 "wind_from":B.get("wind_from", st.session_state.wind_from),
                 "wind_kt":B.get("wind_kt", st.session_state.wind_kt),
             })
@@ -1418,16 +1798,26 @@ if st.session_state.legs:
     total_burn = rfuel05(sum(L["burn"] for L in st.session_state.legs))
     total_dist = rdist05(sum(L["Dist"] for L in st.session_state.legs))
     efob_final = st.session_state.legs[-1]["efob_end"]
-    st.markdown(
+    stop_legs = [L for L in st.session_state.legs if L["profile"] == "STOP"]
+    stop_sec_total = sum(L["time_sec"] for L in stop_legs)
+
+    summary_html = (
         "<div class='kvrow'>"
         + f"<div class='kv'>⏱️ ETE Total: <b>{hhmmss(total_sec)}</b></div>"
         + f"<div class='kv'>🧭 Distância: <b>{total_dist:.1f} nm</b></div>"
         + f"<div class='kv'>⛽ Burn Total: <b>{total_burn:.1f} L</b></div>"
         + f"<div class='kv'>🧯 EFOB Final: <b>{efob_final:.1f} L</b></div>"
         + f"<div class='kv'>🛩 {st.session_state.aircraft_type}</div>"
-        + f"<div class='kv'>🧮 Nº legs: <b>{len(st.session_state.legs)}</b></div>"
-        + "</div>", unsafe_allow_html=True
+        + f"<div class='kv'>🔢 Nº legs: <b>{len(st.session_state.legs)}</b></div>"
     )
+    if stop_sec_total > 0:
+        stop_min_total = int(round(stop_sec_total / 60.0))
+        h_st, m_st = divmod(stop_min_total, 60)
+        stop_str = f"{h_st}h{m_st:02d}m" if h_st > 0 else f"{m_st}min"
+        summary_html += f"<div class='kv' style='background:#fef3c7;border-color:#f59e0b'>⏸ STOP Total: <b>{stop_str}</b></div>"
+    summary_html += "</div>"
+
+    st.markdown(summary_html, unsafe_allow_html=True)
     st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
 # ========= FILTRO PERNAS =========
@@ -2009,7 +2399,7 @@ def _fill_leg_line(d:dict, idx:int, L:dict, use_point:str, acc_d:float, acc_t:in
         d[f"{prefix}{idx:02d}_Magnetic_Heading"]    = ""
         d[f"{prefix}{idx:02d}_True_Airspeed"]       = ""
         d[f"{prefix}{idx:02d}_Ground_Speed"]        = ""
-        d[f"{prefix}{idx:02d}_Leg_Distance"]        = "0.0"
+        d[f"{prefix}{idx:02d}_Leg_Distance"]        = L.get("stop_label", "STOP")
     d[f"{prefix}{idx:02d}_Cumulative_Distance"] = f"{acc_d:.1f}"
     d[f"{prefix}{idx:02d}_Leg_ETE"]             = _pdf_mmss(L["time_sec"])
     d[f"{prefix}{idx:02d}_Cumulative_ETE"]      = _pdf_mmss(acc_t)
@@ -2175,13 +2565,13 @@ def build_leg_briefing_rows(legs):
             "Leg": idx,
             "From": A["name"],
             "To": B["name"],
-            "MH": f"{int(round(L['MH'])):03d}",
-            "TC": f"{int(round(L['TC'])):03d}",
+            "MH": f"{int(round(L['MH'])):03d}" if L["profile"] != "STOP" else "—",
+            "TC": f"{int(round(L['TC'])):03d}" if L["profile"] != "STOP" else "—",
             "VOR": vor_str,
             "Radial/Dist": radial_str,
             "Tempo": _pdf_mmss(L["time_sec"]),
             "Alt": _leg_altitude_profile_str(A, B),
-            "Profile": L["profile"],
+            "Profile": L.get("stop_label", L["profile"]),
         })
     return rows
 
