@@ -175,6 +175,9 @@ SBS_SHARPEN = True
 
 LANDING_BG_ZOOM = 2.3
 
+# Sentinel for "no alternate 2"
+NO_ALT2 = "-"
+
 
 # =========================================================
 # OurAirports DB + overrides
@@ -184,7 +187,7 @@ OURAIRPORTS_RUNWAYS_CSV = "https://ourairports.com/data/runways.csv"
 
 ICAO_SET = sorted({
     "LEBZ","LPBR","LPBG","LPCB","LPCO","LPEV","LEMG","LPSO","LEZL","LEVX","LPVR","LPVZ","LPCS","LPMT",
-    "LPST","LPBJ","LPFR","LPPM","LPPR"
+    "LPST","LPBJ","LPFR","LPPM","LPPR","LPPT",
 })
 
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
@@ -271,6 +274,8 @@ def build_aerodromes_db(icaos):
 
 AERODROMES_DB = build_aerodromes_db(ICAO_SET)
 ICAO_OPTIONS = sorted(AERODROMES_DB.keys())
+# Options for alternate 2 — includes a "none" sentinel at the top
+ALT2_OPTIONS = [NO_ALT2] + ICAO_OPTIONS
 
 
 # =========================================================
@@ -1162,6 +1167,17 @@ if "perf" not in st.session_state:
 
 
 # =========================================================
+# Helper: leg is active (ALTERNATE_2 may be disabled)
+# =========================================================
+def leg_is_active(i: int) -> bool:
+    """Returns False if this leg is ALTERNATE_2 with icao == NO_ALT2."""
+    leg = st.session_state.legs[i]
+    if leg["role"] == "ALTERNATE_2" and leg.get("icao") == NO_ALT2:
+        return False
+    return True
+
+
+# =========================================================
 # Helper: get effective MET for a leg (manual or model)
 # =========================================================
 def get_effective_met(i: int) -> dict:
@@ -1256,7 +1272,7 @@ with tab2:
     st.markdown("#### Aerodromes (4 legs) + Weather")
     st.caption(
         "Use **Fetch weather** to load model data automatically, or activate **Manual entry** "
-        "per leg to override with METAR/TAF values."
+        "per leg to override with METAR/TAF values. Set Alternate 2 to **-** to omit it."
     )
 
     colA, colB = st.columns([0.62, 0.38])
@@ -1270,8 +1286,10 @@ with tab2:
 
             ok, err = 0, 0
             for i, leg in enumerate(st.session_state.legs):
-                # Skip legs in manual mode
+                # Skip legs in manual mode or inactive (ALT2 = "-")
                 if st.session_state.met_manual_mode[i]:
+                    continue
+                if not leg_is_active(i):
                     continue
                 icao = leg["icao"]
                 ad = AERODROMES_DB.get(icao)
@@ -1312,42 +1330,76 @@ with tab2:
             elif err:
                 st.error("No legs updated.")
             else:
-                st.info("All legs are in manual mode — nothing to fetch.")
+                st.info("All legs are in manual mode or inactive — nothing to fetch.")
 
     st.divider()
 
     for i, leg in enumerate(st.session_state.legs):
         role = leg["role"]
         role_label = role.replace("_", " ").title()
+        is_alt2 = (role == "ALTERNATE_2")
 
         # ---- Row header ----
         hcol1, hcol2 = st.columns([0.7, 0.3])
         with hcol1:
             st.markdown(f"##### {role_label}")
         with hcol2:
-            manual_on = st.toggle(
-                "Manual entry",
-                value=st.session_state.met_manual_mode[i],
-                key=f"manual_toggle_{i}",
-                help="Override model weather with manually entered values (e.g. from METAR/TAF).",
-            )
-            st.session_state.met_manual_mode[i] = manual_on
+            # Only show manual toggle if the leg is active
+            if not is_alt2 or leg.get("icao") != NO_ALT2:
+                manual_on = st.toggle(
+                    "Manual entry",
+                    value=st.session_state.met_manual_mode[i],
+                    key=f"manual_toggle_{i}",
+                    help="Override model weather with manually entered values (e.g. from METAR/TAF).",
+                )
+                st.session_state.met_manual_mode[i] = manual_on
+            else:
+                manual_on = False
 
         c1, c2, c3 = st.columns([0.30, 0.38, 0.32])
 
         # ---- Column 1: ICAO selector ----
         with c1:
-            icao = st.selectbox(
-                f"ICAO",
-                ICAO_OPTIONS,
-                index=ICAO_OPTIONS.index(leg["icao"]),
-                key=f"icao_{i}",
-                label_visibility="collapsed",
-            )
-            st.session_state.legs[i]["icao"] = icao
-            ad = AERODROMES_DB[icao]
-            st.caption(f"**{icao}** — {ad['name']}")
-            st.caption(f"Elev {ad['elev_ft']:.0f} ft")
+            if is_alt2:
+                # Use the extended list that includes "-" as first option
+                current_icao = leg.get("icao", NO_ALT2)
+                if current_icao not in ALT2_OPTIONS:
+                    current_icao = NO_ALT2
+                selected = st.selectbox(
+                    "ICAO",
+                    ALT2_OPTIONS,
+                    index=ALT2_OPTIONS.index(current_icao),
+                    key=f"icao_{i}",
+                    label_visibility="collapsed",
+                )
+                st.session_state.legs[i]["icao"] = selected
+                if selected == NO_ALT2:
+                    st.caption("**—** Alternate 2 not used")
+                else:
+                    ad = AERODROMES_DB[selected]
+                    st.caption(f"**{selected}** — {ad['name']}")
+                    st.caption(f"Elev {ad['elev_ft']:.0f} ft")
+            else:
+                icao = st.selectbox(
+                    "ICAO",
+                    ICAO_OPTIONS,
+                    index=ICAO_OPTIONS.index(leg["icao"]),
+                    key=f"icao_{i}",
+                    label_visibility="collapsed",
+                )
+                st.session_state.legs[i]["icao"] = icao
+                ad = AERODROMES_DB[icao]
+                st.caption(f"**{icao}** — {ad['name']}")
+                st.caption(f"Elev {ad['elev_ft']:.0f} ft")
+
+        # ---- If ALT2 is disabled, show a placeholder and skip the rest ----
+        if is_alt2 and st.session_state.legs[i]["icao"] == NO_ALT2:
+            with c2:
+                st.markdown("<div class='box muted'>Alternate 2 not used.</div>", unsafe_allow_html=True)
+            with c3:
+                st.markdown("<div class='box muted'>—</div>", unsafe_allow_html=True)
+            st.divider()
+            continue
 
         # ---- Column 2: Weather (model summary OR manual inputs) ----
         with c2:
@@ -1412,7 +1464,8 @@ with tab2:
         # ---- Column 3: Best runway computed from effective MET ----
         with c3:
             eff_met = get_effective_met(i)
-            ad = AERODROMES_DB[st.session_state.legs[i]["icao"]]
+            current_icao = st.session_state.legs[i]["icao"]
+            ad = AERODROMES_DB[current_icao]
             best = choose_best_runway_by_wind(ad, eff_met["wind_dir"], eff_met["wind_kt"])
 
             if not best:
@@ -1623,6 +1676,11 @@ with tabP:
                     perf_by_role = {}
                     for i, leg in enumerate(st.session_state.legs):
                         role = leg["role"]
+
+                        # Skip disabled ALTERNATE_2
+                        if not leg_is_active(i):
+                            continue
+
                         icao = leg["icao"]
                         ad = AERODROMES_DB.get(icao)
                         if not ad:
@@ -1825,6 +1883,11 @@ with tab4:
 
             for i, leg in enumerate(st.session_state.legs):
                 role = leg["role"]
+
+                # Skip disabled ALTERNATE_2
+                if not leg_is_active(i):
+                    continue
+
                 icao = leg["icao"]
                 ad = AERODROMES_DB.get(icao, None)
                 if not ad:
