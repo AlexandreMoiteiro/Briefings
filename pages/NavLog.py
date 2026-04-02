@@ -31,7 +31,7 @@ AIRCRAFT_PROFILES = {
     },
     "Piper PA-28": {
         "climb_tas":   76.0,
-        "cruise_tas":  110.0,   # actualizado de 115 para 110
+        "cruise_tas":  110.0,
         "descent_tas": 100.0,
         "fuel_flow_lh": 38.0,   # L/h
     },
@@ -52,563 +52,6 @@ ASPACE_COLOR     = "#FFD54A"
 CORRIDOR_COLOR   = "#9BE27A"
 FILL_OPACITY     = 0.12
 EDGE_OPACITY     = 0.9
-
-# ========= SID / STAR LPSO =========
-# Baseados em RVP.CFI.020.B.02 05Jun23
-# Os waypoints das SIDs são calculados GEOMETRICAMENTE em função da performance
-# real do avião (TAS, ROC) e do vento, não são pontos fixos.
-
-# ---- Pontos fixos publicados (VORs, fixes com coord conhecida) ----
-LPSO_LAT, LPSO_LON = 39.1178, -8.1703
-LPSO_ELEV = 390  # ft
-
-NSA_LAT,  NSA_LON  = 39.5647, -7.9147   # NISA DVOR/DME 115.50
-FTM_LAT,  FTM_LON  = 39.6656, -8.4928   # FATIMA DVOR/DME 113.50
-
-RWY03_HDG = 30.0    # pista 03 QFU
-RWY21_HDG = 210.0   # pista 21 QFU
-
-# ---- Pontos RNAV publicados (coordenadas fixas das cartas) ----
-LPSO_FIXES = {
-    # Terminais / fixes publicados
-    "TAGUX":  dest_point(FTM_LAT, FTM_LON, 149.0, 50.8),   # FTM R149 D50.8
-    "BORRO":  dest_point(NSA_LAT, NSA_LON,  198.0, 29.0),   # NSA R198 D29
-    "MAGUM":  dest_point(NSA_LAT, NSA_LON,  225.0, 33.0),   # NSA R225 D33
-    "MENDA":  dest_point(FTM_LAT, FTM_LON,  119.0, 35.0),   # FTM R119 D35
-    "SALTE":  dest_point(NSA_LAT, NSA_LON,  198.0, 17.0),   # NSA R198 D17
-    # RNAV fixes (coords das cartas GNSS)
-    "PORCA":  (39.1403, -8.2072),   # IAF GNSS RWY03
-    "RAKET":  (39.0972, -8.1917),   # FAF GNSS RWY03
-    "TRAMA":  (39.0611, -8.2028),   # IAF GNSS RWY21
-    "IFGD06": (39.0917, -8.2000),   # IF GNSS RWY21
-    "IFGD08": (39.1278, -8.2000),   # IF GNSS RWY03
-}
-
-def _fix_alt(name: str) -> float:
-    """Altitude publicada (ft) para cada fix LPSO."""
-    alts = {
-        "TAGUX": 5500, "BORRO": 5500, "MAGUM": 3500,
-        "MENDA": 3500, "SALTE": 3000,
-        "NSA":   4500, "FTM":   5500,
-        "PORCA": 3500, "RAKET": 1500,
-        "TRAMA": 3500, "IFGD06": 2000, "IFGD08": 1500,
-        "LPSO":  LPSO_ELEV,
-    }
-    return float(alts.get(name, 2000))
-
-# ---- Motor geométrico ----
-
-def _find_radial_intercept(from_lat, from_lon, track_deg,
-                            vor_lat, vor_lon, radial_deg,
-                            max_nm=300.0, tol_deg=0.08):
-    """Interseção de uma track (from_lat/lon em track_deg) com um radial VOR.
-    Retorna (lat, lon, dist_nm_from_start) ou None."""
-    lo, hi = 0.0, max_nm
-    for _ in range(80):
-        mid = (lo + hi) / 2.0
-        pt = dest_point(from_lat, from_lon, track_deg, mid)
-        bear = gc_course_tc(vor_lat, vor_lon, pt[0], pt[1])
-        diff = ((bear - radial_deg) + 180) % 360 - 180
-        if abs(diff) < tol_deg:
-            return pt[0], pt[1], mid
-        pt_lo = dest_point(from_lat, from_lon, track_deg, lo)
-        bear_lo = gc_course_tc(vor_lat, vor_lon, pt_lo[0], pt_lo[1])
-        diff_lo = ((bear_lo - radial_deg) + 180) % 360 - 180
-        if diff_lo * diff < 0:
-            hi = mid
-        else:
-            lo = mid
-    pt = dest_point(from_lat, from_lon, track_deg, (lo + hi) / 2.0)
-    return pt[0], pt[1], (lo + hi) / 2.0
-
-def _dist_to_alt(from_alt_ft, to_alt_ft, roc_fpm, tas_kt, wind_from, wind_kt, track_deg):
-    """Distância horizontal (nm) necessária para subir/descer entre duas altitudes."""
-    dh = abs(to_alt_ft - from_alt_ft)
-    if dh < 1 or roc_fpm <= 0:
-        return 0.0
-    _, _, gs = wind_triangle(track_deg, tas_kt, wind_from, wind_kt)
-    t_min = dh / roc_fpm
-    return gs * t_min / 60.0
-
-def _wp(name, lat, lon, alt_ft, note=""):
-    """Helper para criar um waypoint dict formatado para a rota."""
-    wid = st.session_state.wp_next_id
-    st.session_state.wp_next_id += 1
-    return {
-        "id": wid, "name": name,
-        "lat": float(lat), "lon": float(lon), "alt": float(alt_ft),
-        "wind_from": int(st.session_state.wind_from),
-        "wind_kt":   int(st.session_state.wind_kt),
-        "stop_min": 0.0, "vor_pref": "AUTO", "vor_ident": "",
-        "_note": note,
-    }
-
-def _fix_wp(name):
-    """Cria WP a partir de um fix publicado LPSO."""
-    if name == "LPSO":
-        return _wp("LPSO", LPSO_LAT, LPSO_LON, LPSO_ELEV)
-    if name == "NSA":
-        return _wp("NSA", NSA_LAT, NSA_LON, _fix_alt("NSA"), "NISA VOR")
-    if name == "FTM":
-        return _wp("FTM", FTM_LAT, FTM_LON, _fix_alt("FTM"), "FATIMA VOR")
-    coords = LPSO_FIXES.get(name)
-    if coords:
-        return _wp(name, coords[0], coords[1], _fix_alt(name))
-    return None
-
-# =====================================================================
-#  FUNÇÕES DE CÁLCULO GEOMÉTRICO POR SID
-# =====================================================================
-
-def _compute_sid_nsa2n():
-    """NSA 2N (RWY03):
-    LPSO → [climb to 1400'] → turn LEFT 339° → [intercept NSA R212] → NSA (2000')
-    """
-    tas   = get_climb_tas()
-    roc   = float(st.session_state.roc_fpm)
-    wf    = int(st.session_state.wind_from)
-    wk    = int(st.session_state.wind_kt)
-
-    # 1. Climb RWY HDG até 1400'
-    d1 = _dist_to_alt(LPSO_ELEV, 1400, roc, tas, wf, wk, RWY03_HDG)
-    turn_lat, turn_lon = dest_point(LPSO_LAT, LPSO_LON, RWY03_HDG, d1)
-
-    # 2. Track 339° até interceptar NSA R212
-    ix = _find_radial_intercept(turn_lat, turn_lon, 339.0, NSA_LAT, NSA_LON, 212.0)
-
-    wps = [
-        _fix_wp("LPSO"),
-        _wp("TURN-1400", turn_lat, turn_lon, 1400,
-            f"Turn L 339° | dist LPSO {d1:.1f}nm"),
-        _wp("INTC-NSA-R212", ix[0], ix[1], 2000,
-            f"Intercept NSA R212 | dist turn {ix[2]:.1f}nm"),
-        _fix_wp("NSA"),
-    ]
-    wps[-1]["alt"] = 2000.0
-    return wps
-
-def _compute_sid_ftm2n():
-    """FTM 2N (RWY03):
-    LPSO → [RWY HDG intercept FTM R140] → FTM
-    """
-    tas = get_climb_tas()
-    wf  = int(st.session_state.wind_from)
-    wk  = int(st.session_state.wind_kt)
-
-    # Intercept FTM R140 on RWY HDG 030
-    ix = _find_radial_intercept(LPSO_LAT, LPSO_LON, RWY03_HDG, FTM_LAT, FTM_LON, 140.0)
-
-    wps = [
-        _fix_wp("LPSO"),
-        _wp("INTC-FTM-R140", ix[0], ix[1], 2000,
-            f"Intercept FTM R140 inbound | dist {ix[2]:.1f}nm"),
-        _fix_wp("FTM"),
-    ]
-    return wps
-
-def _compute_sid_magum2n():
-    """MAGUM 2N (RWY03):
-    LPSO → [RWY HDG intercept FTM R140] → FTM D28.0 → turn 238° →
-    [intercept NSA R225] → MAGUM (NSA ARC D30 = 2000')
-    """
-    tas = get_climb_tas()
-    wf  = int(st.session_state.wind_from)
-    wk  = int(st.session_state.wind_kt)
-
-    # Intercept FTM R140
-    ix1 = _find_radial_intercept(LPSO_LAT, LPSO_LON, RWY03_HDG, FTM_LAT, FTM_LON, 140.0)
-
-    # FTM D28.0 (on R140 outbound from FTM)
-    d28_lat, d28_lon = dest_point(FTM_LAT, FTM_LON, 140.0, 28.0)
-
-    # Turn 238° to intercept NSA R225
-    ix2 = _find_radial_intercept(d28_lat, d28_lon, 238.0, NSA_LAT, NSA_LON, 225.0)
-
-    magum_lat, magum_lon = LPSO_FIXES["MAGUM"]
-
-    wps = [
-        _fix_wp("LPSO"),
-        _wp("INTC-FTM-R140", ix1[0], ix1[1], 2000,
-            f"Intercept FTM R140 | dist {ix1[2]:.1f}nm"),
-        _wp("FTM-D28", d28_lat, d28_lon, 2000,
-            "FTM D28.0 — turn 238°"),
-        _wp("INTC-NSA-R225", ix2[0], ix2[1], 2000,
-            f"Intercept NSA R225 | dist {ix2[2]:.1f}nm"),
-        _wp("MAGUM", magum_lat, magum_lon, 3500,
-            "NSA R225 D33"),
-    ]
-    return wps
-
-def _compute_sid_tagux2n():
-    """TAGUX 2N (RWY03):
-    LPSO → [RWY HDG intercept FTM R140] → FTM D28.0 → turn 244° →
-    [intercept FTM R149] → [FTM D31 @ 3000'] → [FTM D40 @ 3000'] → TAGUX
-    """
-    # Intercept FTM R140
-    ix1 = _find_radial_intercept(LPSO_LAT, LPSO_LON, RWY03_HDG, FTM_LAT, FTM_LON, 140.0)
-
-    # FTM D28
-    d28_lat, d28_lon = dest_point(FTM_LAT, FTM_LON, 140.0, 28.0)
-
-    # Turn 244° to intercept FTM R149
-    ix2 = _find_radial_intercept(d28_lat, d28_lon, 244.0, FTM_LAT, FTM_LON, 149.0)
-
-    # FTM D31 constraint point (cross at 3000')
-    ftm_d31_lat, ftm_d31_lon = dest_point(FTM_LAT, FTM_LON, 149.0, 31.0)
-    # FTM D40 constraint (maintain until here)
-    ftm_d40_lat, ftm_d40_lon = dest_point(FTM_LAT, FTM_LON, 149.0, 40.0)
-
-    tagux_lat, tagux_lon = LPSO_FIXES["TAGUX"]
-
-    wps = [
-        _fix_wp("LPSO"),
-        _wp("INTC-FTM-R140", ix1[0], ix1[1], 2000,
-            f"Intercept FTM R140 | {ix1[2]:.1f}nm"),
-        _wp("FTM-D28", d28_lat, d28_lon, 2000,
-            "FTM D28.0 — turn 244°"),
-        _wp("INTC-FTM-R149", ix2[0], ix2[1], 2000,
-            f"Intercept FTM R149 | {ix2[2]:.1f}nm"),
-        _wp("FTM-D31", ftm_d31_lat, ftm_d31_lon, 3000,
-            "Cross FTM D31.0 at 3000'"),
-        _wp("FTM-D40", ftm_d40_lat, ftm_d40_lon, 3000,
-            "Maintain 3000' until FTM D40.0"),
-        _wp("TAGUX", tagux_lat, tagux_lon, 5500,
-            "FTM R149 D50.8"),
-    ]
-    return wps
-
-def _compute_sid_nsa3s():
-    """NSA 3S (RWY21):
-    LPSO → [climb to 2000'] → turn RIGHT 319° → [intercept NSA R212] → NSA
-    """
-    tas = get_climb_tas()
-    roc = float(st.session_state.roc_fpm)
-    wf  = int(st.session_state.wind_from)
-    wk  = int(st.session_state.wind_kt)
-
-    d1 = _dist_to_alt(LPSO_ELEV, 2000, roc, tas, wf, wk, RWY21_HDG)
-    turn_lat, turn_lon = dest_point(LPSO_LAT, LPSO_LON, RWY21_HDG, d1)
-
-    ix = _find_radial_intercept(turn_lat, turn_lon, 319.0, NSA_LAT, NSA_LON, 212.0)
-
-    wps = [
-        _fix_wp("LPSO"),
-        _wp("TURN-2000", turn_lat, turn_lon, 2000,
-            f"Turn R 319° @ 2000' | {d1:.1f}nm"),
-        _wp("INTC-NSA-R212", ix[0], ix[1], 2000,
-            f"Intercept NSA R212 | {ix[2]:.1f}nm"),
-        _fix_wp("NSA"),
-    ]
-    wps[-1]["alt"] = 2000.0
-    return wps
-
-def _compute_sid_ftm3s():
-    """FTM 3S (RWY21):
-    LPSO → [2000'] → turn R 319° → [intercept NSA R212] →
-    [intercept FTM R139] → FTM
-    """
-    tas = get_climb_tas()
-    roc = float(st.session_state.roc_fpm)
-    wf  = int(st.session_state.wind_from)
-    wk  = int(st.session_state.wind_kt)
-
-    d1 = _dist_to_alt(LPSO_ELEV, 2000, roc, tas, wf, wk, RWY21_HDG)
-    turn_lat, turn_lon = dest_point(LPSO_LAT, LPSO_LON, RWY21_HDG, d1)
-
-    # Track 319 until intercept NSA R212, then maintain until crossing FTM R139
-    # "Maintain 2000' until intercept FTM R139"
-    # FTM R139 crosses track 319 from that turn point
-    ix_r212 = _find_radial_intercept(turn_lat, turn_lon, 319.0, NSA_LAT, NSA_LON, 212.0)
-    # From R212 intercept, continue 319 until FTM R139
-    ix_r139 = _find_radial_intercept(ix_r212[0], ix_r212[1], 319.0, FTM_LAT, FTM_LON, 139.0)
-
-    wps = [
-        _fix_wp("LPSO"),
-        _wp("TURN-2000", turn_lat, turn_lon, 2000,
-            f"Turn R 319° @ 2000' | {d1:.1f}nm"),
-        _wp("INTC-NSA-R212", ix_r212[0], ix_r212[1], 2000,
-            f"Intercept NSA R212 | {ix_r212[2]:.1f}nm"),
-        _wp("INTC-FTM-R139", ix_r139[0], ix_r139[1], 2000,
-            f"Cross FTM R139 | {ix_r139[2]:.1f}nm"),
-        _fix_wp("FTM"),
-    ]
-    return wps
-
-def _compute_sid_magum3s():
-    """MAGUM 3S (RWY21):
-    LPSO → [2000'] → turn R 269° → [intercept NSA R225] →
-    [NSA ARC D30 = 2000'] → MAGUM
-    """
-    tas = get_climb_tas()
-    roc = float(st.session_state.roc_fpm)
-    wf  = int(st.session_state.wind_from)
-    wk  = int(st.session_state.wind_kt)
-
-    d1 = _dist_to_alt(LPSO_ELEV, 2000, roc, tas, wf, wk, RWY21_HDG)
-    turn_lat, turn_lon = dest_point(LPSO_LAT, LPSO_LON, RWY21_HDG, d1)
-
-    # Track 269° to intercept NSA R225
-    ix = _find_radial_intercept(turn_lat, turn_lon, 269.0, NSA_LAT, NSA_LON, 225.0)
-
-    # NSA ARC D30 at R225 direction
-    arc_d30_lat, arc_d30_lon = dest_point(NSA_LAT, NSA_LON, 225.0, 30.0)
-    magum_lat, magum_lon = LPSO_FIXES["MAGUM"]
-
-    wps = [
-        _fix_wp("LPSO"),
-        _wp("TURN-2000", turn_lat, turn_lon, 2000,
-            f"Turn R 269° @ 2000' | {d1:.1f}nm"),
-        _wp("INTC-NSA-R225", ix[0], ix[1], 2000,
-            f"Intercept NSA R225 | {ix[2]:.1f}nm"),
-        _wp("NSA-ARC-D30", arc_d30_lat, arc_d30_lon, 2000,
-            "NSA ARC D30.0 — maintain 2000'"),
-        _wp("MAGUM", magum_lat, magum_lon, 3500,
-            "NSA R225 D33"),
-    ]
-    return wps
-
-def _compute_sid_tagux3s():
-    """TAGUX 3S (RWY21):
-    LPSO → [RWY HDG 210°, intercept FTM R149] →
-    [FTM D40 @ 2000'] → TAGUX
-    """
-    # Intercept FTM R149 on RWY HDG 210
-    ix = _find_radial_intercept(LPSO_LAT, LPSO_LON, RWY21_HDG, FTM_LAT, FTM_LON, 149.0)
-
-    ftm_d40_lat, ftm_d40_lon = dest_point(FTM_LAT, FTM_LON, 149.0, 40.0)
-    tagux_lat, tagux_lon = LPSO_FIXES["TAGUX"]
-
-    wps = [
-        _fix_wp("LPSO"),
-        _wp("INTC-FTM-R149", ix[0], ix[1], 2000,
-            f"Intercept FTM R149 | {ix[2]:.1f}nm"),
-        _wp("FTM-D40", ftm_d40_lat, ftm_d40_lon, 2000,
-            "Maintain 2000' until FTM D40.0"),
-        _wp("TAGUX", tagux_lat, tagux_lon, 5500,
-            "FTM R149 D50.8"),
-    ]
-    return wps
-
-# =====================================================================
-#  STARS — calculadas geometricamente onde necessário
-# =====================================================================
-
-def _compute_star_tagux2s():
-    """TAGUX 2S → RWY21 (ILS/VOR DME):
-    TAGUX → (FTM R149 inbound) → FTM D31 @ 3000' → ... → MENDA (IAF) → LPSO
-    """
-    tagux_lat, tagux_lon = LPSO_FIXES["TAGUX"]
-    menda_lat, menda_lon = LPSO_FIXES["MENDA"]
-    # FTM R149 D31 = interseção constraint
-    ftm_d31_lat, ftm_d31_lon = dest_point(FTM_LAT, FTM_LON, 149.0, 31.0)
-
-    return [
-        _wp("TAGUX", tagux_lat, tagux_lon, 5500, "FTM R149 D50.8 — FL055"),
-        _wp("FTM-D31", ftm_d31_lat, ftm_d31_lon, 3000, "FTM R149 D31 @ 3000'"),
-        _fix_wp("FTM"),
-        _wp("MENDA", menda_lat, menda_lon, 3500, "FTM R119 D35 — IAF"),
-        _fix_wp("LPSO"),
-    ]
-
-def _compute_star_ftm2s():
-    """FTM 2S → RWY21 (ILS/VOR DME):
-    FTM → (FTM R137 D32 arrive) → MENDA (IAF) → LPSO
-    """
-    menda_lat, menda_lon = LPSO_FIXES["MENDA"]
-    # FTM R137 D32 = entry point from FTM
-    ftm_r137_d32_lat, ftm_r137_d32_lon = dest_point(FTM_LAT, FTM_LON, 137.0, 32.0)
-
-    return [
-        _wp("FTM-R137-D32", ftm_r137_d32_lat, ftm_r137_d32_lon, 5500,
-            "FTM R137 D32 — entry"),
-        _fix_wp("FTM"),
-        _wp("MENDA", menda_lat, menda_lon, 3500, "FTM R119 D35 — IAF"),
-        _fix_wp("LPSO"),
-    ]
-
-def _compute_star_nsa2s():
-    """NSA 2S → RWY21 (ILS/VOR DME):
-    NSA (4500') → SALTE (IAF, NSA R198 D17, 3000') → LPSO
-    """
-    salte_lat, salte_lon = LPSO_FIXES["SALTE"]
-    return [
-        _fix_wp("NSA"),
-        _wp("SALTE", salte_lat, salte_lon, 3000, "NSA R198 D17 — IAF"),
-        _fix_wp("LPSO"),
-    ]
-
-def _compute_star_magum2s():
-    """MAGUM 2S → RWY21 (ILS/VOR DME):
-    MAGUM → HDG 071° 20NM → BORRO → NSA R198 D29 → SALTE (IAF) → LPSO
-    """
-    magum_lat, magum_lon = LPSO_FIXES["MAGUM"]
-    borro_lat,  borro_lon  = LPSO_FIXES["BORRO"]
-    salte_lat,  salte_lon  = LPSO_FIXES["SALTE"]
-    return [
-        _wp("MAGUM", magum_lat, magum_lon, 3500, "NSA R225 D33"),
-        _wp("BORRO", borro_lat, borro_lon, 5500, "NSA R198 D29 — FL055"),
-        _wp("SALTE", salte_lat, salte_lon, 3000, "NSA R198 D17 — IAF"),
-        _fix_wp("LPSO"),
-    ]
-
-def _compute_star_borro2s():
-    """BORRO 2S → RWY21 (ILS/VOR DME):
-    BORRO → SALTE (IAF) → LPSO
-    """
-    borro_lat, borro_lon = LPSO_FIXES["BORRO"]
-    salte_lat, salte_lon = LPSO_FIXES["SALTE"]
-    return [
-        _wp("BORRO", borro_lat, borro_lon, 5500, "NSA R198 D29 — FL055"),
-        _wp("SALTE", salte_lat, salte_lon, 3000, "NSA R198 D17 — IAF"),
-        _fix_wp("LPSO"),
-    ]
-
-def _compute_star_gnss(entry_name, rwy_label, iaf_name, ifgd_name, course_to_iaf, dist_to_iaf, entry_alt=5500):
-    """Template para RNAV STARs (GNSS).
-    entry → IAF → IFGD → RWY
-    """
-    entry_coords = LPSO_FIXES.get(entry_name)
-    if entry_name == "NSA":
-        entry_coords = (NSA_LAT, NSA_LON)
-        entry_alt = 4500
-    elif entry_name == "FTM":
-        entry_coords = (FTM_LAT, FTM_LON)
-        entry_alt = 5500
-
-    iaf_coords  = LPSO_FIXES[iaf_name]
-    ifgd_coords = LPSO_FIXES.get(ifgd_name, iaf_coords)
-
-    wps = [
-        _wp(entry_name, entry_coords[0], entry_coords[1], entry_alt, "Entry fix"),
-    ]
-    # Intermediate point if entry is far from IAF: direct track
-    wps.append(_wp(iaf_name, iaf_coords[0], iaf_coords[1], _fix_alt(iaf_name), "IAF"))
-    if ifgd_name and ifgd_name != iaf_name:
-        wps.append(_wp(ifgd_name, ifgd_coords[0], ifgd_coords[1], _fix_alt(ifgd_name), "IF"))
-    wps.append(_fix_wp("LPSO"))
-    return wps
-
-# ---- SID/STAR catalog ----
-LPSO_SIDS = {
-    "NSA 2N (RWY03)": {
-        "rwy": "03", "type": "SID",
-        "description": "Climb RWY HDG → at 1400' turn L 339° → intercept NSA R212 → NSA (2000').",
-        "compute": _compute_sid_nsa2n,
-    },
-    "FTM 2N (RWY03)": {
-        "rwy": "03", "type": "SID",
-        "description": "Maintain RWY HDG (030°) → intercept FTM R140 inbound → FTM.",
-        "compute": _compute_sid_ftm2n,
-    },
-    "MAGUM 2N (RWY03)": {
-        "rwy": "03", "type": "SID",
-        "description": "RWY HDG → intercept FTM R140 → FTM D28 turn 238° → intercept NSA R225 → MAGUM (2000' until NSA D30).",
-        "compute": _compute_sid_magum2n,
-    },
-    "TAGUX 2N (RWY03)": {
-        "rwy": "03", "type": "SID",
-        "description": "RWY HDG → intercept FTM R140 → FTM D28 turn 244° → intercept FTM R149 → cross D31@3000' → D40@3000' → TAGUX.",
-        "compute": _compute_sid_tagux2n,
-    },
-    "NSA 3S (RWY21)": {
-        "rwy": "21", "type": "SID",
-        "description": "Climb RWY HDG → at 2000' turn R 319° → intercept NSA R212 → NSA (2000').",
-        "compute": _compute_sid_nsa3s,
-    },
-    "FTM 3S (RWY21)": {
-        "rwy": "21", "type": "SID",
-        "description": "At 2000' turn R 319° → intercept NSA R212 → maintain 2000' until FTM R139 → FTM.",
-        "compute": _compute_sid_ftm3s,
-    },
-    "MAGUM 3S (RWY21)": {
-        "rwy": "21", "type": "SID",
-        "description": "At 2000' turn R 269° → intercept NSA R225 → maintain 2000' until NSA ARC D30 → MAGUM.",
-        "compute": _compute_sid_magum3s,
-    },
-    "TAGUX 3S (RWY21)": {
-        "rwy": "21", "type": "SID",
-        "description": "Maintain RWY HDG → intercept FTM R149 → maintain 2000' until FTM D40 → TAGUX.",
-        "compute": _compute_sid_tagux3s,
-    },
-}
-
-LPSO_STARS = {
-    "TAGUX 2S (RWY21 ILS/VOR)": {
-        "rwy": "21", "type": "STAR", "iaf": "MENDA",
-        "description": "TAGUX → FTM D31@3000' → FTM → MENDA (IAF FTM R119 D35) → LPSO.",
-        "compute": _compute_star_tagux2s,
-    },
-    "FTM 2S (RWY21 ILS/VOR)": {
-        "rwy": "21", "type": "STAR", "iaf": "MENDA",
-        "description": "FTM R137 D32 → FTM → MENDA (IAF) → LPSO.",
-        "compute": _compute_star_ftm2s,
-    },
-    "NSA 2S (RWY21 ILS/VOR)": {
-        "rwy": "21", "type": "STAR", "iaf": "SALTE",
-        "description": "NSA (4500') → SALTE (IAF NSA R198 D17, 3000') → LPSO.",
-        "compute": _compute_star_nsa2s,
-    },
-    "MAGUM 2S (RWY21 ILS/VOR)": {
-        "rwy": "21", "type": "STAR", "iaf": "SALTE",
-        "description": "MAGUM → HDG071° → BORRO (FL055) → SALTE (IAF) → LPSO.",
-        "compute": _compute_star_magum2s,
-    },
-    "BORRO 2S (RWY21 ILS/VOR)": {
-        "rwy": "21", "type": "STAR", "iaf": "SALTE",
-        "description": "BORRO (FL055) → SALTE (IAF NSA R198 D17) → LPSO.",
-        "compute": _compute_star_borro2s,
-    },
-    "TAGUX 3S (RWY21 GNSS)": {
-        "rwy": "21", "type": "RNAV STAR", "iaf": "TRAMA",
-        "description": "TAGUX → BORRO 3S 019°/26NM → TRAMA (IAF 3500') → IFGD06 → LPSO.",
-        "compute": lambda: _compute_star_gnss("TAGUX", "RWY21", "TRAMA", "IFGD06", 19, 26),
-    },
-    "FTM 3S (RWY21 GNSS)": {
-        "rwy": "21", "type": "RNAV STAR", "iaf": "TRAMA",
-        "description": "FTM → 134°/31NM → TRAMA (IAF) → IFGD06 → LPSO.",
-        "compute": lambda: _compute_star_gnss("FTM", "RWY21", "TRAMA", "IFGD06", 134, 31),
-    },
-    "NSA 3S (RWY21 GNSS)": {
-        "rwy": "21", "type": "RNAV STAR", "iaf": "TRAMA",
-        "description": "NSA → 195°/16NM → TRAMA (IAF) → IFGD06 → LPSO.",
-        "compute": lambda: _compute_star_gnss("NSA", "RWY21", "TRAMA", "IFGD06", 195, 16, entry_alt=4500),
-    },
-    "MAGUM 3S (RWY21 GNSS)": {
-        "rwy": "21", "type": "RNAV STAR", "iaf": "TRAMA",
-        "description": "MAGUM → 080°/16.1NM → TRAMA (IAF) → IFGD06 → LPSO.",
-        "compute": lambda: _compute_star_gnss("MAGUM", "RWY21", "TRAMA", "IFGD06", 80, 16),
-    },
-    "BORRO 3S (RWY21 GNSS)": {
-        "rwy": "21", "type": "RNAV STAR", "iaf": "TRAMA",
-        "description": "BORRO → 019°/26NM → TRAMA (IAF) → IFGD06 → LPSO.",
-        "compute": lambda: _compute_star_gnss("BORRO", "RWY21", "TRAMA", "IFGD06", 19, 26),
-    },
-    "TAGUX 3N (RWY03 GNSS)": {
-        "rwy": "03", "type": "RNAV STAR", "iaf": "PORCA",
-        "description": "TAGUX → 310°/13.1NM → BORRO → 011°/18NM → PORCA (IAF) → RAKET → LPSO.",
-        "compute": lambda: _compute_star_gnss("TAGUX", "RWY03", "PORCA", "RAKET", 11, 18),
-    },
-    "FTM 3N (RWY03 GNSS)": {
-        "rwy": "03", "type": "RNAV STAR", "iaf": "PORCA",
-        "description": "FTM → 145°/34NM → PORCA (IAF) → RAKET → LPSO.",
-        "compute": lambda: _compute_star_gnss("FTM", "RWY03", "PORCA", "RAKET", 145, 34),
-    },
-    "NSA 3N (RWY03 GNSS)": {
-        "rwy": "03", "type": "RNAV STAR", "iaf": "PORCA",
-        "description": "NSA → 199°/22.7NM → PORCA (IAF) → RAKET → LPSO.",
-        "compute": lambda: _compute_star_gnss("NSA", "RWY03", "PORCA", "RAKET", 199, 22.7, entry_alt=4500),
-    },
-    "MAGUM 3N (RWY03 GNSS)": {
-        "rwy": "03", "type": "RNAV STAR", "iaf": "PORCA",
-        "description": "MAGUM → 083°/15.6NM → PORCA (IAF) → RAKET → LPSO.",
-        "compute": lambda: _compute_star_gnss("MAGUM", "RWY03", "PORCA", "RAKET", 83, 15.6),
-    },
-    "BORRO 3N (RWY03 GNSS)": {
-        "rwy": "03", "type": "RNAV STAR", "iaf": "PORCA",
-        "description": "BORRO → 011°/18NM → PORCA (IAF) → RAKET → LPSO.",
-        "compute": lambda: _compute_star_gnss("BORRO", "RWY03", "PORCA", "RAKET", 11, 18),
-    },
-}
 
 # ========= ÁREAS PRÉ-DEFINIDAS =========
 PRESET_AIRSPACES = {
@@ -829,11 +272,6 @@ st.markdown("""
 .row{display:flex;gap:8px;align-items:center}
 .badge{font-weight:700;border:1px solid #111;border-radius:8px;padding:2px 6px;margin-right:6px}
 .ac-banner{border-radius:10px;padding:8px 14px;font-weight:700;font-size:14px;margin-bottom:6px;display:inline-block}
-.sid-card{border:2px solid #3b82f6;border-radius:12px;padding:10px 14px;margin:6px 0;background:#eff6ff}
-.star-card{border:2px solid #8b5cf6;border-radius:12px;padding:10px 14px;margin:6px 0;background:#f5f3ff}
-.proc-badge-sid{background:#3b82f6;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}
-.proc-badge-star{background:#8b5cf6;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}
-.proc-badge-rnav{background:#06b6d4;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}
 </style>
 """, unsafe_allow_html=True)
 
@@ -951,7 +389,7 @@ def ens(k, v): return st.session_state.setdefault(k, v)
 # ---- Aeronave ----
 ens("aircraft_type", "Piper PA-28")
 ens("ac_climb_tas",   76.0)
-ens("ac_cruise_tas",  110.0)
+ens("ac_cruise_tas",  115.0)
 ens("ac_descent_tas", 100.0)
 ens("ac_fuel_flow_lh", 38.0)
 
@@ -1001,10 +439,6 @@ ens("leg_filter_ids", [])
 
 ens("saved_routes", {})
 
-# ---- SID/STAR state ----
-ens("selected_sid", "")
-ens("selected_star", "")
-
 # ========= HELPERS aeronave (usados no cálculo) =========
 def get_climb_tas():   return float(st.session_state.ac_climb_tas)
 def get_cruise_tas():  return float(st.session_state.ac_cruise_tas)
@@ -1013,7 +447,7 @@ def get_fuel_flow():   return float(st.session_state.ac_fuel_flow_lh)
 
 # ========= FORM GLOBAL =========
 
-# ---- Selector de aeronave ----
+# ---- Selector de aeronave (fora do form para reagir imediatamente e recarregar defaults) ----
 st.markdown("### ✈️ Aeronave")
 ac_names = list(AIRCRAFT_PROFILES.keys())
 ac_choice = st.selectbox(
@@ -1023,6 +457,8 @@ ac_choice = st.selectbox(
     if st.session_state.aircraft_type in ac_names else 0,
     key="aircraft_select_widget",
 )
+# Quando muda o tipo, carrega os defaults e faz rerun para que o form
+# mostre os novos valores correctos nos number_input
 if ac_choice != st.session_state.aircraft_type:
     st.session_state.aircraft_type = ac_choice
     p = AIRCRAFT_PROFILES[ac_choice]
@@ -1032,6 +468,7 @@ if ac_choice != st.session_state.aircraft_type:
     st.session_state.ac_fuel_flow_lh = p["fuel_flow_lh"]
     st.rerun()
 
+# Banner de aeronave selecionada (sempre visível, acima do form)
 ac_color = "#1e40af" if "Piper" in st.session_state.aircraft_type else "#065f46"
 st.markdown(
     f"<div class='ac-banner' style='background:#dbeafe;color:{ac_color};border:1.5px solid {ac_color};'>"
@@ -1045,6 +482,7 @@ st.markdown(
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
 with st.form("globals"):
+    # ---- Parâmetros de aeronave (dentro do form → só aplicam ao clicar "Aplicar") ----
     st.markdown("**Parâmetros da aeronave**")
     ac_col1, ac_col2, ac_col3, ac_col4 = st.columns(4)
     with ac_col1:
@@ -1351,55 +789,8 @@ def new_wp_dict(name, lat, lon, alt, src=None):
 def append_wp(name, lat, lon, alt, src=None):
     st.session_state.wps.append(new_wp_dict(name, lat, lon, alt, src))
 
-# ========= SID/STAR helpers =========
-def _UNUSED_build_wps_from_procedure(proc_dict: dict) -> list:
-    """Constrói lista de WP dicts a partir de uma SID ou STAR."""
-    wps_out = []
-    names = proc_dict["waypoints"]
-    alts  = proc_dict["altitudes"]
-    for nm, alt in zip(names, alts):
-        info = LPSO_PUBLISHED_WPS.get(nm)
-        if info is None:
-            st.warning(f"Waypoint «{nm}» não encontrado na base LPSO. Ignorado.")
-            continue
-        wps_out.append(new_wp_dict(nm, info["lat"], info["lon"], float(alt)))
-    return wps_out
-
-def apply_sid(sid_name: str):
-    """Calcula geometricamente os WPs da SID (com TAS e vento atuais) e insere no início da rota."""
-    proc = LPSO_SIDS.get(sid_name)
-    if not proc or "compute" not in proc:
-        st.error(f"SID '{sid_name}' sem funcao de calculo.")
-        return
-    try:
-        new_wps = proc["compute"]()
-    except Exception as e:
-        st.error(f"Erro ao calcular SID '{sid_name}': {e}")
-        return
-    existing_names = [w["name"] for w in st.session_state.wps]
-    if existing_names and existing_names[0] == "LPSO":
-        st.session_state.wps = new_wps + st.session_state.wps[1:]
-    else:
-        st.session_state.wps = new_wps + st.session_state.wps
-
-def apply_star(star_name: str):
-    """Calcula geometricamente os WPs da STAR (com TAS e vento atuais) e insere no fim da rota."""
-    proc = LPSO_STARS.get(star_name)
-    if not proc or "compute" not in proc:
-        st.error(f"STAR '{star_name}' sem funcao de calculo.")
-        return
-    try:
-        new_wps = proc["compute"]()
-    except Exception as e:
-        st.error(f"Erro ao calcular STAR '{star_name}': {e}")
-        return
-    existing_names = [w["name"] for w in st.session_state.wps]
-    if existing_names and existing_names[-1] == "LPSO":
-        st.session_state.wps = st.session_state.wps[:-1] + new_wps
-    else:
-        st.session_state.wps = st.session_state.wps + new_wps
-
 # ========= ROTAS PADRÃO (GIST) =========
+
 def _get_gist_credentials():
     token = (
         getattr(st, "secrets", {}).get("GITHUB_TOKEN")
@@ -1624,111 +1015,6 @@ with st.expander("🛡 Espaço aéreo / restrições"):
 
 st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
-# ========= SID / STAR LPSO UI =========
-with st.expander("🛫 SID / STAR LPSO (Ponte de Sor) — RVP.CFI.020.B.02", expanded=False):
-
-    st.markdown("""
-    <div style='background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:10px 14px;margin-bottom:10px;font-size:13px'>
-    ℹ️ Seleciona uma <b>SID</b> para inserir no <b>início</b> da rota, ou uma <b>STAR</b> para inserir no <b>fim</b>.
-    Os waypoints são adicionados com as altitudes publicadas nas cartas LPSO.
-    <br>⚠️ <i>Para VFR training apenas. Confirma sempre com as cartas oficiais.</i>
-    </div>
-    """, unsafe_allow_html=True)
-
-    col_sid, col_star = st.columns(2)
-
-    with col_sid:
-        st.markdown("#### 🛫 SID — Departure")
-
-        # Agrupar por RWY
-        sid_rwy03 = {k: v for k, v in LPSO_SIDS.items() if v["rwy"] == "03"}
-        sid_rwy21 = {k: v for k, v in LPSO_SIDS.items() if v["rwy"] == "21"}
-
-        st.markdown("**RWY 03 Departures** *(Initial climb 2000')*")
-        for sid_name, sid_data in sid_rwy03.items():
-            badge_class = "proc-badge-sid"
-            st.markdown(
-                f"<div class='sid-card'>"
-                f"<span class='{badge_class}'>SID</span> "
-                f"<b style='margin-left:6px'>{sid_name}</b>"
-                f"<div style='margin-top:4px;font-size:12px;color:#374151'>{sid_data['description']}</div>"
-                f"<div style='margin-top:4px;font-size:11px;color:#6b7280'>⚡ Calculado dinamicamente com TAS={get_climb_tas():.0f}kt / Vento {st.session_state.wind_from:03d}°/{st.session_state.wind_kt}kt</div>"
-                f"</div>",
-                unsafe_allow_html=True
-            )
-            if st.button(f"✚ Inserir {sid_name}", key=f"sid_{sid_name}", use_container_width=True):
-                apply_sid(sid_name)
-                st.session_state.selected_sid = sid_name
-                st.success(f"SID «{sid_name}» adicionada ao início da rota.")
-                st.rerun()
-
-        st.markdown("**RWY 21 Departures** *(Initial climb 2000')*")
-        for sid_name, sid_data in sid_rwy21.items():
-            badge_class = "proc-badge-sid"
-            st.markdown(
-                f"<div class='sid-card'>"
-                f"<span class='{badge_class}'>SID</span> "
-                f"<b style='margin-left:6px'>{sid_name}</b>"
-                f"<div style='margin-top:4px;font-size:12px;color:#374151'>{sid_data['description']}</div>"
-                f"<div style='margin-top:4px;font-size:11px;color:#6b7280'>⚡ Calculado dinamicamente com TAS={get_climb_tas():.0f}kt / Vento {st.session_state.wind_from:03d}°/{st.session_state.wind_kt}kt</div>"
-                f"</div>",
-                unsafe_allow_html=True
-            )
-            if st.button(f"✚ Inserir {sid_name}", key=f"sid_{sid_name}", use_container_width=True):
-                apply_sid(sid_name)
-                st.session_state.selected_sid = sid_name
-                st.success(f"SID «{sid_name}» adicionada ao início da rota.")
-                st.rerun()
-
-    with col_star:
-        st.markdown("#### 🛬 STAR — Arrival")
-
-        star_rwy21_conv = {k: v for k, v in LPSO_STARS.items() if v["rwy"] == "21" and v["type"] == "STAR"}
-        star_rwy21_gnss = {k: v for k, v in LPSO_STARS.items() if v["rwy"] == "21" and v["type"] == "RNAV STAR"}
-        star_rwy03_gnss = {k: v for k, v in LPSO_STARS.items() if v["rwy"] == "03" and v["type"] == "RNAV STAR"}
-
-        def _render_stars(star_dict, label):
-            st.markdown(f"**{label}**")
-            for star_name, star_data in star_dict.items():
-                iaf = star_data.get("iaf","")
-                badge_class = "proc-badge-rnav" if "GNSS" in star_name or star_data["type"] == "RNAV STAR" else "proc-badge-star"
-                type_lbl = "RNAV" if star_data["type"] == "RNAV STAR" else "STAR"
-                st.markdown(
-                    f"<div class='star-card'>"
-                    f"<span class='{badge_class}'>{type_lbl}</span> "
-                    f"<b style='margin-left:6px'>{star_name}</b>"
-                    f"{'<span style=\"margin-left:8px;font-size:11px;color:#7c3aed\">(IAF: ' + iaf + ')</span>' if iaf else ''}"
-                    f"<div style='margin-top:4px;font-size:12px;color:#374151'>{star_data['description']}</div>"
-                    f"<div style='margin-top:4px;font-size:11px;color:#6b7280'>⚡ Calculado dinamicamente com TAS={get_climb_tas():.0f}kt / Vento {st.session_state.wind_from:03d}°/{st.session_state.wind_kt}kt</div>"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
-                if st.button(f"✚ Inserir {star_name}", key=f"star_{star_name}", use_container_width=True):
-                    apply_star(star_name)
-                    st.session_state.selected_star = star_name
-                    st.success(f"STAR «{star_name}» adicionada ao fim da rota.")
-                    st.rerun()
-
-        _render_stars(star_rwy21_conv, "RWY 21 — ILS / VOR DME")
-        _render_stars(star_rwy21_gnss, "RWY 21 — GNSS (RNAV)")
-        _render_stars(star_rwy03_gnss, "RWY 03 — GNSS (RNAV)")
-
-    # Mostrar procedimentos ativos
-    if st.session_state.selected_sid or st.session_state.selected_star:
-        st.markdown("---")
-        active_parts = []
-        if st.session_state.selected_sid:
-            active_parts.append(f"🛫 SID: **{st.session_state.selected_sid}**")
-        if st.session_state.selected_star:
-            active_parts.append(f"🛬 STAR: **{st.session_state.selected_star}**")
-        st.markdown("**Procedimentos ativos:** " + "  |  ".join(active_parts))
-
-        if st.button("🗑 Limpar seleção SID/STAR"):
-            st.session_state.selected_sid = ""
-            st.session_state.selected_star = ""
-
-st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
-
 # ========= ROTAS PADRÃO UI =========
 with st.expander("📁 Rotas padrão (Gist)", expanded=False):
     if not st.session_state.saved_routes:
@@ -1797,16 +1083,7 @@ if st.session_state.wps:
             with c4:
                 alt  = st.number_input(f"Alt (ft) — WP{i+1}", 0.0, 18000.0, float(w["alt"]), step=50.0, key=f"wpalt_{w['id']}")
 
-            # STOP ilimitado — máximo 600 min (10 horas), sem limite de 60 min
-            stop_min = st.number_input(
-                f"STOP neste WP (min) — sem limite de hora",
-                min_value=0.0,
-                max_value=600.0,   # até 10 horas de espera
-                value=float(w.get("stop_min", 0.0)),
-                step=0.5,
-                key=f"wpstop_{w['id']}",
-                help="Tempo de espera neste ponto (ex: holding, touch-and-go, reabastecimento). Máx 600 min."
-            )
+            stop_min = st.number_input(f"STOP neste WP (min)", 0.0, 60.0, float(w.get("stop_min", 0.0)), step=0.5, key=f"wpstop_{w['id']}")
 
             if not st.session_state.use_global_wind:
                 c5,c6 = st.columns(2)
@@ -2094,14 +1371,6 @@ def build_legs_from_nodes(nodes, mag_var, mag_is_e, ck_every_min):
                 (base_time + dt.timedelta(seconds=t_cursor+stop_sec)).strftime('%H:%M')
                 if base_time else f"T+{mmss(t_cursor+stop_sec)}"
             )
-            # Mostrar tempo de stop de forma legível (horas se > 60 min)
-            stop_total_min = int(round(stop_sec / 60.0))
-            if stop_total_min >= 60:
-                h_s, m_s = divmod(stop_total_min, 60)
-                stop_label = f"STOP {h_s}h{m_s:02d}m"
-            else:
-                stop_label = f"STOP {stop_total_min}min"
-
             legs.append({
                 "i":len(legs)+1,
                 "A":B,
@@ -2117,7 +1386,6 @@ def build_legs_from_nodes(nodes, mag_var, mag_is_e, ck_every_min):
                 "clock_start":clk_start2,
                 "clock_end":clk_end2,
                 "cps":[],
-                "stop_label": stop_label,
                 "wind_from":B.get("wind_from", st.session_state.wind_from),
                 "wind_kt":B.get("wind_kt", st.session_state.wind_kt),
             })
@@ -2150,26 +1418,16 @@ if st.session_state.legs:
     total_burn = rfuel05(sum(L["burn"] for L in st.session_state.legs))
     total_dist = rdist05(sum(L["Dist"] for L in st.session_state.legs))
     efob_final = st.session_state.legs[-1]["efob_end"]
-    stop_legs = [L for L in st.session_state.legs if L["profile"] == "STOP"]
-    stop_sec_total = sum(L["time_sec"] for L in stop_legs)
-
-    summary_html = (
+    st.markdown(
         "<div class='kvrow'>"
         + f"<div class='kv'>⏱️ ETE Total: <b>{hhmmss(total_sec)}</b></div>"
         + f"<div class='kv'>🧭 Distância: <b>{total_dist:.1f} nm</b></div>"
         + f"<div class='kv'>⛽ Burn Total: <b>{total_burn:.1f} L</b></div>"
         + f"<div class='kv'>🧯 EFOB Final: <b>{efob_final:.1f} L</b></div>"
         + f"<div class='kv'>🛩 {st.session_state.aircraft_type}</div>"
-        + f"<div class='kv'>🔢 Nº legs: <b>{len(st.session_state.legs)}</b></div>"
+        + f"<div class='kv'>🧮 Nº legs: <b>{len(st.session_state.legs)}</b></div>"
+        + "</div>", unsafe_allow_html=True
     )
-    if stop_sec_total > 0:
-        stop_min_total = int(round(stop_sec_total / 60.0))
-        h_st, m_st = divmod(stop_min_total, 60)
-        stop_str = f"{h_st}h{m_st:02d}m" if h_st > 0 else f"{m_st}min"
-        summary_html += f"<div class='kv' style='background:#fef3c7;border-color:#f59e0b'>⏸ STOP Total: <b>{stop_str}</b></div>"
-    summary_html += "</div>"
-
-    st.markdown(summary_html, unsafe_allow_html=True)
     st.markdown("<div class='sep'></div>", unsafe_allow_html=True)
 
 # ========= FILTRO PERNAS =========
@@ -2751,7 +2009,7 @@ def _fill_leg_line(d:dict, idx:int, L:dict, use_point:str, acc_d:float, acc_t:in
         d[f"{prefix}{idx:02d}_Magnetic_Heading"]    = ""
         d[f"{prefix}{idx:02d}_True_Airspeed"]       = ""
         d[f"{prefix}{idx:02d}_Ground_Speed"]        = ""
-        d[f"{prefix}{idx:02d}_Leg_Distance"]        = L.get("stop_label", "STOP")
+        d[f"{prefix}{idx:02d}_Leg_Distance"]        = "0.0"
     d[f"{prefix}{idx:02d}_Cumulative_Distance"] = f"{acc_d:.1f}"
     d[f"{prefix}{idx:02d}_Leg_ETE"]             = _pdf_mmss(L["time_sec"])
     d[f"{prefix}{idx:02d}_Cumulative_ETE"]      = _pdf_mmss(acc_t)
@@ -2917,13 +2175,13 @@ def build_leg_briefing_rows(legs):
             "Leg": idx,
             "From": A["name"],
             "To": B["name"],
-            "MH": f"{int(round(L['MH'])):03d}" if L["profile"] != "STOP" else "—",
-            "TC": f"{int(round(L['TC'])):03d}" if L["profile"] != "STOP" else "—",
+            "MH": f"{int(round(L['MH'])):03d}",
+            "TC": f"{int(round(L['TC'])):03d}",
             "VOR": vor_str,
             "Radial/Dist": radial_str,
             "Tempo": _pdf_mmss(L["time_sec"]),
             "Alt": _leg_altitude_profile_str(A, B),
-            "Profile": L.get("stop_label", L["profile"]),
+            "Profile": L["profile"],
         })
     return rows
 
