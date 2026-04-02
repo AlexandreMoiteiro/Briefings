@@ -269,6 +269,13 @@ def build_aerodromes_db(icaos):
             if r["id"] == "25": r["qfu"] = 254.0
         db["LPEV"]["runways"] = filtered
 
+    if "LPPT" in db:
+        db["LPPT"]["name"] = "Lisboa Humberto Delgado"
+        db["LPPT"]["runways"] = [
+            {"id": "02", "qfu": 20.0,  "toda": 3805.0, "lda": 3805.0},
+            {"id": "20", "qfu": 200.0, "toda": 3805.0, "lda": 3805.0},
+        ]
+
     return db
 
 
