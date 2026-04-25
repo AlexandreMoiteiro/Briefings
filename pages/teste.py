@@ -6,6 +6,7 @@
 # - VFR: aeródromos/heliportos/ULM + localidades + pontos por clique no mapa
 # - IFR: pontos ENR 4.4 via CSV local + airways ENR 3.3 via CSV local
 # - VOR: fixes por radial/distância e tracking inbound/outbound por radial
+# - LPSO: SID / STAR / Approaches com pontos calculados por performance
 # - Navlog: cálculo TT/TH/MH/GS/ETE/Fuel/EFOB, TOC/TOD/STOP
 # - PDF: preenche NAVLOG_FORM.pdf e NAVLOG_FORM_1.pdf se existirem no repo
 #
@@ -218,19 +219,22 @@ def fmt_unit(x: float) -> str:
 
 def fmt_num_clean(x: float, decimals: int = 1) -> str:
     v = round(float(x), decimals)
-    return str(int(v)) if abs(v - int(v)) < 1e-9 else f"{v:.{decimals}f}"
+    if abs(v - round(v)) < 1e-9:
+        return str(int(round(v)))
+    return f"{v:.{decimals}f}"
 
 
 def mmss(sec: float) -> str:
-    minutes = int(round(float(sec) / 60.0))
-    return f"{minutes:02d}:00" if minutes < 60 else f"{minutes//60:02d}:{minutes%60:02d}:00"
+    mins = int(round(float(sec) / 60.0))
+    return f"{mins:02d}:00" if mins < 60 else f"{mins // 60:02d}:{mins % 60:02d}:00"
 
 
 def pdf_time(sec: float) -> str:
-    minutes = int(round(float(sec) / 60.0))
-    if minutes >= 60:
-        return f"{minutes//60:02d}h{minutes%60:02d}"
-    return f"{minutes:02d}:00"
+    mins = int(round(float(sec) / 60.0))
+    if mins >= 60:
+        h, m = divmod(mins, 60)
+        return f"{h:02d}h{m:02d}"
+    return f"{mins:02d}:00"
 
 
 def wrap360(x: float) -> float:
@@ -241,55 +245,49 @@ def angdiff(a: float, b: float) -> float:
     return (float(a) - float(b) + 180.0) % 360.0 - 180.0
 
 
-def deg3(x: float) -> str:
-    return f"{int(round(wrap360(x))):03d}°"
-
-
 def dms_token_to_dd(token: str, is_lon: bool = False) -> Optional[float]:
     token = str(token).strip().upper()
     m = re.match(r"^(\d+(?:\.\d+)?)([NSEW])$", token)
     if not m:
         return None
     value, hemi = m.groups()
-    if is_lon:
-        deg_len = 3
+    raw = value
+    if "." in raw:
+        # Portugal files often use ddmmss.sssN / dddmmss.sssW
+        if is_lon:
+            deg = int(raw[0:3]); mins = int(raw[3:5]); secs = float(raw[5:])
+        else:
+            deg = int(raw[0:2]); mins = int(raw[2:4]); secs = float(raw[4:])
     else:
-        deg_len = 2
-    if len(value) < deg_len + 4:
-        return None
-    deg = int(value[:deg_len])
-    minutes = int(value[deg_len : deg_len + 2])
-    seconds = float(value[deg_len + 2 :])
-    dd = deg + minutes / 60.0 + seconds / 3600.0
+        if is_lon:
+            deg = int(raw[0:3]); mins = int(raw[3:5]); secs = float(raw[5:] or 0)
+        else:
+            deg = int(raw[0:2]); mins = int(raw[2:4]); secs = float(raw[4:] or 0)
+    dd = deg + mins / 60.0 + secs / 3600.0
     if hemi in {"S", "W"}:
         dd = -dd
     return dd
 
 
 def dd_to_icao(lat: float, lon: float) -> str:
-    lat_abs = abs(lat)
-    lon_abs = abs(lon)
+    lat_abs, lon_abs = abs(lat), abs(lon)
     lat_deg = int(lat_abs)
     lon_deg = int(lon_abs)
     lat_min = int(round((lat_abs - lat_deg) * 60))
     lon_min = int(round((lon_abs - lon_deg) * 60))
     if lat_min == 60:
-        lat_deg += 1
-        lat_min = 0
+        lat_deg += 1; lat_min = 0
     if lon_min == 60:
-        lon_deg += 1
-        lon_min = 0
+        lon_deg += 1; lon_min = 0
     return f"{lat_deg:02d}{lat_min:02d}{'N' if lat >= 0 else 'S'}{lon_deg:03d}{lon_min:02d}{'E' if lon >= 0 else 'W'}"
 
-# ===============================================================
-# GEO
-# ===============================================================
+
 def gc_dist_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     phi1, lam1, phi2, lam2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    dphi, dlam = phi2 - phi1, lam2 - lam1
+    dphi = phi2 - phi1
+    dlam = lam2 - lam1
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return EARTH_NM * c
+    return EARTH_NM * 2 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1 - a)))
 
 
 def gc_course_tc(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -544,7 +542,7 @@ def nearest_vor(lat: float, lon: float, limit_nm: Optional[float] = None) -> Opt
         if d < best_d:
             best_d = d
             best = {"ident": r["ident"], "name": r["name"], "freq_mhz": float(r["freq_mhz"]), "lat": float(r["lat"]), "lon": float(r["lon"]), "dist_nm": d}
-    if limit_nm is not None and best and best["dist_nm"] > limit_nm:
+    if limit_nm is not None and best and best_d > limit_nm:
         return None
     return best
 
@@ -706,6 +704,8 @@ def dme_arc_polyline(A: Dict[str, Any], B: Dict[str, Any], max_step_deg: float =
 
 
 def tracking_instruction(A: Dict[str, Any], B: Dict[str, Any], preferred_vor: str = "") -> str:
+    if B.get("navlog_note"):
+        return str(B.get("navlog_note"))
     if is_dme_arc_leg(A, B):
         vor = B.get("arc_vor") or A.get("arc_vor") or ""
         radius = B.get("arc_radius_nm") or A.get("arc_radius_nm") or 0
@@ -728,6 +728,430 @@ def tracking_instruction(A: Dict[str, Any], B: Dict[str, Any], preferred_vor: st
     if db > da + 0.3:
         return f"OUTB {v['ident']} R{radial_a:03d}"
     return f"X-RAD {v['ident']} R{radial_a:03d}→R{radial_b:03d}"
+
+
+# ===============================================================
+# LPSO PROCEDURES — SID / STAR / APPROACH
+# ===============================================================
+# Training charts supplied for LPSO are "FOR TRAINING PURPOSES / VMC ONLY".
+# The procedure builder below is deliberately local/offline: no AIP lookup at runtime.
+# For altitude-triggered turns, the position is computed from aircraft climb TAS,
+# selected ROC, wind and aerodrome elevation. Example: "At 2000 turn RIGHT 319"
+# becomes a computed point named "2000 TURN → TRK319" in the navlog.
+
+LPSO_ELEV_FT = 390.0
+LPSO_RWY_TRACKS = {"03": 025.0, "21": 206.0}
+
+
+def db_point(code: str, alt: float = 0.0, src_priority: Optional[List[str]] = None) -> Optional[Point]:
+    code = clean_code(code)
+    if not code:
+        return None
+    hit = POINTS_DF[POINTS_DF["code"].astype(str).str.upper() == code]
+    if hit.empty:
+        return None
+    if src_priority:
+        order = {s: i for i, s in enumerate(src_priority)}
+        hit = hit.assign(_p=hit["src"].map(lambda s: order.get(str(s), 999))).sort_values("_p")
+    return df_row_to_point(hit.iloc[0], alt=alt)
+
+
+def lspo_arp(alt: float = LPSO_ELEV_FT) -> Point:
+    p = db_point("LPSO", alt=alt, src_priority=["AD"])
+    if p:
+        p.name = "PONTE DE SOR"
+        p.code = "LPSO"
+        p.src = "AD"
+        return p
+    return Point(code="LPSO", name="PONTE DE SOR", lat=LPSO_FALLBACK_CENTER[0], lon=LPSO_FALLBACK_CENTER[1], alt=alt, src="AD")
+
+
+def proc_point(code: str, name: str, lat: float, lon: float, alt: float, *, remarks: str = "", navlog_note: str = "", src: str = "PROC") -> Dict[str, Any]:
+    p = Point(code=code, name=name, lat=lat, lon=lon, alt=alt, src=src, remarks=remarks, uid=next_uid()).to_dict()
+    p["navlog_note"] = navlog_note or code
+    p["no_auto_vnav"] = True
+    return p
+
+
+def proc_from_point(p: Point, *, alt: Optional[float] = None, remarks: str = "", navlog_note: str = "") -> Dict[str, Any]:
+    p.alt = float(p.alt if alt is None else alt)
+    p.uid = next_uid()
+    d = p.to_dict()
+    d["src"] = "PROC" if d.get("src") not in {"AD", "VOR"} else d.get("src")
+    d["remarks"] = remarks or d.get("remarks", "")
+    d["navlog_note"] = navlog_note or d.get("code") or d.get("name")
+    d["no_auto_vnav"] = True
+    return d
+
+
+def proc_vor_radial(ident: str, radial: float, dist_nm: float, alt: float, code: str = "", name: str = "", *, note: str = "") -> Dict[str, Any]:
+    vor = get_vor(ident)
+    if not vor:
+        raise ValueError(f"VOR {ident} não encontrado no CSV.")
+    lat, lon = dest_point(vor["lat"], vor["lon"], radial, dist_nm)
+    code = code or f"{ident}R{int(round(radial)) % 360:03d}D{dist_nm:g}".replace(".", "")
+    name = name or f"{ident} R{int(round(radial)) % 360:03d} D{dist_nm:g}"
+    return proc_point(
+        code=code,
+        name=name,
+        lat=lat,
+        lon=lon,
+        alt=alt,
+        remarks=f"{format_vor_id(vor)} R{int(round(radial)) % 360:03d} D{dist_nm:g}",
+        navlog_note=note or name,
+    )
+
+
+def proc_arc_points(ident: str, radius_nm: float, start_radial: float, end_radial: float, direction: str, alt: float, prefix: str = "ARC", note: str = "") -> List[Dict[str, Any]]:
+    pts, _ = make_dme_arc_points(ident, radius_nm, start_radial, end_radial, direction, 2.0, alt, prefix)
+    out: List[Dict[str, Any]] = []
+    for p in pts:
+        d = p.to_dict()
+        d["src"] = "DMEARC"
+        d["no_auto_vnav"] = True
+        d["navlog_note"] = note or d.get("name")
+        out.append(d)
+    return out
+
+
+def _project_xy_nm(lat: float, lon: float, lat0: float, lon0: float) -> Tuple[float, float]:
+    x = (lon - lon0) * 60.0 * math.cos(math.radians(lat0))
+    y = (lat - lat0) * 60.0
+    return x, y
+
+
+def _unproject_xy_nm(x: float, y: float, lat0: float, lon0: float) -> Tuple[float, float]:
+    lat = lat0 + y / 60.0
+    lon = lon0 + x / (60.0 * max(math.cos(math.radians(lat0)), 1e-9))
+    return lat, lon
+
+
+def _track_vec(track_deg: float) -> Tuple[float, float]:
+    t = math.radians(track_deg)
+    return math.sin(t), math.cos(t)
+
+
+def intersect_track_radial(
+    start_lat: float,
+    start_lon: float,
+    track_deg: float,
+    vor_ident: str,
+    radial_deg: float,
+    *,
+    fallback_dist_nm: float = 20.0,
+) -> Tuple[float, float]:
+    """Intersection of a track from start point with a VOR radial, using local NM projection.
+
+    If the lines are nearly parallel or the intersection is behind the aircraft, returns a
+    conservative fallback point along track.
+    """
+    vor = get_vor(vor_ident)
+    if not vor:
+        return dest_point(start_lat, start_lon, track_deg, fallback_dist_nm)
+    lat0 = (start_lat + float(vor["lat"])) / 2.0
+    lon0 = (start_lon + float(vor["lon"])) / 2.0
+    sx, sy = _project_xy_nm(start_lat, start_lon, lat0, lon0)
+    vx, vy = _project_xy_nm(float(vor["lat"]), float(vor["lon"]), lat0, lon0)
+    dx1, dy1 = _track_vec(track_deg)
+    dx2, dy2 = _track_vec(radial_deg)
+    # S + t*d1 = V + u*d2
+    det = dx1 * (-dy2) - dy1 * (-dx2)
+    if abs(det) < 1e-8:
+        return dest_point(start_lat, start_lon, track_deg, fallback_dist_nm)
+    bx, by = vx - sx, vy - sy
+    t = (bx * (-dy2) - by * (-dx2)) / det
+    if t < 0:
+        return dest_point(start_lat, start_lon, track_deg, fallback_dist_nm)
+    return _unproject_xy_nm(sx + t * dx1, sy + t * dy1, lat0, lon0)
+
+
+def altitude_trigger_turn_point(
+    dep: Point,
+    runway_track: float,
+    trigger_alt_ft: float,
+    turn_dir: str,
+    new_track: float,
+    *,
+    note_prefix: str = "",
+) -> Dict[str, Any]:
+    delta_ft = max(0.0, float(trigger_alt_ft) - float(dep.alt or LPSO_ELEV_FT))
+    roc = max(float(st.session_state.roc_fpm), 1.0)
+    tas = float(st.session_state.climb_tas)
+    wf, wk = int(st.session_state.wind_from), int(st.session_state.wind_kt)
+    _, _, gs = wind_triangle(runway_track, tas, wf, wk)
+    dist_nm = max(0.1, gs * (delta_ft / roc) / 60.0)
+    lat, lon = dest_point(dep.lat, dep.lon, runway_track, dist_nm)
+    arrow = "←" if str(turn_dir).upper().startswith("L") else "→"
+    note = f"{int(round(trigger_alt_ft))} TURN {arrow} TRK{int(round(new_track)) % 360:03d}"
+    if note_prefix:
+        note = f"{note_prefix} {note}"
+    return proc_point(
+        code=note.replace(" ", ""),
+        name=note,
+        lat=lat,
+        lon=lon,
+        alt=trigger_alt_ft,
+        remarks=f"Performance point: {dist_nm:.1f} NM from LPSO using ROC {roc:.0f} fpm, climb TAS {tas:.0f} kt, wind {wf:03d}/{wk}",
+        navlog_note=note,
+    )
+
+
+def resolve_named_proc_point(code: str, alt: float = 3000.0) -> Dict[str, Any]:
+    """Return known LPSO chart points, deriving local training fixes when not in CSV."""
+    code = clean_code(code)
+    p = db_point(code, alt=alt, src_priority=["IFR", "VOR", "AD", "VFR"])
+    if p:
+        return proc_from_point(p, alt=alt, navlog_note=code)
+
+    if code == "TAGUX":
+        return proc_vor_radial("FTM", 149, 50.8, alt, "TAGUX", "TAGUX", note="TAGUX")
+    if code == "BORRO":
+        # Chart labels BORRO on the NSA R198 inbound family; D29 is readable on the STAR page.
+        return proc_vor_radial("NSA", 198, 29.0, alt, "BORRO", "BORRO", note="BORRO")
+    if code == "MENDA":
+        return proc_vor_radial("FTM", 119, 35.0, alt, "MENDA", "MENDA", note="MENDA FTM R119 D35")
+    if code == "SALTE":
+        return proc_vor_radial("NSA", 198, 17.0, alt, "SALTE", "SALTE", note="SALTE NSA R198 D17")
+    if code == "PORCA":
+        magum = db_point("MAGUM", alt=4500.0, src_priority=["IFR"])
+        if magum:
+            lat, lon = dest_point(magum.lat, magum.lon, 83.0, 15.6)
+            return proc_point("PORCA", "PORCA", lat, lon, alt, remarks="Derived from MAGUM 3N: 083° / 15.6 NM", navlog_note="PORCA")
+    if code == "TRAMA":
+        magum = db_point("MAGUM", alt=4500.0, src_priority=["IFR"])
+        if magum:
+            lat, lon = dest_point(magum.lat, magum.lon, 80.0, 16.1)
+            return proc_point("TRAMA", "TRAMA", lat, lon, alt, remarks="Derived from MAGUM 3S: 080° / 16.1 NM", navlog_note="TRAMA")
+    if code == "RAKET":
+        lspo = lspo_arp()
+        lat, lon = dest_point(lspo.lat, lspo.lon, wrap360(25.0 + 180.0), 4.0)
+        return proc_point("RAKET", "RAKET", lat, lon, alt, remarks="GNSS RWY03 FAF, approx. 4 NM final", navlog_note="RAKET FAF")
+    if code == "ROSED":
+        lspo = lspo_arp()
+        lat, lon = dest_point(lspo.lat, lspo.lon, wrap360(206.0 + 180.0), 4.0)
+        return proc_point("ROSED", "ROSED", lat, lon, alt, remarks="GNSS RWY21 FAF, approx. 4 NM final", navlog_note="ROSED FAF")
+    # Last resort: LPSO ARP placeholder.
+    dep = lspo_arp(alt)
+    return proc_from_point(dep, alt=alt, navlog_note=code)
+
+
+def append_unique_points(base: List[Dict[str, Any]], new_points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = list(base)
+    for p in new_points:
+        if out and clean_code(out[-1].get("code")) == clean_code(p.get("code")):
+            out[-1].update(p)
+        else:
+            out.append(p)
+    return out
+
+
+def lspo_sid_points(proc: str, include_departure: bool = True) -> List[Dict[str, Any]]:
+    proc = proc.upper().strip()
+    dep = lspo_arp()
+    dep_d = proc_from_point(dep, alt=LPSO_ELEV_FT, navlog_note="LPSO")
+
+    pts: List[Dict[str, Any]] = [dep_d] if include_departure else []
+    if proc.endswith("2N"):
+        rwy_track = LPSO_RWY_TRACKS["03"]
+        # Common R140 inbound FTM intercept / D28 fix.
+        r140_lat, r140_lon = intersect_track_radial(dep.lat, dep.lon, rwy_track, "FTM", 140.0, fallback_dist_nm=8.0)
+        r140 = proc_point("INTFTMR140", "INT FTM R140", r140_lat, r140_lon, 2000.0, navlog_note="INT FTM R140")
+        ftm_d28 = proc_vor_radial("FTM", 140, 28.0, 2000.0, "FTMD28", "FTM D28", note="FTM D28")
+        if proc == "NSA 2N":
+            turn = altitude_trigger_turn_point(dep, rwy_track, 1400.0, "LEFT", 339.0)
+            nsa_int_lat, nsa_int_lon = intersect_track_radial(turn["lat"], turn["lon"], 339.0, "NSA", 212.0, fallback_dist_nm=23.0)
+            nsa_int = proc_point("INTNSAR212", "INT NSA R212", nsa_int_lat, nsa_int_lon, 2000.0, navlog_note="INT NSA R212")
+            end = proc_vor_radial("NSA", 212, 23.0, 2000.0, "NSA2NEND", "NSA R212 D23", note="NSA R212 D23")
+            pts += [turn, nsa_int, end]
+        elif proc == "FTM 2N":
+            end = proc_vor_radial("FTM", 140, 34.0, 3000.0, "FTM2NEND", "FTM R140 D34", note="FTM R140 D34")
+            pts += [r140, end]
+        elif proc == "MAGUM 2N":
+            turn2_lat, turn2_lon = intersect_track_radial(ftm_d28["lat"], ftm_d28["lon"], 238.0, "NSA", 225.0, fallback_dist_nm=15.0)
+            int_r225 = proc_point("INTNSAR225", "INT NSA R225", turn2_lat, turn2_lon, 2000.0, navlog_note="TRK238 INT NSA R225")
+            arc30 = proc_vor_radial("NSA", 225, 30.0, 2000.0, "NSAD30R225", "NSA D30 R225", note="NSA ARC D30")
+            magum = resolve_named_proc_point("MAGUM", 3000.0)
+            pts += [r140, ftm_d28, int_r225, arc30, magum]
+        elif proc == "TAGUX 2N":
+            int_r149_lat, int_r149_lon = intersect_track_radial(ftm_d28["lat"], ftm_d28["lon"], 244.0, "FTM", 149.0, fallback_dist_nm=8.0)
+            int_r149 = proc_point("INTFTMR149", "INT FTM R149", int_r149_lat, int_r149_lon, 3000.0, navlog_note="TRK244 INT FTM R149")
+            d31 = proc_vor_radial("FTM", 149, 31.0, 3000.0, "FTMD31", "FTM D31", note="X FTM D31 3000")
+            d40 = proc_vor_radial("FTM", 149, 40.0, 3000.0, "FTMD40", "FTM D40", note="MAINT 3000 UNTIL D40")
+            tagux = resolve_named_proc_point("TAGUX", 3000.0)
+            pts += [r140, ftm_d28, int_r149, d31, d40, tagux]
+    elif proc.endswith("3S"):
+        rwy_track = LPSO_RWY_TRACKS["21"]
+        if proc in {"NSA 3S", "FTM 3S"}:
+            turn = altitude_trigger_turn_point(dep, rwy_track, 2000.0, "RIGHT", 319.0)
+            nsa_int_lat, nsa_int_lon = intersect_track_radial(turn["lat"], turn["lon"], 319.0, "NSA", 212.0, fallback_dist_nm=18.0)
+            nsa_int = proc_point("INTNSAR212", "INT NSA R212", nsa_int_lat, nsa_int_lon, 2000.0, navlog_note="INT NSA R212")
+            ftm139_lat, ftm139_lon = intersect_track_radial(nsa_int["lat"], nsa_int["lon"], 319.0, "FTM", 139.0, fallback_dist_nm=16.0)
+            ftm139 = proc_point("XFTMR139", "CROSS FTM R139", ftm139_lat, ftm139_lon, 2000.0, navlog_note="X FTM R139")
+            if proc == "NSA 3S":
+                end = proc_vor_radial("NSA", 212, 31.0, 2000.0, "NSA3SEND", "NSA R212 D31", note="NSA R212 D31")
+                pts += [turn, nsa_int, ftm139, end]
+            else:
+                ftm = db_point("FTM", alt=3000.0, src_priority=["VOR"]) or Point(code="FTM", name="FTM", lat=0, lon=0, alt=3000, src="VOR")
+                pts += [turn, nsa_int, ftm139, proc_from_point(ftm, alt=3000.0, navlog_note="FTM")]
+        elif proc == "MAGUM 3S":
+            turn = altitude_trigger_turn_point(dep, rwy_track, 2000.0, "RIGHT", 269.0)
+            r225_lat, r225_lon = intersect_track_radial(turn["lat"], turn["lon"], 269.0, "NSA", 225.0, fallback_dist_nm=16.0)
+            int_r225 = proc_point("INTNSAR225", "INT NSA R225", r225_lat, r225_lon, 2000.0, navlog_note="TRK269 INT NSA R225")
+            arc30 = proc_vor_radial("NSA", 225, 30.0, 2000.0, "NSAD30R225", "NSA D30 R225", note="NSA ARC D30")
+            magum = resolve_named_proc_point("MAGUM", 3000.0)
+            pts += [turn, int_r225, arc30, magum]
+        elif proc == "TAGUX 3S":
+            r149_lat, r149_lon = intersect_track_radial(dep.lat, dep.lon, rwy_track, "FTM", 149.0, fallback_dist_nm=12.0)
+            int_r149 = proc_point("INTFTMR149", "INT FTM R149", r149_lat, r149_lon, 2000.0, navlog_note="INT FTM R149")
+            d40 = proc_vor_radial("FTM", 149, 40.0, 2000.0, "FTMD40", "FTM D40", note="MAINT 2000 UNTIL D40")
+            tagux = resolve_named_proc_point("TAGUX", 3000.0)
+            pts += [int_r149, d40, tagux]
+    return pts
+
+
+def lspo_star_points(proc: str) -> List[Dict[str, Any]]:
+    proc = proc.upper().strip()
+    pts: List[Dict[str, Any]] = []
+    if proc.endswith("3N"):  # RNAV STAR GNSS RWY03 to PORCA
+        entry = proc.replace(" 3N", "")
+        pts.append(resolve_named_proc_point(entry, 4500.0 if entry in {"MAGUM", "FTM", "NSA", "TAGUX", "BORRO"} else 3500.0))
+        ifgd08 = resolve_named_proc_point("PORCA", 1500.0)
+        ifgd08["code"] = "IFGD08"
+        ifgd08["name"] = "IFGD08"
+        ifgd08["navlog_note"] = "IFGD08 1500"
+        porca = resolve_named_proc_point("PORCA", 3500.0)
+        pts += [ifgd08, porca]
+    elif proc.endswith("3S"):  # RNAV STAR GNSS RWY21 to TRAMA
+        entry = proc.replace(" 3S", "")
+        pts.append(resolve_named_proc_point(entry, 4500.0 if entry in {"MAGUM", "FTM", "NSA", "TAGUX", "BORRO"} else 3500.0))
+        ifgd06 = resolve_named_proc_point("TRAMA", 2000.0)
+        ifgd06["code"] = "IFGD06"
+        ifgd06["name"] = "IFGD06"
+        ifgd06["navlog_note"] = "IFGD06 2000"
+        trama = resolve_named_proc_point("TRAMA", 3500.0)
+        pts += [ifgd06, trama]
+    elif proc.endswith("2S"):
+        entry = proc.replace(" 2S", "")
+        if entry == "TAGUX":
+            pts.append(resolve_named_proc_point("TAGUX", 5500.0))
+            pts.append(proc_vor_radial("FTM", 149, 37.0, 3500.0, "FTMR149D37", "FTM R149 D37", note="JOIN FTM D37 ARC"))
+            pts += proc_arc_points("FTM", 37.0, 149.0, 119.0, "CCW", 3500.0, "FTM37", note="FTM D37 ARC")
+            pts.append(resolve_named_proc_point("MENDA", 3500.0))
+        elif entry == "MAGUM":
+            pts.append(resolve_named_proc_point("MAGUM", 5500.0))
+            pts.append(resolve_named_proc_point("ATECA", 3500.0))
+            pts.append(resolve_named_proc_point("SALTE", 3000.0))
+        elif entry == "FTM":
+            ftm = db_point("FTM", alt=5500.0, src_priority=["VOR"])
+            if ftm:
+                pts.append(proc_from_point(ftm, alt=5500.0, navlog_note="FTM"))
+            pts.append(proc_vor_radial("FTM", 137, 32.0, 3000.0, "FTMR137D32", "FTM R137 D32", note="FTM R137 D32"))
+            pts.append(resolve_named_proc_point("SALTE", 3000.0))
+        elif entry == "NSA":
+            nsa = db_point("NSA", alt=4500.0, src_priority=["VOR"])
+            if nsa:
+                pts.append(proc_from_point(nsa, alt=4500.0, navlog_note="NSA"))
+            pts.append(resolve_named_proc_point("SALTE", 3000.0))
+        elif entry == "BORRO":
+            pts.append(resolve_named_proc_point("BORRO", 5500.0))
+            pts.append(resolve_named_proc_point("SALTE", 3000.0))
+    return pts
+
+
+def lspo_approach_points(proc: str, include_missed: bool = False) -> List[Dict[str, Any]]:
+    proc = proc.upper().strip()
+    pts: List[Dict[str, Any]] = []
+    lspo = lspo_arp()
+    if proc == "ILS RWY21":
+        pts += [
+            resolve_named_proc_point("MENDA", 3500.0),
+            proc_point("PDSD11", "IF D11 PDS", *dest_point(lspo.lat, lspo.lon, wrap360(206.0 + 180.0), 11.0), 2500.0, navlog_note="IF D11 PDS 2500"),
+            proc_point("PDSD64", "FAP D6.4 PDS", *dest_point(lspo.lat, lspo.lon, wrap360(206.0 + 180.0), 6.4), 2500.0, navlog_note="FAP D6.4 PDS 2500"),
+            proc_point("PDSD4", "D4 PDS", *dest_point(lspo.lat, lspo.lon, wrap360(206.0 + 180.0), 4.0), 1570.0, navlog_note="D4 PDS 1570"),
+            proc_from_point(lspo, alt=390.0, navlog_note="RWY21"),
+        ]
+    elif proc == "GNSS RWY03":
+        pts += [
+            resolve_named_proc_point("PORCA", 3500.0),
+            proc_point("D8PORCA", "D8 PORCA", *dest_point(resolve_named_proc_point("PORCA", 3500.0)["lat"], resolve_named_proc_point("PORCA", 3500.0)["lon"], 195.0, 8.0), 3500.0, navlog_note="D8 PORCA 3500"),
+            resolve_named_proc_point("RAKET", 1500.0),
+            proc_from_point(lspo, alt=390.0, navlog_note="RWY03"),
+        ]
+    elif proc == "GNSS RWY21":
+        pts += [
+            resolve_named_proc_point("TRAMA", 3500.0),
+            proc_point("D6TRAMA", "D6 TRAMA", *dest_point(resolve_named_proc_point("TRAMA", 3500.0)["lat"], resolve_named_proc_point("TRAMA", 3500.0)["lon"], 10.0, 6.0), 2000.0, navlog_note="D6 TRAMA 2000"),
+            resolve_named_proc_point("ROSED", 2000.0),
+            proc_from_point(lspo, alt=390.0, navlog_note="RWY21"),
+        ]
+    elif proc == "VOR DME RWY21":
+        pts += [
+            resolve_named_proc_point("SALTE", 3000.0),
+            proc_vor_radial("NSA", 198, 14.0, 2000.0, "NSAD14", "D14 NSA", note="D14 NSA 2000"),
+            proc_vor_radial("NSA", 198, 17.0, 2000.0, "NSAD17", "D17 NSA", note="D17 NSA 2000"),
+            proc_vor_radial("NSA", 198, 18.0, 1700.0, "NSAD18", "D18 NSA", note="D18 NSA 1700"),
+            proc_vor_radial("NSA", 198, 19.0, 1400.0, "NSAD19", "D19 NSA", note="D19 NSA 1400"),
+            proc_vor_radial("NSA", 198, 20.0, 1100.0, "NSAD20", "D20 NSA", note="D20 NSA 1100"),
+            proc_vor_radial("NSA", 198, 21.0, 900.0, "NSAD21", "D21 NSA MAP", note="MAP D21 NSA"),
+        ]
+    elif proc == "VOR DME RWY03":
+        pts += [
+            proc_vor_radial("NSA", 198, 30.6, 1500.0, "NSAD306", "IF D30.6 NSA", note="IF D30.6 NSA 1500"),
+            proc_vor_radial("NSA", 198, 26.6, 1500.0, "NSAD266", "FAF D26.6 NSA", note="FAF D26.6 NSA 1500"),
+            proc_vor_radial("NSA", 198, 25.6, 1380.0, "NSAD256", "D25.6 NSA", note="D25.6 NSA 1380"),
+            proc_vor_radial("NSA", 198, 24.6, 1060.0, "NSAD246", "D24.6 NSA", note="D24.6 NSA 1060"),
+            proc_vor_radial("NSA", 198, 23.6, 740.0, "NSAD236", "D23.6 NSA", note="D23.6 NSA 740"),
+            proc_vor_radial("NSA", 198, 22.6, 740.0, "NSAD226", "MAP D22.6 NSA", note="MAP D22.6 NSA"),
+        ]
+
+    if include_missed:
+        pts += lspo_missed_points(proc)
+    return pts
+
+
+def lspo_missed_points(proc: str) -> List[Dict[str, Any]]:
+    proc = proc.upper().strip()
+    lspo = lspo_arp()
+    if proc in {"ILS RWY21", "VOR DME RWY21"}:
+        turn = altitude_trigger_turn_point(lspo, LPSO_RWY_TRACKS["21"], 2000.0, "LEFT", 149.0, note_prefix="MA")
+        r149_lat, r149_lon = intersect_track_radial(turn["lat"], turn["lon"], LPSO_RWY_TRACKS["21"], "FTM", 149.0, fallback_dist_nm=6.0)
+        int149 = proc_point("MAINTFTMR149", "MA INT FTM R149", r149_lat, r149_lon, 2000.0, navlog_note="MA INT FTM R149")
+        arc_start = proc_vor_radial("FTM", 149, 37.0, 2000.0, "MAFTMD37R149", "MA FTM D37 R149", note="MA FTM D37 ARC")
+        arc = proc_arc_points("FTM", 37.0, 149.0, 119.0, "CCW", 2000.0, "MAFTM37", note="MA FTM D37 ARC")
+        menda = resolve_named_proc_point("MENDA", 3500.0)
+        return [turn, int149, arc_start] + arc + [menda]
+    if proc == "GNSS RWY03":
+        turn = altitude_trigger_turn_point(lspo, LPSO_RWY_TRACKS["03"], 2500.0, "LEFT", 195.0, note_prefix="MA")
+        porca = resolve_named_proc_point("PORCA", 3500.0)
+        return [turn, porca]
+    if proc == "GNSS RWY21":
+        turn = altitude_trigger_turn_point(lspo, LPSO_RWY_TRACKS["21"], 2500.0, "LEFT", 10.0, note_prefix="MA")
+        trama = resolve_named_proc_point("TRAMA", 3500.0)
+        return [turn, trama]
+    if proc == "VOR DME RWY03":
+        turn = altitude_trigger_turn_point(lspo, LPSO_RWY_TRACKS["03"], 2500.0, "RIGHT", 198.0, note_prefix="MA")
+        return [turn, proc_vor_radial("NSA", 198, 22.6, 3500.0, "MA_NSAD226", "MA D22.6 NSA", note="MA D22.6 NSA 3500")]
+    return []
+
+
+LPSO_SIDS = ["NSA 2N", "FTM 2N", "MAGUM 2N", "TAGUX 2N", "NSA 3S", "FTM 3S", "MAGUM 3S", "TAGUX 3S"]
+LPSO_STARS = [
+    "TAGUX 2S", "FTM 2S", "NSA 2S", "MAGUM 2S", "BORRO 2S",
+    "TAGUX 3N", "FTM 3N", "NSA 3N", "MAGUM 3N", "BORRO 3N",
+    "TAGUX 3S", "FTM 3S", "NSA 3S", "MAGUM 3S", "BORRO 3S",
+]
+LPSO_APPROACHES = ["ILS RWY21", "GNSS RWY03", "GNSS RWY21", "VOR DME RWY21", "VOR DME RWY03"]
+
+
+def lspo_procedure_points(kind: str, proc: str, include_departure: bool = True, include_missed: bool = False) -> List[Dict[str, Any]]:
+    kind = kind.upper().strip()
+    if kind == "SID":
+        return lspo_sid_points(proc, include_departure=include_departure)
+    if kind == "STAR":
+        return lspo_star_points(proc)
+    if kind == "APPROACH":
+        return lspo_approach_points(proc, include_missed=include_missed)
+    return []
 
 # ===============================================================
 # ROUTE DATABASE / PARSER
@@ -930,6 +1354,8 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         tc = gc_course_tc(A["lat"], A["lon"], B["lat"], B["lon"])
         wf = wind_for_point(A)[0]
         wk = wind_for_point(A)[1]
+        if A.get("no_auto_vnav") or B.get("no_auto_vnav"):
+            continue
         if B["alt"] > A["alt"]:
             t_min = (B["alt"] - A["alt"]) / max(float(st.session_state.roc_fpm), 1.0)
             _, _, gs = wind_triangle(tc, p["climb_tas"], wf, wk)
@@ -1086,26 +1512,9 @@ def get_gist_credentials() -> Tuple[Optional[str], Optional[str]]:
 
 
 def serialize_route() -> List[Dict[str, Any]]:
+    keys = ["code", "name", "lat", "lon", "alt", "src", "routes", "remarks", "stop_min", "vor_pref", "vor_ident", "arc_vor", "arc_radius_nm", "arc_start_radial", "arc_end_radial", "arc_direction", "arc_endpoint"]
     return [
-        {
-            "code": w.get("code"),
-            "name": w.get("name"),
-            "lat": w.get("lat"),
-            "lon": w.get("lon"),
-            "alt": w.get("alt"),
-            "src": w.get("src", "USER"),
-            "routes": w.get("routes", ""),
-            "remarks": w.get("remarks", ""),
-            "stop_min": w.get("stop_min", 0.0),
-            "vor_pref": w.get("vor_pref", "AUTO"),
-            "vor_ident": w.get("vor_ident", ""),
-            "arc_vor": w.get("arc_vor", ""),
-            "arc_radius_nm": w.get("arc_radius_nm", 0.0),
-            "arc_start_radial": w.get("arc_start_radial", 0.0),
-            "arc_end_radial": w.get("arc_end_radial", 0.0),
-            "arc_direction": w.get("arc_direction", "CW"),
-            "arc_endpoint": w.get("arc_endpoint", ""),
-        }
+        {k: w.get(k) for k in keys if k in w}
         for w in st.session_state.wps
     ]
 
@@ -1115,13 +1524,12 @@ def load_routes_from_gist() -> Dict[str, Any]:
     if not token or not gist_id or requests is None:
         return {}
     try:
-        r = requests.get(f"https://api.github.com/gists/{gist_id}", headers={"Authorization": f"token {token}"}, timeout=20)
+        r = requests.get(f"https://api.github.com/gists/{gist_id}", headers={"Authorization": f"token {token}"}, timeout=10)
         if r.status_code != 200:
             return {}
         files = r.json().get("files", {})
-        if "routes.json" not in files:
-            return {}
-        return json.loads(files["routes.json"].get("content") or "{}")
+        content = files.get("routes.json", {}).get("content", "{}")
+        return json.loads(content or "{}")
     except Exception:
         return {}
 
@@ -1129,69 +1537,62 @@ def load_routes_from_gist() -> Dict[str, Any]:
 def save_routes_to_gist(routes: Dict[str, Any]) -> Tuple[bool, str]:
     token, gist_id = get_gist_credentials()
     if not token or not gist_id or requests is None:
-        return False, "GITHUB_TOKEN/ROUTES_GIST_ID não configurados."
+        return False, "Gist desativado: configura GITHUB_TOKEN e ROUTES_GIST_ID."
     try:
-        payload = {"files": {"routes.json": {"content": json.dumps(routes, indent=2, ensure_ascii=False)}}}
-        r = requests.patch(f"https://api.github.com/gists/{gist_id}", headers={"Authorization": f"token {token}"}, json=payload, timeout=20)
-        if r.status_code not in (200, 201):
-            return False, f"Erro GitHub {r.status_code}: {r.text[:200]}"
-        return True, "Rotas guardadas."
+        payload = {"files": {"routes.json": {"content": json.dumps(routes, indent=2)}}}
+        r = requests.patch(f"https://api.github.com/gists/{gist_id}", headers={"Authorization": f"token {token}"}, json=payload, timeout=10)
+        return r.status_code in {200, 201}, "Rotas guardadas." if r.status_code in {200, 201} else f"Erro Gist {r.status_code}: {r.text[:120]}"
     except Exception as e:
         return False, str(e)
 
 # ===============================================================
-# PDF
+# PDF GENERATION
 # ===============================================================
-def _pdf_key_norm(key: Any) -> str:
-    """Normalize PDF field names so template variants still get populated."""
-    txt = str(key or "").strip()
-    txt = txt.strip("()")
-    txt = txt.replace("/", "_")
-    txt = re.sub(r"[^A-Za-z0-9]+", "_", txt)
-    txt = re.sub(r"_+", "_", txt).strip("_")
-    return txt.upper()
+def _pdf_key_norm(s: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(s).upper())
+
+
+PDF_ALIASES: Dict[str, List[str]] = {
+    "FLIGHT_LEVEL_ALTITUDE": ["FLIGHT_LEVEL/ALTITUDE", "FLIGHT_LEVEL_ALTITUDE", "FLIGHT LEVEL / ALTITUDE", "FLIGHT LEVEL ALTITUDE", "FLIGHT_LEVEL_ALT", "FL_ALT"],
+    "TEMP_ISA_DEV": ["TEMP/ISA_DEV", "TEMP / ISA DEV", "TEMP_ISA_DEV", "TEMP ISA DEV", "ISA_DEV", "TEMP_ISA"],
+    "MAG_VAR": ["MAG_VAR", "MAG. VAR", "MAG VAR", "MAGVAR"],
+    "WIND": ["WIND", "Wind"],
+}
 
 
 def expand_pdf_aliases(data: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(data)
-    # Explicit aliases for the header fields that differ across NAVLOG_FORM versions.
-    alias_groups = [
-        ["WIND", "Wind", "WIND_GLOBAL"],
-        ["MAG_VAR", "MAGVAR", "MAGNETIC_VARIATION", "MAGNETIC_VAR"],
-        ["FLIGHT_LEVEL_ALTITUDE", "FLIGHT_LEVEL/ALTITUDE", "FLIGHT_LEVEL", "FL_ALT", "FLIGHT_LEVEL_ALT"],
-        ["TEMP_ISA_DEV", "TEMP/ISA_DEV", "TEMP_ISA", "ISA_DEV", "TEMP"],
-    ]
-    for group in alias_groups:
-        value = None
-        for k in group:
-            if k in out and str(out[k]) != "":
-                value = out[k]
-                break
-        if value is not None:
-            for k in group:
-                out[k] = value
-    # Normalized lookup catches spaces, slashes and case differences in actual PDF field names.
+    out = data.copy()
+    norm_map = {_pdf_key_norm(k): v for k, v in data.items()}
+    for canonical, aliases in PDF_ALIASES.items():
+        val = data.get(canonical)
+        if val in {None, ""}:
+            for a in aliases:
+                if a in data and data[a] not in {None, ""}:
+                    val = data[a]
+                    break
+                nv = norm_map.get(_pdf_key_norm(a))
+                if nv not in {None, ""}:
+                    val = nv
+                    break
+        if val is not None:
+            out[canonical] = val
+            for a in aliases:
+                out[a] = val
+                out[_pdf_key_norm(a)] = val
     for k, v in list(out.items()):
         out[_pdf_key_norm(k)] = v
     return out
 
 
 def _pdf_page_size(page: Any) -> Tuple[float, float]:
-    box = [float(x) for x in page.MediaBox]
-    return abs(box[2] - box[0]), abs(box[3] - box[1])
+    mb = page.MediaBox
+    return float(mb[2]) - float(mb[0]), float(mb[3]) - float(mb[1])
 
 
-def _template_content_origin_x(page_width: float, page_index: int) -> float:
-    """Some scanned templates are on an A4-landscape canvas with the A5 form on one half."""
-    if page_width > 650:
-        return page_width / 2.0 if page_index % 2 == 1 else 0.0
-    return 0.0
-
-
-def _stamp_text_center(c: Any, x: float, y: float, text: str, size: float = 6.5, bold: bool = True) -> None:
-    if text is None or str(text).strip() == "":
+def _stamp_text_center(c: Any, x: float, y: float, text: str, size: float = 6.5) -> None:
+    if not text:
         return
-    c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+    c.setFont("Helvetica-Bold", size)
     c.drawCentredString(x, y, str(text))
 
 
@@ -1283,7 +1684,7 @@ def choose_vor_for_point(P: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def fill_leg_payload(d: Dict[str, Any], idx: int, L: Dict[str, Any], acc_d: float, acc_t: int, prefix: str = "Leg") -> None:
     P = L["B"]
-    d[f"{prefix}{idx:02d}_Waypoint"] = str(P.get("code") or P.get("name"))
+    d[f"{prefix}{idx:02d}_Waypoint"] = str(P.get("navlog_note") or P.get("code") or P.get("name"))
     d[f"{prefix}{idx:02d}_Altitude_FL"] = str(int(round(float(P.get("alt", 0)))))
     if L["profile"] != "STOP":
         d[f"{prefix}{idx:02d}_True_Course"] = f"{int(round(L['TC'])):03d}"
@@ -1363,47 +1764,45 @@ def generate_briefing_pdf(path: Path, rows: List[Dict[str, Any]]) -> Optional[Pa
         from reportlab.pdfgen import canvas
     except Exception:
         return None
+
     c = canvas.Canvas(str(path), pagesize=landscape(A4))
     width, height = landscape(A4)
     x0, y = 12 * mm, height - 14 * mm
-    c.setFont("Helvetica-Bold", 14)
+    c.setFont("Helvetica-Bold", 13)
     c.drawString(x0, y, f"NAVLOG briefing — {st.session_state.aircraft_type}")
-    y -= 8 * mm
-    headers = ["Leg", "From", "To", "MH", "TC", "Dist", "ETE", "Fuel", "EFOB", "VOR", "Radial/D", "Track"]
-    widths = [10, 28, 28, 12, 12, 14, 16, 14, 14, 26, 24, 68]
-    widths = [w * mm for w in widths]
-    def header_line() -> None:
-        nonlocal y
+    y -= 9 * mm
+
+    headers = list(rows[0].keys()) if rows else []
+    col_w = [14, 30, 30, 14, 14, 16, 16, 16, 16, 16, 16, 18, 28, 26, 55]
+    col_w = [w * mm for w in col_w[: len(headers)]]
+
+    def draw_header(ypos: float) -> float:
         c.setFont("Helvetica-Bold", 7)
         x = x0
-        for h, w in zip(headers, widths):
-            c.drawString(x, y, h)
+        for h, w in zip(headers, col_w):
+            c.drawString(x, ypos, str(h)[:16])
             x += w
-        y -= 4 * mm
-        c.line(x0, y + 2 * mm, x0 + sum(widths), y + 2 * mm)
-        c.setFont("Helvetica", 7)
-    header_line()
-    for row in rows:
+        c.line(x0, ypos - 2, x0 + sum(col_w), ypos - 2)
+        return ypos - 5 * mm
+
+    y = draw_header(y)
+    c.setFont("Helvetica", 7)
+    for r in rows:
         if y < 12 * mm:
             c.showPage()
             y = height - 14 * mm
-            header_line()
-        vals = [row.get(h, "") for h in headers]
+            y = draw_header(y)
+            c.setFont("Helvetica", 7)
         x = x0
-        for val, w in zip(vals, widths):
-            s = str(val)
-            if len(s) > 32:
-                s = s[:31] + "…"
-            c.drawString(x, y, s)
+        for h, w in zip(headers, col_w):
+            c.drawString(x, y, str(r.get(h, ""))[:24])
             x += w
         y -= 4.5 * mm
     c.save()
     return path
 
-# ===============================================================
-# DISPLAY HELPERS
-# ===============================================================
-def summary_metrics(legs: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+def summary_metrics(legs: List[Dict[str, Any]]) -> Dict[str, float]:
     return {
         "time": sum(L["time_sec"] for L in legs),
         "dist": rd(sum(L["Dist"] for L in legs)),
@@ -1415,22 +1814,22 @@ def summary_metrics(legs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def legs_to_dataframe(legs: List[Dict[str, Any]]) -> pd.DataFrame:
     rows = []
-    acc_d = 0.0
-    acc_t = 0
+    acc_d, acc_t = 0.0, 0
     for L in legs:
         acc_d = rd(acc_d + L["Dist"])
-        acc_t += int(L["time_sec"])
+        acc_t += L["time_sec"]
         P = L["B"]
         vor = choose_vor_for_point(P)
         rows.append(
             {
                 "Leg": L["i"],
                 "From": L["A"].get("code") or L["A"].get("name"),
-                "To": L["B"].get("code") or L["B"].get("name"),
+                "To": P.get("navlog_note") or P.get("code") or P.get("name"),
                 "Profile": L["profile"],
-                "TC": f"{int(round(L['TC'])):03d}",
-                "TH": f"{int(round(L['TH'])):03d}",
-                "MH": f"{int(round(L['MH'])):03d}",
+                "Alt": int(round(float(P.get("alt", 0)))),
+                "TC": f"{int(round(L['TC'])):03d}" if L["profile"] != "STOP" else "",
+                "TH": f"{int(round(L['TH'])):03d}" if L["profile"] != "STOP" else "",
+                "MH": f"{int(round(L['MH'])):03d}" if L["profile"] != "STOP" else "",
                 "TAS": int(round(L["TAS"])),
                 "GS": int(round(L["GS"])),
                 "Dist": f"{L['Dist']:.1f}",
@@ -1462,6 +1861,8 @@ def route_item15(wps: List[Dict[str, Any]]) -> str:
         src = str(w.get("src", "")).upper()
         if src == "CALC":
             continue
+        if src == "PROC" and str(w.get("navlog_note", "")).upper().startswith(("MA ", "INT", "TRK", "X ", "D", "IF ", "FAP", "MAP", "MAINT", "CROSS", "2000", "1400", "2500")):
+            continue
         code = clean_code(w.get("code") or w.get("name"))
         name_code = clean_code(w.get("name"))
         token = code or name_code
@@ -1483,29 +1884,28 @@ def html_pills(items: Iterable[Tuple[str, str]]) -> None:
 # MAP
 # ===============================================================
 def map_start_center() -> Tuple[float, float]:
-    hit = POINTS_DF[POINTS_DF["code"].astype(str).str.upper() == "LPSO"] if not POINTS_DF.empty else pd.DataFrame()
+    hit = POINTS_DF[POINTS_DF["code"].astype(str).str.upper() == "LPSO"]
     if not hit.empty:
-        r = hit.iloc[0]
-        return float(r["lat"]), float(r["lon"])
+        return float(hit.iloc[0]["lat"]), float(hit.iloc[0]["lon"])
     return LPSO_FALLBACK_CENTER
 
 
 def make_base_map() -> folium.Map:
-    m = folium.Map(location=map_start_center(), zoom_start=9, tiles=None, control_scale=True, prefer_canvas=True)
-    folium.TileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", attr="© OpenStreetMap", name="OSM").add_to(m)
-    folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", attr="© OpenTopoMap", name="OpenTopoMap").add_to(m)
+    center = map_start_center()
+    m = folium.Map(location=center, zoom_start=9, tiles=None, control_scale=True, prefer_canvas=True)
+    folium.TileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", name="OSM", attr="© OpenStreetMap").add_to(m)
+    folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", name="OpenTopoMap", attr="© OpenTopoMap").add_to(m)
     folium.TileLayer(
         "https://services.arcgisonline.com/ArcGIS/rest/services/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
-        attr="© Esri",
         name="Hillshade",
+        attr="© Esri",
     ).add_to(m)
+    m.fit_bounds(PT_BOUNDS)
+
     token = get_openaip_token()
     if bool(st.session_state.get("show_openaip", False)) and token:
         folium.TileLayer(
-            tiles=(
-                "https://{s}.api.tiles.openaip.net/api/data/openaip/"
-                "{z}/{x}/{y}.png?apiKey=" + token
-            ),
+            tiles="https://{s}.api.tiles.openaip.net/api/data/openaip/{z}/{x}/{y}.png?apiKey=" + token,
             attr="© openAIP",
             name="openAIP",
             overlay=True,
@@ -1572,7 +1972,7 @@ def render_route_map(wps: List[Dict[str, Any]], nodes: List[Dict[str, Any]], leg
         color = {"IFR": "#2563eb", "VOR": "#dc2626", "AD": "#111827", "VFR": "#16a34a", "USER": "#f97316", "VORFIX": "#be123c", "DMEARC": "#0891b2"}.get(src, "#0f172a")
         folium.CircleMarker((lat, lon), radius=6, color="#ffffff", weight=3, fill=True, fill_opacity=1).add_to(m)
         folium.CircleMarker((lat, lon), radius=5, color=color, fill=True, fill_opacity=1, tooltip=f"{idx}. {w.get('code') or w.get('name')} [{src}]").add_to(m)
-        label = f"{idx}. {w.get('code') or w.get('name')}"
+        label = f"{idx}. {w.get('navlog_note') or w.get('code') or w.get('name')}"
         add_div_marker(
             m,
             lat,
@@ -1623,7 +2023,7 @@ st.markdown(
     f"""
 <div class='nav-hero'>
   <div class='nav-title'>🧭 {APP_TITLE}</div>
-  <div class='nav-sub'>Planeamento VFR/IFR low offline por CSV local, com airways, VOR radial fixes, navlog e PDF.</div>
+  <div class='nav-sub'>Planeamento VFR/IFR low offline por CSV local, com airways, VOR radial fixes, SID/STAR/APP LPSO, navlog e PDF.</div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -1816,6 +2216,37 @@ with tab_route:
                 st.success(msg)
                 st.rerun()
 
+        st.markdown("#### Procedimentos LPSO")
+        st.caption("SID/STAR/approach para treino. Os turns por altitude são calculados pela performance configurada: TAS subida, ROC e vento.")
+        proc_c1, proc_c2, proc_c3 = st.columns([0.9, 1.35, 0.9])
+        with proc_c1:
+            proc_kind = st.selectbox("Tipo", ["SID", "STAR", "APPROACH"], key="lpso_proc_kind")
+        proc_list = LPSO_SIDS if proc_kind == "SID" else (LPSO_STARS if proc_kind == "STAR" else LPSO_APPROACHES)
+        with proc_c2:
+            proc_name = st.selectbox("Procedimento", proc_list, key="lpso_proc_name")
+        with proc_c3:
+            insert_mode = st.selectbox("Inserção", ["Acrescentar", "Substituir rota"], key="lpso_proc_insert_mode")
+        proc_c4, proc_c5 = st.columns(2)
+        with proc_c4:
+            include_departure = st.checkbox("SID inclui LPSO como primeiro ponto", value=True, key="lpso_include_departure", disabled=(proc_kind != "SID"))
+        with proc_c5:
+            include_missed = st.checkbox("Approach inclui missed approach", value=False, key="lpso_include_missed", disabled=(proc_kind != "APPROACH"))
+        if st.button("Adicionar procedimento LPSO", use_container_width=True, type="primary"):
+            try:
+                pts = lspo_procedure_points(proc_kind, proc_name, include_departure=bool(include_departure), include_missed=bool(include_missed))
+                if not pts:
+                    st.warning("Não foi possível gerar este procedimento.")
+                else:
+                    if insert_mode == "Substituir rota":
+                        st.session_state.wps = pts
+                    else:
+                        st.session_state.wps = append_unique_points(st.session_state.wps, pts)
+                    recalc_route()
+                    st.success(f"{proc_kind} {proc_name} adicionado ({len(pts)} pontos).")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao gerar procedimento: {e}")
+
     with right:
         st.markdown("#### Waypoints da rota")
         ensure_point_ids()
@@ -1824,11 +2255,13 @@ with tab_route:
         remove_idx: Optional[int] = None
         move: Optional[Tuple[int, int]] = None
         for idx, w in enumerate(st.session_state.wps):
-            with st.expander(f"{idx+1:02d} · {w.get('code') or w.get('name')} · {w.get('src','')}", expanded=False):
+            with st.expander(f"{idx+1:02d} · {w.get('navlog_note') or w.get('code') or w.get('name')} · {w.get('src','')}", expanded=False):
                 c1, c2 = st.columns([2, 1])
                 with c1:
                     w["code"] = st.text_input("Código", w.get("code") or w.get("name") or "WP", key=f"wp_code_{w['uid']}").upper()
                     w["name"] = st.text_input("Nome", w.get("name") or w.get("code") or "WP", key=f"wp_name_{w['uid']}")
+                    if w.get("navlog_note"):
+                        w["navlog_note"] = st.text_input("Texto no NAVLOG", w.get("navlog_note", ""), key=f"wp_note_{w['uid']}")
                 with c2:
                     w["alt"] = st.number_input("Alt ft", 0.0, 45000.0, float(w.get("alt", 0.0)), step=50.0, key=f"wp_alt_{w['uid']}")
                     w["stop_min"] = st.number_input("STOP min", 0.0, 480.0, float(w.get("stop_min", 0.0)), step=1.0, key=f"wp_stop_{w['uid']}")
@@ -1988,16 +2421,10 @@ with tab_navlog:
         with c9:
             arrival_freq = st.text_input("FREQ ARRIVAL", "131.675")
         c10, c11 = st.columns(2)
-        suggested_alt = ""
-        if st.session_state.route_nodes:
-            alts = sorted({int(round(float(n.get("alt", 0)))) for n in st.session_state.route_nodes if float(n.get("alt", 0)) > 0})
-            suggested_alt = "/".join(str(a) for a in alts[:4])
         with c10:
-            fl_alt = st.text_input("FLIGHT_LEVEL_ALTITUDE", value=suggested_alt, help="Valor que entra no campo FLIGHT_LEVEL_ALTITUDE do formulário.")
+            fl_alt = st.text_input("FLIGHT LEVEL / ALTITUDE", "")
         with c11:
-            temp_isa = st.text_input("TEMP_ISA_DEV", value="ISA", help="Valor que entra no campo TEMP_ISA_DEV do formulário.")
-        mag_txt = f"{fmt_num_clean(abs(float(st.session_state.mag_var)))}°{'E' if st.session_state.mag_is_east else 'W'}"
-        st.caption(f"Campos automáticos para o PDF: WIND {int(st.session_state.wind_from):03d}/{int(st.session_state.wind_kt):02d} · MAG_VAR {mag_txt}")
+            temp_isa = st.text_input("TEMP / ISA DEV", "")
 
         header = {
             "callsign": callsign,
@@ -2014,30 +2441,24 @@ with tab_navlog:
             "temp_isa": temp_isa,
         }
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
+        st.markdown("#### PDFs")
+        cpdf1, cpdf2 = st.columns(2)
+        with cpdf1:
             if st.button("Gerar PDF NAVLOG", type="primary", use_container_width=True):
                 if not TEMPLATE_MAIN.exists():
-                    st.error("NAVLOG_FORM.pdf não existe no repo.")
+                    st.error("NAVLOG_FORM.pdf não encontrado na raiz do repo.")
                 else:
                     payload = build_pdf_payload(st.session_state.legs, header, start=0, count=22)
-                    fill_pdf(TEMPLATE_MAIN, OUTPUT_MAIN, payload)
-                    st.success("PDF principal gerado.")
-                    with open(OUTPUT_MAIN, "rb") as f:
+                    out = fill_pdf(TEMPLATE_MAIN, OUTPUT_MAIN, payload)
+                    with open(out, "rb") as f:
                         st.download_button("⬇️ NAVLOG principal", f.read(), file_name="NAVLOG_FILLED.pdf", mime="application/pdf", use_container_width=True)
-        with c2:
-            if len(st.session_state.legs) > 22:
-                if st.button("Gerar continuação", use_container_width=True):
-                    if not TEMPLATE_CONT.exists():
-                        st.error("NAVLOG_FORM_1.pdf não existe no repo.")
-                    else:
-                        payload = build_pdf_payload(st.session_state.legs, header, start=22, count=11)
-                        fill_pdf(TEMPLATE_CONT, OUTPUT_CONT, payload)
-                        with open(OUTPUT_CONT, "rb") as f:
+
+                    if len(st.session_state.legs) > 22 and TEMPLATE_CONT.exists():
+                        payload2 = build_pdf_payload(st.session_state.legs, header, start=22, count=11)
+                        out2 = fill_pdf(TEMPLATE_CONT, OUTPUT_CONT, payload2)
+                        with open(out2, "rb") as f:
                             st.download_button("⬇️ NAVLOG continuação", f.read(), file_name="NAVLOG_FILLED_1.pdf", mime="application/pdf", use_container_width=True)
-            else:
-                st.caption("Continuação só necessária acima de 22 legs.")
-        with c3:
+        with cpdf2:
             if st.button("Gerar briefing PDF", use_container_width=True):
                 rows = df_legs.to_dict("records")
                 p = generate_briefing_pdf(OUTPUT_BRIEFING, rows)
@@ -2058,3 +2479,4 @@ Ferramenta de planeamento. Confirma sempre cartas, NOTAM, AIP/AIRAC, meteorologi
 """,
     unsafe_allow_html=True,
 )
+
