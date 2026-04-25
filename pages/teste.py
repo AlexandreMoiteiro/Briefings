@@ -40,7 +40,7 @@ from streamlit_folium import st_folium
 
 try:
     import requests
-except Exception:  # pragma: no cover
+except Exception:
     requests = None
 
 # ===============================================================
@@ -60,7 +60,6 @@ TEMPLATE_MAIN = ROOT / "NAVLOG_FORM.pdf"
 TEMPLATE_CONT = ROOT / "NAVLOG_FORM_1.pdf"
 OUTPUT_MAIN = ROOT / "NAVLOG_FILLED.pdf"
 OUTPUT_CONT = ROOT / "NAVLOG_FILLED_1.pdf"
-OUTPUT_BRIEFING = ROOT / "NAVLOG_LEGS_BRIEFING.pdf"
 
 EARTH_NM = 3440.065
 LPSO_FALLBACK_CENTER = (39.2119, -8.0569)
@@ -798,16 +797,6 @@ def db_point(code: str, alt: float = 0.0, src_priority: Optional[List[str]] = No
     return df_row_to_point(hit.iloc[0], alt)
 
 
-def lspo_arp(alt: float = 390.0) -> Point:
-    point = db_point("LPSO", alt=alt, src_priority=["AD"])
-    if point:
-        point.code = "LPSO"
-        point.name = "PONTE DE SOR"
-        point.src = "AD"
-        return point
-    return Point(code="LPSO", name="PONTE DE SOR", lat=LPSO_FALLBACK_CENTER[0], lon=LPSO_FALLBACK_CENTER[1], alt=alt, src="AD")
-
-
 def search_points(query: str, limit: int = 30, last: Optional[Point] = None) -> pd.DataFrame:
     q = query.strip().lower()
     if not q:
@@ -1105,17 +1094,28 @@ def proc_rate_one_turn(segment: Dict[str, Any], previous: Dict[str, Any]) -> Dic
     )
 
 
-def build_procedure_points(proc_id: str) -> List[Dict[str, Any]]:
+def build_procedure_points(proc_id: str, proc_instance_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Expande um procedimento do procedures_lpso.json.
+
+    Todos os pontos gerados ficam marcados com proc_id/proc_instance_id.
+    recalc_route() usa essas tags para regenerar os procedimentos quando mudas
+    ROC/TAS/vento. Assim os pontos dinâmicos deixam de ficar congelados.
+    """
     procedure = next((p for p in available_procedures() if p.get("id") == proc_id), None)
     if not procedure:
         raise ValueError(f"Procedimento {proc_id} não encontrado em {PROC_FILE.name}.")
+
+    instance_id = proc_instance_id or f"{clean_code(proc_id)}-{next_uid()}"
     output: List[Dict[str, Any]] = []
-    for segment in procedure.get("segments", []):
+
+    for segment_index, segment in enumerate(procedure.get("segments", [])):
         typ = str(segment.get("type", "")).lower()
         previous = output[-1] if output else None
+        before_len = len(output)
+
         if typ == "static_point":
             output.append(proc_static_point(segment, previous))
-        elif typ == "vor_radial_dme":
+        elif typ in {"vor_radial_dme", "radial_to_dme"}:
             output.append(proc_vor_radial_dme(segment))
         elif typ == "runway_track_until_alt":
             if not previous:
@@ -1137,7 +1137,45 @@ def build_procedure_points(proc_id: str) -> List[Dict[str, Any]]:
             output.append(proc_rate_one_turn(segment, previous))
         else:
             raise ValueError(f"Tipo de segmento desconhecido: {typ}")
+
+        for point in output[before_len:]:
+            point["proc_id"] = proc_id
+            point["proc_instance_id"] = instance_id
+            point["proc_segment_index"] = segment_index
+            point["proc_generated"] = True
+
+    for order, point in enumerate(output):
+        point["proc_id"] = proc_id
+        point["proc_instance_id"] = instance_id
+        point["proc_order"] = order
+        point["proc_generated"] = True
     return output
+
+
+def refresh_procedure_waypoints(wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Regenera blocos de procedimentos mantendo pontos manuais intactos."""
+    refreshed: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(wps):
+        point = wps[i]
+        proc_id = point.get("proc_id")
+        instance_id = point.get("proc_instance_id")
+        if not proc_id or not instance_id:
+            refreshed.append(point)
+            i += 1
+            continue
+
+        block_start = i
+        while i < len(wps) and wps[i].get("proc_instance_id") == instance_id:
+            i += 1
+        old_block = wps[block_start:i]
+
+        try:
+            refreshed.extend(build_procedure_points(str(proc_id), proc_instance_id=str(instance_id)))
+        except Exception as exc:
+            st.warning(f"Não consegui regenerar {proc_id}: {exc}. Mantive os pontos antigos.")
+            refreshed.extend(old_block)
+    return refreshed
 
 # ===============================================================
 # ROUTE CALCULATION
@@ -1321,7 +1359,10 @@ def build_legs(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return legs
 
 
-def recalc_route() -> None:
+def recalc_route(refresh_procedures: bool = True) -> None:
+    if refresh_procedures and st.session_state.get("wps"):
+        st.session_state.wps = refresh_procedure_waypoints(st.session_state.wps)
+        ensure_point_ids()
     st.session_state.route_nodes = build_route_nodes(st.session_state.wps)
     st.session_state.legs = build_legs(st.session_state.route_nodes)
 
@@ -1814,8 +1855,39 @@ with setup_d:
     st.number_input("Taxi fuel (L)", 0.0, 30.0, key="taxi_fuel_l", step=0.5)
     st.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
     if st.button("Recalcular navlog", type="primary", use_container_width=True):
-        recalc_route()
+        recalc_route(refresh_procedures=True)
+        st.session_state["_last_calc_sig"] = None
         st.toast("Rota recalculada")
+
+
+def calculation_signature() -> str:
+    return json.dumps(
+        {
+            "aircraft_type": st.session_state.aircraft_type,
+            "climb_tas": float(st.session_state.climb_tas),
+            "cruise_tas": float(st.session_state.cruise_tas),
+            "descent_tas": float(st.session_state.descent_tas),
+            "fuel_flow_lh": float(st.session_state.fuel_flow_lh),
+            "taxi_fuel_l": float(st.session_state.taxi_fuel_l),
+            "roc_fpm": int(st.session_state.roc_fpm),
+            "rod_fpm": int(st.session_state.rod_fpm),
+            "wind_from": int(st.session_state.wind_from),
+            "wind_kt": int(st.session_state.wind_kt),
+            "use_global_wind": bool(st.session_state.use_global_wind),
+            "mag_var": float(st.session_state.mag_var),
+            "mag_is_east": bool(st.session_state.mag_is_east),
+            "start_efob": float(st.session_state.start_efob),
+            "start_clock": str(st.session_state.start_clock),
+        },
+        sort_keys=True,
+    )
+
+
+_current_calc_sig = calculation_signature()
+if st.session_state.get("_last_calc_sig") != _current_calc_sig and st.session_state.get("wps"):
+    recalc_route(refresh_procedures=True)
+    st.session_state["_last_calc_sig"] = _current_calc_sig
+
 st.markdown("<hr>", unsafe_allow_html=True)
 
 # ===============================================================
@@ -1834,14 +1906,16 @@ with tab_route:
             if st.button("Substituir rota", type="primary", use_container_width=True):
                 pts, notes = parse_route_text(route_text, float(st.session_state.default_alt))
                 st.session_state.wps = [p.to_dict() for p in pts]
-                recalc_route()
+                recalc_route(refresh_procedures=False)
+                st.session_state["_last_calc_sig"] = calculation_signature()
                 for note in notes:
                     st.warning(note)
         with c2:
             if st.button("Acrescentar", use_container_width=True):
                 pts, notes = parse_route_text(route_text, float(st.session_state.default_alt))
                 st.session_state.wps.extend([p.to_dict() for p in pts])
-                recalc_route()
+                recalc_route(refresh_procedures=False)
+                st.session_state["_last_calc_sig"] = calculation_signature()
                 for note in notes:
                     st.warning(note)
         with c3:
@@ -1868,7 +1942,8 @@ with tab_route:
                     p = df_row_to_point(r, alt)
                     p.uid = next_uid()
                     st.session_state.wps.append(p.to_dict())
-                    recalc_route()
+                    recalc_route(refresh_procedures=True)
+                    st.session_state["_last_calc_sig"] = calculation_signature()
                     st.rerun()
 
         st.markdown("#### Fix VOR / arco DME")
@@ -1887,7 +1962,8 @@ with tab_route:
                     p.alt = float(radial_alt)
                     p.uid = next_uid()
                     st.session_state.wps.append(p.to_dict())
-                    recalc_route()
+                    recalc_route(refresh_procedures=True)
+                    st.session_state["_last_calc_sig"] = calculation_signature()
                     st.rerun()
 
         vor_idents = sorted([str(x) for x in VOR_DF["ident"].dropna().unique()]) if not VOR_DF.empty else []
@@ -1910,7 +1986,8 @@ with tab_route:
                 st.error(msg)
             else:
                 st.session_state.wps.extend([p.to_dict() for p in pts])
-                recalc_route()
+                recalc_route(refresh_procedures=True)
+                st.session_state["_last_calc_sig"] = calculation_signature()
                 st.success(msg)
                 st.rerun()
 
@@ -1933,7 +2010,8 @@ with tab_route:
                         st.session_state.wps = pts
                     else:
                         st.session_state.wps.extend(pts)
-                    recalc_route()
+                    recalc_route(refresh_procedures=False)
+                    st.session_state["_last_calc_sig"] = calculation_signature()
                     st.success(f"{proc_id} adicionado ({len(pts)} pontos).")
                     st.rerun()
                 except Exception as exc:
@@ -1967,7 +2045,8 @@ with tab_route:
                         p = Point.from_dict(item)
                         p.uid = next_uid()
                         st.session_state.wps.append(p.to_dict())
-                    recalc_route()
+                    recalc_route(refresh_procedures=True)
+                    st.session_state["_last_calc_sig"] = calculation_signature()
                     st.rerun()
             with l2:
                 if choice and st.button("Apagar", use_container_width=True):
@@ -2012,17 +2091,20 @@ with tab_route:
         if move:
             a, b = move
             st.session_state.wps[a], st.session_state.wps[b] = st.session_state.wps[b], st.session_state.wps[a]
-            recalc_route()
+            recalc_route(refresh_procedures=True)
+            st.session_state["_last_calc_sig"] = calculation_signature()
             st.rerun()
         if remove_idx is not None:
             st.session_state.wps.pop(remove_idx)
-            recalc_route()
+            recalc_route(refresh_procedures=True)
+            st.session_state["_last_calc_sig"] = calculation_signature()
             st.rerun()
         if st.session_state.wps:
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Aplicar alterações e recalcular", type="primary", use_container_width=True):
-                    recalc_route()
+                    recalc_route(refresh_procedures=True)
+                    st.session_state["_last_calc_sig"] = calculation_signature()
                     st.rerun()
             with c2:
                 st.code(route_item15(st.session_state.wps) or "—")
@@ -2056,7 +2138,8 @@ with tab_map:
             if st.form_submit_button("Adicionar clique"):
                 p = Point(code=clean_code(name) or "CLICK", name=name, lat=float(clicked["lat"]), lon=float(clicked["lng"]), alt=float(alt), src="USER", uid=next_uid())
                 st.session_state.wps.append(p.to_dict())
-                recalc_route()
+                recalc_route(refresh_procedures=True)
+                st.session_state["_last_calc_sig"] = calculation_signature()
                 st.rerun()
 
 with tab_navlog:
@@ -2129,4 +2212,5 @@ st.markdown(
     "<hr><div class='small-muted'>Ferramenta de planeamento. Confirma sempre cartas, NOTAM, AIP/AIRAC, meteorologia, mínimos, autorizações ATC e performance real.</div>",
     unsafe_allow_html=True,
 )
+
 
