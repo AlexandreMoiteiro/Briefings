@@ -16,7 +16,7 @@
         {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
         {"type": "runway_track_until_alt", "track": 25, "alt": 1400, "next_track": 339, "turn_arrow": "←", "note": "1400 TURN ← TRK339"},
         {"type": "track_to_intercept_radial", "track": 339, "vor": "NSA", "radial": 212, "alt": 2000, "note": "INT NSA R212"},
-        {"type": "track_to_intercept_dme", "track": 339, "vor": "NSA", "dme": 23, "alt": 2000, "note": "NSA R212 D23"}
+        {"type": "radial_to_dme", "vor": "NSA", "radial": 212, "dme": 23, "alt": 2000, "note": "NSA R212 D23"}
       ]
     },
     {
@@ -69,7 +69,7 @@
         {"type": "runway_track_until_alt", "track": 206, "alt": 2000, "next_track": 319, "turn_arrow": "→", "note": "2000 TURN → TRK319"},
         {"type": "track_to_intercept_radial", "track": 319, "vor": "NSA", "radial": 212, "alt": 2000, "note": "INT NSA R212"},
         {"type": "track_to_intercept_radial", "track": 319, "vor": "FTM", "radial": 139, "alt": 2000, "note": "X FTM R139"},
-        {"type": "track_to_intercept_dme", "track": 319, "vor": "NSA", "dme": 31, "alt": 2000, "note": "NSA R212 D31"}
+        {"type": "radial_to_dme", "vor": "NSA", "radial": 212, "dme": 31, "alt": 2000, "note": "NSA R212 D31"}
       ]
     },
     {
@@ -116,7 +116,7 @@
       "name": "LPSO GNSS RWY03",
       "runway": "03",
       "segments": [
-        {"type": "static_point", "point": "PORCA", "alt": 3500, "note": "PORCA IAF"},
+        {"type": "static_point", "point": "PORCA", "lat": 39.20851, "lon": -8.07308, "alt": 3500, "note": "PORCA IAF"},
         {"type": "vor_radial_dme", "vor": "NSA", "radial": 198, "dme": 30.6, "alt": 3500, "code": "D8PORCA", "name": "D8 PORCA", "note": "D8 PORCA 3500"},
         {"type": "rate_one_turn", "direction": "LEFT", "start_track": 195, "end_track": 25, "alt": 1500, "note": "RATE 1 ← ALIGN 025"},
         {"type": "static_point", "point": "RAKET", "alt": 1500, "note": "RAKET FAF 1500"},
@@ -129,9 +129,9 @@
       "name": "LPSO GNSS RWY21",
       "runway": "21",
       "segments": [
-        {"type": "static_point", "point": "TRAMA", "alt": 3500, "note": "TRAMA IAF"},
+        {"type": "static_point", "point": "TRAMA", "lat": 39.30400, "lon": -8.00000, "alt": 3500, "note": "TRAMA IAF"},
         {"type": "track_to_intercept_dme", "track": 10, "vor": "NSA", "dme": 31, "alt": 2000, "code": "D6TRAMA", "note": "D6 TRAMA 2000"},
-        {"type": "static_point", "point": "ROSED", "alt": 2000, "note": "ROSED FAF 2000"},
+        {"type": "static_point", "point": "ROSED", "lat": 39.27200, "lon": -8.02200, "alt": 2000, "note": "ROSED FAF 2000"},
         {"type": "static_point", "point": "LPSO", "alt": 390, "note": "RWY21"}
       ]
     },
