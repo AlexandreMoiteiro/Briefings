@@ -731,427 +731,324 @@ def tracking_instruction(A: Dict[str, Any], B: Dict[str, Any], preferred_vor: st
 
 
 # ===============================================================
-# LPSO PROCEDURES — SID / STAR / APPROACH
+# EXTERNAL PROCEDURES ENGINE
 # ===============================================================
-# Training charts supplied for LPSO are "FOR TRAINING PURPOSES / VMC ONLY".
-# The procedure builder below is deliberately local/offline: no AIP lookup at runtime.
-# For altitude-triggered turns, the position is computed from aircraft climb TAS,
-# selected ROC, wind and aerodrome elevation. Example: "At 2000 turn RIGHT 319"
-# becomes a computed point named "2000 TURN → TRK319" in the navlog.
+# Os procedimentos já não vivem no app.py. O programa lê procedures_lpso.json.
+# A lógica abaixo é genérica: o JSON descreve os segmentos e o app calcula
+# interceções, turns por altitude e curvas por performance no momento em que
+# o procedimento é adicionado.
 
-LPSO_ELEV_FT = 390.0
-LPSO_RWY_TRACKS = {"03": 025.0, "21": 206.0}
+PROC_FILE = ROOT / "procedures_lpso.json"
 
-
-def db_point(code: str, alt: float = 0.0, src_priority: Optional[List[str]] = None) -> Optional[Point]:
-    code = clean_code(code)
-    if not code:
-        return None
-    hit = POINTS_DF[POINTS_DF["code"].astype(str).str.upper() == code]
-    if hit.empty:
-        return None
-    if src_priority:
-        order = {s: i for i, s in enumerate(src_priority)}
-        hit = hit.assign(_p=hit["src"].map(lambda s: order.get(str(s), 999))).sort_values("_p")
-    return df_row_to_point(hit.iloc[0], alt=alt)
+@st.cache_data(show_spinner=False)
+def load_procedures_file(path_str: str) -> dict:
+    path = Path(path_str)
+    if not path.exists():
+        return {"procedures": []}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        st.error(f"Erro ao ler {path.name}: {e}")
+        return {"procedures": []}
 
 
-def lspo_arp(alt: float = LPSO_ELEV_FT) -> Point:
-    p = db_point("LPSO", alt=alt, src_priority=["AD"])
-    if p:
-        p.name = "PONTE DE SOR"
-        p.code = "LPSO"
-        p.src = "AD"
-        return p
-    return Point(code="LPSO", name="PONTE DE SOR", lat=LPSO_FALLBACK_CENTER[0], lon=LPSO_FALLBACK_CENTER[1], alt=alt, src="AD")
+def available_procedures(kind: str | None = None) -> list[dict]:
+    data = load_procedures_file(str(PROC_FILE))
+    procs = data.get("procedures", [])
+    if kind:
+        procs = [p for p in procs if str(p.get("kind", "")).upper() == kind.upper()]
+    return procs
 
 
-def proc_point(code: str, name: str, lat: float, lon: float, alt: float, *, remarks: str = "", navlog_note: str = "", src: str = "PROC") -> Dict[str, Any]:
-    p = Point(code=code, name=name, lat=lat, lon=lon, alt=alt, src=src, remarks=remarks, uid=next_uid()).to_dict()
-    p["navlog_note"] = navlog_note or code
+def procedure_names(kind: str) -> list[str]:
+    return [str(p.get("id", "")) for p in available_procedures(kind) if p.get("id")]
+
+
+def make_proc_point(code, name, lat, lon, alt, src="PROC", note="", remarks="", extra=None):
+    p = Point(
+        code=str(code or name or "PROC").upper(),
+        name=str(name or code or "PROC"),
+        lat=float(lat),
+        lon=float(lon),
+        alt=float(alt),
+        src=src,
+        remarks=remarks,
+    ).to_dict()
+    p["id"] = st.session_state.wp_next_id
+    st.session_state.wp_next_id += 1
+    p["uid"] = p["id"]
+    p["navlog_note"] = note or p["name"]
     p["no_auto_vnav"] = True
+    p.setdefault("stop_min", 0.0)
+    p.setdefault("vor_pref", "AUTO")
+    p.setdefault("vor_ident", "")
+    if extra:
+        p.update(extra)
     return p
 
 
-def proc_from_point(p: Point, *, alt: Optional[float] = None, remarks: str = "", navlog_note: str = "") -> Dict[str, Any]:
-    p.alt = float(p.alt if alt is None else alt)
-    p.uid = next_uid()
-    d = p.to_dict()
-    d["src"] = "PROC" if d.get("src") not in {"AD", "VOR"} else d.get("src")
-    d["remarks"] = remarks or d.get("remarks", "")
-    d["navlog_note"] = navlog_note or d.get("code") or d.get("name")
-    d["no_auto_vnav"] = True
-    return d
+def proc_static_point(seg, previous=None):
+    code = str(seg.get("point") or seg.get("code") or "").upper().strip()
+    alt = float(seg.get("alt", st.session_state.default_alt if "default_alt" in st.session_state else st.session_state.alt_qadd))
+    p = db_point(code, alt=alt, src_priority=["IFR", "VOR", "AD", "VFR"])
+    if p:
+        d = p.to_dict()
+        d["id"] = st.session_state.wp_next_id
+        st.session_state.wp_next_id += 1
+        d["uid"] = d["id"]
+        d["alt"] = alt
+        d["navlog_note"] = seg.get("note") or code
+        d["no_auto_vnav"] = True
+        return d
+    if "lat" in seg and "lon" in seg:
+        return make_proc_point(code, seg.get("name") or code, seg["lat"], seg["lon"], alt, note=seg.get("note") or code, remarks=seg.get("remarks", ""))
+    raise ValueError(f"Ponto {code} não está no CSV e não tem lat/lon no JSON.")
 
 
-def proc_vor_radial(ident: str, radial: float, dist_nm: float, alt: float, code: str = "", name: str = "", *, note: str = "") -> Dict[str, Any]:
-    vor = get_vor(ident)
+def xy_nm(lat, lon, lat0, lon0):
+    return ((lon - lon0) * 60.0 * math.cos(math.radians(lat0)), (lat - lat0) * 60.0)
+
+
+def ll_from_xy(x, y, lat0, lon0):
+    return (lat0 + y / 60.0, lon0 + x / (60.0 * max(math.cos(math.radians(lat0)), 1e-9)))
+
+
+def track_vec(track_deg):
+    t = math.radians(track_deg)
+    return (math.sin(t), math.cos(t))
+
+
+def track_intercept_radial(start_lat, start_lon, track_deg, vor_ident, radial_deg, fallback_nm=20.0):
+    vor = get_vor_by_ident(vor_ident)
     if not vor:
-        raise ValueError(f"VOR {ident} não encontrado no CSV.")
-    lat, lon = dest_point(vor["lat"], vor["lon"], radial, dist_nm)
-    code = code or f"{ident}R{int(round(radial)) % 360:03d}D{dist_nm:g}".replace(".", "")
-    name = name or f"{ident} R{int(round(radial)) % 360:03d} D{dist_nm:g}"
-    return proc_point(
-        code=code,
-        name=name,
-        lat=lat,
-        lon=lon,
-        alt=alt,
-        remarks=f"{format_vor_id(vor)} R{int(round(radial)) % 360:03d} D{dist_nm:g}",
-        navlog_note=note or name,
+        lat, lon = dest_point(start_lat, start_lon, track_deg, fallback_nm)
+        return lat, lon, False
+    lat0 = (start_lat + vor["lat"]) / 2.0
+    lon0 = (start_lon + vor["lon"]) / 2.0
+    sx, sy = xy_nm(start_lat, start_lon, lat0, lon0)
+    vx, vy = xy_nm(vor["lat"], vor["lon"], lat0, lon0)
+    dx1, dy1 = track_vec(track_deg)
+    dx2, dy2 = track_vec(radial_deg)
+    det = dx1 * (-dy2) - dy1 * (-dx2)
+    if abs(det) < 1e-8:
+        lat, lon = dest_point(start_lat, start_lon, track_deg, fallback_nm)
+        return lat, lon, False
+    bx = vx - sx
+    by = vy - sy
+    t = (bx * (-dy2) - by * (-dx2)) / det
+    if t < 0:
+        lat, lon = dest_point(start_lat, start_lon, track_deg, fallback_nm)
+        return lat, lon, False
+    return (*ll_from_xy(sx + t * dx1, sy + t * dy1, lat0, lon0), True)
+
+
+def track_intercept_dme(start_lat, start_lon, track_deg, vor_ident, dme_nm, choose="first", fallback_nm=20.0):
+    vor = get_vor_by_ident(vor_ident)
+    if not vor:
+        lat, lon = dest_point(start_lat, start_lon, track_deg, fallback_nm)
+        return lat, lon, False
+    lat0 = (start_lat + vor["lat"]) / 2.0
+    lon0 = (start_lon + vor["lon"]) / 2.0
+    sx, sy = xy_nm(start_lat, start_lon, lat0, lon0)
+    cx, cy = xy_nm(vor["lat"], vor["lon"], lat0, lon0)
+    dx, dy = track_vec(track_deg)
+    fx = sx - cx
+    fy = sy - cy
+    a = dx * dx + dy * dy
+    b = 2 * (fx * dx + fy * dy)
+    c = fx * fx + fy * fy - dme_nm * dme_nm
+    disc = b * b - 4 * a * c
+    hits = []
+    if disc >= 0:
+        root = math.sqrt(disc)
+        for t in [(-b - root) / (2 * a), (-b + root) / (2 * a)]:
+            if t >= 0:
+                hits.append((t, *ll_from_xy(sx + t * dx, sy + t * dy, lat0, lon0)))
+    if hits:
+        hits.sort(key=lambda x: x[0])
+        h = hits[-1] if choose == "last" else hits[0]
+        return h[1], h[2], True
+    lat, lon = dest_point(start_lat, start_lon, track_deg, fallback_nm)
+    return lat, lon, False
+
+
+def proc_vor_radial_dme(seg):
+    vor = get_vor_by_ident(seg["vor"])
+    if not vor:
+        raise ValueError(f"VOR {seg['vor']} não encontrado.")
+    radial = float(seg["radial"])
+    dme = float(seg["dme"])
+    lat, lon = dest_point(vor["lat"], vor["lon"], radial, dme)
+    note = seg.get("note") or f"{vor['ident']} R{int(radial):03d} D{dme:g}"
+    return make_proc_point(
+        seg.get("code") or note.replace(" ", ""),
+        seg.get("name") or note,
+        lat,
+        lon,
+        float(seg.get("alt", st.session_state.alt_qadd)),
+        note=note,
+        remarks=f"{fmt_ident_with_freq(vor)} R{int(radial):03d} D{dme:g}",
+        extra={"vor_pref": "FIXED", "vor_ident": vor["ident"]},
     )
 
 
-def proc_arc_points(ident: str, radius_nm: float, start_radial: float, end_radial: float, direction: str, alt: float, prefix: str = "ARC", note: str = "") -> List[Dict[str, Any]]:
-    pts, _ = make_dme_arc_points(ident, radius_nm, start_radial, end_radial, direction, 2.0, alt, prefix)
-    out: List[Dict[str, Any]] = []
+def proc_runway_track_until_alt(seg, previous):
+    track = float(seg["track"])
+    target_alt = float(seg["alt"])
+    start_alt = float(previous.get("alt", seg.get("start_alt", 390)))
+    delta_ft = max(0.0, target_alt - start_alt)
+    wf, wk = wind_for_point(previous)
+    _, _, gs = wind_triangle(track, get_climb_tas(), wf, wk)
+    minutes = delta_ft / max(float(st.session_state.roc_fpm), 1.0)
+    dist_nm = max(0.05, gs * minutes / 60.0)
+    lat, lon = dest_point(previous["lat"], previous["lon"], track, dist_nm)
+    note = seg.get("note") or f"{int(target_alt)} TURN {seg.get('turn_arrow','')} TRK{int(seg.get('next_track', track)):03d}".strip()
+    return make_proc_point(
+        seg.get("code") or note.replace(" ", ""),
+        note,
+        lat,
+        lon,
+        target_alt,
+        src="PROC_DYNAMIC",
+        note=note,
+        remarks=f"Performance ROC {float(st.session_state.roc_fpm):.0f} fpm, GS climb {gs:.0f} kt, dist {dist_nm:.2f} NM",
+    )
+
+
+def proc_track_to_intercept_radial(seg, previous):
+    track = float(seg["track"])
+    radial = float(seg["radial"])
+    lat, lon, ok = track_intercept_radial(previous["lat"], previous["lon"], track, seg["vor"], radial, float(seg.get("fallback_nm", 20.0)))
+    note = seg.get("note") or f"INT {seg['vor']} R{int(radial):03d}"
+    return make_proc_point(
+        seg.get("code") or note.replace(" ", ""),
+        note,
+        lat,
+        lon,
+        float(seg.get("alt", previous.get("alt", st.session_state.alt_qadd))),
+        src="PROC_DYNAMIC",
+        note=note,
+        remarks="Dynamic radial intercept" if ok else "Fallback point, no forward intercept",
+        extra={"vor_pref": "FIXED", "vor_ident": str(seg["vor"]).upper()},
+    )
+
+
+def proc_track_to_intercept_dme(seg, previous):
+    track = float(seg["track"])
+    dme = float(seg["dme"])
+    lat, lon, ok = track_intercept_dme(previous["lat"], previous["lon"], track, seg["vor"], dme, seg.get("choose", "first"), float(seg.get("fallback_nm", 20.0)))
+    note = seg.get("note") or f"{seg['vor']} D{dme:g}"
+    return make_proc_point(
+        seg.get("code") or note.replace(" ", ""),
+        note,
+        lat,
+        lon,
+        float(seg.get("alt", previous.get("alt", st.session_state.alt_qadd))),
+        src="PROC_DYNAMIC",
+        note=note,
+        remarks="Dynamic DME intercept" if ok else "Fallback point, no forward DME intercept",
+        extra={"vor_pref": "FIXED", "vor_ident": str(seg["vor"]).upper()},
+    )
+
+
+def proc_dme_arc(seg):
+    pts, msg = make_dme_arc_points(
+        str(seg["vor"]),
+        float(seg["dme"]),
+        float(seg["start_radial"]),
+        float(seg["end_radial"]),
+        str(seg.get("direction", "CW")),
+        2.0,
+        float(seg.get("alt", st.session_state.alt_qadd)),
+        str(seg.get("code", "ARC")),
+    )
+    out = []
     for p in pts:
         d = p.to_dict()
-        d["src"] = "DMEARC"
+        d["navlog_note"] = seg.get("note") or msg
         d["no_auto_vnav"] = True
-        d["navlog_note"] = note or d.get("name")
         out.append(d)
     return out
 
 
-def _project_xy_nm(lat: float, lon: float, lat0: float, lon0: float) -> Tuple[float, float]:
-    x = (lon - lon0) * 60.0 * math.cos(math.radians(lat0))
-    y = (lat - lat0) * 60.0
-    return x, y
+def rate_one_radius_nm(gs_kt, rate_deg_sec=3.0):
+    return (max(float(gs_kt), 1.0) / 3600.0) / math.radians(max(float(rate_deg_sec), 0.1))
 
 
-def _unproject_xy_nm(x: float, y: float, lat0: float, lon0: float) -> Tuple[float, float]:
-    lat = lat0 + y / 60.0
-    lon = lon0 + x / (60.0 * max(math.cos(math.radians(lat0)), 1e-9))
-    return lat, lon
-
-
-def _track_vec(track_deg: float) -> Tuple[float, float]:
-    t = math.radians(track_deg)
-    return math.sin(t), math.cos(t)
-
-
-def intersect_track_radial(
-    start_lat: float,
-    start_lon: float,
-    track_deg: float,
-    vor_ident: str,
-    radial_deg: float,
-    *,
-    fallback_dist_nm: float = 20.0,
-) -> Tuple[float, float]:
-    """Intersection of a track from start point with a VOR radial, using local NM projection.
-
-    If the lines are nearly parallel or the intersection is behind the aircraft, returns a
-    conservative fallback point along track.
-    """
-    vor = get_vor(vor_ident)
-    if not vor:
-        return dest_point(start_lat, start_lon, track_deg, fallback_dist_nm)
-    lat0 = (start_lat + float(vor["lat"])) / 2.0
-    lon0 = (start_lon + float(vor["lon"])) / 2.0
-    sx, sy = _project_xy_nm(start_lat, start_lon, lat0, lon0)
-    vx, vy = _project_xy_nm(float(vor["lat"]), float(vor["lon"]), lat0, lon0)
-    dx1, dy1 = _track_vec(track_deg)
-    dx2, dy2 = _track_vec(radial_deg)
-    # S + t*d1 = V + u*d2
-    det = dx1 * (-dy2) - dy1 * (-dx2)
-    if abs(det) < 1e-8:
-        return dest_point(start_lat, start_lon, track_deg, fallback_dist_nm)
-    bx, by = vx - sx, vy - sy
-    t = (bx * (-dy2) - by * (-dx2)) / det
-    if t < 0:
-        return dest_point(start_lat, start_lon, track_deg, fallback_dist_nm)
-    return _unproject_xy_nm(sx + t * dx1, sy + t * dy1, lat0, lon0)
-
-
-def altitude_trigger_turn_point(
-    dep: Point,
-    runway_track: float,
-    trigger_alt_ft: float,
-    turn_dir: str,
-    new_track: float,
-    *,
-    note_prefix: str = "",
-) -> Dict[str, Any]:
-    delta_ft = max(0.0, float(trigger_alt_ft) - float(dep.alt or LPSO_ELEV_FT))
-    roc = max(float(st.session_state.roc_fpm), 1.0)
-    tas = float(st.session_state.climb_tas)
-    wf, wk = int(st.session_state.wind_from), int(st.session_state.wind_kt)
-    _, _, gs = wind_triangle(runway_track, tas, wf, wk)
-    dist_nm = max(0.1, gs * (delta_ft / roc) / 60.0)
-    lat, lon = dest_point(dep.lat, dep.lon, runway_track, dist_nm)
-    arrow = "←" if str(turn_dir).upper().startswith("L") else "→"
-    note = f"{int(round(trigger_alt_ft))} TURN {arrow} TRK{int(round(new_track)) % 360:03d}"
-    if note_prefix:
-        note = f"{note_prefix} {note}"
-    return proc_point(
-        code=note.replace(" ", ""),
-        name=note,
-        lat=lat,
-        lon=lon,
-        alt=trigger_alt_ft,
-        remarks=f"Performance point: {dist_nm:.1f} NM from LPSO using ROC {roc:.0f} fpm, climb TAS {tas:.0f} kt, wind {wf:03d}/{wk}",
-        navlog_note=note,
+def proc_rate_one_turn(seg, previous):
+    start_track = float(seg["start_track"])
+    end_track = float(seg["end_track"])
+    direction = str(seg.get("direction", "LEFT")).upper()
+    wf, wk = wind_for_point(previous)
+    _, _, gs = wind_triangle(start_track, get_cruise_tas(), wf, wk)
+    radius = rate_one_radius_nm(gs, float(seg.get("rate_deg_sec", 3.0)))
+    center_bearing = wrap360(start_track - 90 if direction == "LEFT" else start_track + 90)
+    clat, clon = dest_point(previous["lat"], previous["lon"], center_bearing, radius)
+    end_radial = wrap360(end_track + 90 if direction == "LEFT" else end_track - 90)
+    end_lat, end_lon = dest_point(clat, clon, end_radial, radius)
+    note = seg.get("note") or f"RATE 1 {'←' if direction == 'LEFT' else '→'} TRK{int(end_track):03d}"
+    return make_proc_point(
+        seg.get("code") or note.replace(" ", ""),
+        note,
+        end_lat,
+        end_lon,
+        float(seg.get("alt", previous.get("alt", st.session_state.alt_qadd))),
+        src="TURN",
+        note=note,
+        remarks=f"Rate one turn GS {gs:.0f} kt radius {radius:.2f} NM",
+        extra={
+            "turn_center_lat": clat,
+            "turn_center_lon": clon,
+            "turn_radius_nm": radius,
+            "turn_start_course": start_track,
+            "turn_end_course": end_track,
+            "turn_direction": direction,
+        },
     )
 
 
-def resolve_named_proc_point(code: str, alt: float = 3000.0) -> Dict[str, Any]:
-    """Return known LPSO chart points, deriving local training fixes when not in CSV."""
-    code = clean_code(code)
-    p = db_point(code, alt=alt, src_priority=["IFR", "VOR", "AD", "VFR"])
-    if p:
-        return proc_from_point(p, alt=alt, navlog_note=code)
-
-    if code == "TAGUX":
-        return proc_vor_radial("FTM", 149, 50.8, alt, "TAGUX", "TAGUX", note="TAGUX")
-    if code == "BORRO":
-        # Chart labels BORRO on the NSA R198 inbound family; D29 is readable on the STAR page.
-        return proc_vor_radial("NSA", 198, 29.0, alt, "BORRO", "BORRO", note="BORRO")
-    if code == "MENDA":
-        return proc_vor_radial("FTM", 119, 35.0, alt, "MENDA", "MENDA", note="MENDA FTM R119 D35")
-    if code == "SALTE":
-        return proc_vor_radial("NSA", 198, 17.0, alt, "SALTE", "SALTE", note="SALTE NSA R198 D17")
-    if code == "PORCA":
-        magum = db_point("MAGUM", alt=4500.0, src_priority=["IFR"])
-        if magum:
-            lat, lon = dest_point(magum.lat, magum.lon, 83.0, 15.6)
-            return proc_point("PORCA", "PORCA", lat, lon, alt, remarks="Derived from MAGUM 3N: 083° / 15.6 NM", navlog_note="PORCA")
-    if code == "TRAMA":
-        magum = db_point("MAGUM", alt=4500.0, src_priority=["IFR"])
-        if magum:
-            lat, lon = dest_point(magum.lat, magum.lon, 80.0, 16.1)
-            return proc_point("TRAMA", "TRAMA", lat, lon, alt, remarks="Derived from MAGUM 3S: 080° / 16.1 NM", navlog_note="TRAMA")
-    if code == "RAKET":
-        lspo = lspo_arp()
-        lat, lon = dest_point(lspo.lat, lspo.lon, wrap360(25.0 + 180.0), 4.0)
-        return proc_point("RAKET", "RAKET", lat, lon, alt, remarks="GNSS RWY03 FAF, approx. 4 NM final", navlog_note="RAKET FAF")
-    if code == "ROSED":
-        lspo = lspo_arp()
-        lat, lon = dest_point(lspo.lat, lspo.lon, wrap360(206.0 + 180.0), 4.0)
-        return proc_point("ROSED", "ROSED", lat, lon, alt, remarks="GNSS RWY21 FAF, approx. 4 NM final", navlog_note="ROSED FAF")
-    # Last resort: LPSO ARP placeholder.
-    dep = lspo_arp(alt)
-    return proc_from_point(dep, alt=alt, navlog_note=code)
-
-
-def append_unique_points(base: List[Dict[str, Any]], new_points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out = list(base)
-    for p in new_points:
-        if out and clean_code(out[-1].get("code")) == clean_code(p.get("code")):
-            out[-1].update(p)
+def build_procedure_points(proc_id: str) -> list[dict]:
+    proc = next((p for p in available_procedures() if p.get("id") == proc_id), None)
+    if not proc:
+        raise ValueError(f"Procedimento {proc_id} não encontrado em {PROC_FILE.name}.")
+    out = []
+    for seg in proc.get("segments", []):
+        typ = str(seg.get("type", "")).lower()
+        prev = out[-1] if out else None
+        if typ == "static_point":
+            out.append(proc_static_point(seg, prev))
+        elif typ == "vor_radial_dme":
+            out.append(proc_vor_radial_dme(seg))
+        elif typ == "runway_track_until_alt":
+            if not prev:
+                raise ValueError(f"{proc_id}: runway_track_until_alt precisa de ponto anterior.")
+            out.append(proc_runway_track_until_alt(seg, prev))
+        elif typ == "track_to_intercept_radial":
+            if not prev:
+                raise ValueError(f"{proc_id}: track_to_intercept_radial precisa de ponto anterior.")
+            out.append(proc_track_to_intercept_radial(seg, prev))
+        elif typ == "track_to_intercept_dme":
+            if not prev:
+                raise ValueError(f"{proc_id}: track_to_intercept_dme precisa de ponto anterior.")
+            out.append(proc_track_to_intercept_dme(seg, prev))
+        elif typ == "dme_arc":
+            out.extend(proc_dme_arc(seg))
+        elif typ == "rate_one_turn":
+            if not prev:
+                raise ValueError(f"{proc_id}: rate_one_turn precisa de ponto anterior.")
+            out.append(proc_rate_one_turn(seg, prev))
         else:
-            out.append(p)
+            raise ValueError(f"Tipo de segmento desconhecido: {typ}")
     return out
 
 
-def lspo_sid_points(proc: str, include_departure: bool = True) -> List[Dict[str, Any]]:
-    proc = proc.upper().strip()
-    dep = lspo_arp()
-    dep_d = proc_from_point(dep, alt=LPSO_ELEV_FT, navlog_note="LPSO")
+def lspo_procedure_points(kind, proc, include_departure=True, include_missed=False):
+    return build_procedure_points(proc)
 
-    pts: List[Dict[str, Any]] = [dep_d] if include_departure else []
-    if proc.endswith("2N"):
-        rwy_track = LPSO_RWY_TRACKS["03"]
-        # Common R140 inbound FTM intercept / D28 fix.
-        r140_lat, r140_lon = intersect_track_radial(dep.lat, dep.lon, rwy_track, "FTM", 140.0, fallback_dist_nm=8.0)
-        r140 = proc_point("INTFTMR140", "INT FTM R140", r140_lat, r140_lon, 2000.0, navlog_note="INT FTM R140")
-        ftm_d28 = proc_vor_radial("FTM", 140, 28.0, 2000.0, "FTMD28", "FTM D28", note="FTM D28")
-        if proc == "NSA 2N":
-            turn = altitude_trigger_turn_point(dep, rwy_track, 1400.0, "LEFT", 339.0)
-            nsa_int_lat, nsa_int_lon = intersect_track_radial(turn["lat"], turn["lon"], 339.0, "NSA", 212.0, fallback_dist_nm=23.0)
-            nsa_int = proc_point("INTNSAR212", "INT NSA R212", nsa_int_lat, nsa_int_lon, 2000.0, navlog_note="INT NSA R212")
-            end = proc_vor_radial("NSA", 212, 23.0, 2000.0, "NSA2NEND", "NSA R212 D23", note="NSA R212 D23")
-            pts += [turn, nsa_int, end]
-        elif proc == "FTM 2N":
-            end = proc_vor_radial("FTM", 140, 34.0, 3000.0, "FTM2NEND", "FTM R140 D34", note="FTM R140 D34")
-            pts += [r140, end]
-        elif proc == "MAGUM 2N":
-            turn2_lat, turn2_lon = intersect_track_radial(ftm_d28["lat"], ftm_d28["lon"], 238.0, "NSA", 225.0, fallback_dist_nm=15.0)
-            int_r225 = proc_point("INTNSAR225", "INT NSA R225", turn2_lat, turn2_lon, 2000.0, navlog_note="TRK238 INT NSA R225")
-            arc30 = proc_vor_radial("NSA", 225, 30.0, 2000.0, "NSAD30R225", "NSA D30 R225", note="NSA ARC D30")
-            magum = resolve_named_proc_point("MAGUM", 3000.0)
-            pts += [r140, ftm_d28, int_r225, arc30, magum]
-        elif proc == "TAGUX 2N":
-            int_r149_lat, int_r149_lon = intersect_track_radial(ftm_d28["lat"], ftm_d28["lon"], 244.0, "FTM", 149.0, fallback_dist_nm=8.0)
-            int_r149 = proc_point("INTFTMR149", "INT FTM R149", int_r149_lat, int_r149_lon, 3000.0, navlog_note="TRK244 INT FTM R149")
-            d31 = proc_vor_radial("FTM", 149, 31.0, 3000.0, "FTMD31", "FTM D31", note="X FTM D31 3000")
-            d40 = proc_vor_radial("FTM", 149, 40.0, 3000.0, "FTMD40", "FTM D40", note="MAINT 3000 UNTIL D40")
-            tagux = resolve_named_proc_point("TAGUX", 3000.0)
-            pts += [r140, ftm_d28, int_r149, d31, d40, tagux]
-    elif proc.endswith("3S"):
-        rwy_track = LPSO_RWY_TRACKS["21"]
-        if proc in {"NSA 3S", "FTM 3S"}:
-            turn = altitude_trigger_turn_point(dep, rwy_track, 2000.0, "RIGHT", 319.0)
-            nsa_int_lat, nsa_int_lon = intersect_track_radial(turn["lat"], turn["lon"], 319.0, "NSA", 212.0, fallback_dist_nm=18.0)
-            nsa_int = proc_point("INTNSAR212", "INT NSA R212", nsa_int_lat, nsa_int_lon, 2000.0, navlog_note="INT NSA R212")
-            ftm139_lat, ftm139_lon = intersect_track_radial(nsa_int["lat"], nsa_int["lon"], 319.0, "FTM", 139.0, fallback_dist_nm=16.0)
-            ftm139 = proc_point("XFTMR139", "CROSS FTM R139", ftm139_lat, ftm139_lon, 2000.0, navlog_note="X FTM R139")
-            if proc == "NSA 3S":
-                end = proc_vor_radial("NSA", 212, 31.0, 2000.0, "NSA3SEND", "NSA R212 D31", note="NSA R212 D31")
-                pts += [turn, nsa_int, ftm139, end]
-            else:
-                ftm = db_point("FTM", alt=3000.0, src_priority=["VOR"]) or Point(code="FTM", name="FTM", lat=0, lon=0, alt=3000, src="VOR")
-                pts += [turn, nsa_int, ftm139, proc_from_point(ftm, alt=3000.0, navlog_note="FTM")]
-        elif proc == "MAGUM 3S":
-            turn = altitude_trigger_turn_point(dep, rwy_track, 2000.0, "RIGHT", 269.0)
-            r225_lat, r225_lon = intersect_track_radial(turn["lat"], turn["lon"], 269.0, "NSA", 225.0, fallback_dist_nm=16.0)
-            int_r225 = proc_point("INTNSAR225", "INT NSA R225", r225_lat, r225_lon, 2000.0, navlog_note="TRK269 INT NSA R225")
-            arc30 = proc_vor_radial("NSA", 225, 30.0, 2000.0, "NSAD30R225", "NSA D30 R225", note="NSA ARC D30")
-            magum = resolve_named_proc_point("MAGUM", 3000.0)
-            pts += [turn, int_r225, arc30, magum]
-        elif proc == "TAGUX 3S":
-            r149_lat, r149_lon = intersect_track_radial(dep.lat, dep.lon, rwy_track, "FTM", 149.0, fallback_dist_nm=12.0)
-            int_r149 = proc_point("INTFTMR149", "INT FTM R149", r149_lat, r149_lon, 2000.0, navlog_note="INT FTM R149")
-            d40 = proc_vor_radial("FTM", 149, 40.0, 2000.0, "FTMD40", "FTM D40", note="MAINT 2000 UNTIL D40")
-            tagux = resolve_named_proc_point("TAGUX", 3000.0)
-            pts += [int_r149, d40, tagux]
-    return pts
-
-
-def lspo_star_points(proc: str) -> List[Dict[str, Any]]:
-    proc = proc.upper().strip()
-    pts: List[Dict[str, Any]] = []
-    if proc.endswith("3N"):  # RNAV STAR GNSS RWY03 to PORCA
-        entry = proc.replace(" 3N", "")
-        pts.append(resolve_named_proc_point(entry, 4500.0 if entry in {"MAGUM", "FTM", "NSA", "TAGUX", "BORRO"} else 3500.0))
-        ifgd08 = resolve_named_proc_point("PORCA", 1500.0)
-        ifgd08["code"] = "IFGD08"
-        ifgd08["name"] = "IFGD08"
-        ifgd08["navlog_note"] = "IFGD08 1500"
-        porca = resolve_named_proc_point("PORCA", 3500.0)
-        pts += [ifgd08, porca]
-    elif proc.endswith("3S"):  # RNAV STAR GNSS RWY21 to TRAMA
-        entry = proc.replace(" 3S", "")
-        pts.append(resolve_named_proc_point(entry, 4500.0 if entry in {"MAGUM", "FTM", "NSA", "TAGUX", "BORRO"} else 3500.0))
-        ifgd06 = resolve_named_proc_point("TRAMA", 2000.0)
-        ifgd06["code"] = "IFGD06"
-        ifgd06["name"] = "IFGD06"
-        ifgd06["navlog_note"] = "IFGD06 2000"
-        trama = resolve_named_proc_point("TRAMA", 3500.0)
-        pts += [ifgd06, trama]
-    elif proc.endswith("2S"):
-        entry = proc.replace(" 2S", "")
-        if entry == "TAGUX":
-            pts.append(resolve_named_proc_point("TAGUX", 5500.0))
-            pts.append(proc_vor_radial("FTM", 149, 37.0, 3500.0, "FTMR149D37", "FTM R149 D37", note="JOIN FTM D37 ARC"))
-            pts += proc_arc_points("FTM", 37.0, 149.0, 119.0, "CCW", 3500.0, "FTM37", note="FTM D37 ARC")
-            pts.append(resolve_named_proc_point("MENDA", 3500.0))
-        elif entry == "MAGUM":
-            pts.append(resolve_named_proc_point("MAGUM", 5500.0))
-            pts.append(resolve_named_proc_point("ATECA", 3500.0))
-            pts.append(resolve_named_proc_point("SALTE", 3000.0))
-        elif entry == "FTM":
-            ftm = db_point("FTM", alt=5500.0, src_priority=["VOR"])
-            if ftm:
-                pts.append(proc_from_point(ftm, alt=5500.0, navlog_note="FTM"))
-            pts.append(proc_vor_radial("FTM", 137, 32.0, 3000.0, "FTMR137D32", "FTM R137 D32", note="FTM R137 D32"))
-            pts.append(resolve_named_proc_point("SALTE", 3000.0))
-        elif entry == "NSA":
-            nsa = db_point("NSA", alt=4500.0, src_priority=["VOR"])
-            if nsa:
-                pts.append(proc_from_point(nsa, alt=4500.0, navlog_note="NSA"))
-            pts.append(resolve_named_proc_point("SALTE", 3000.0))
-        elif entry == "BORRO":
-            pts.append(resolve_named_proc_point("BORRO", 5500.0))
-            pts.append(resolve_named_proc_point("SALTE", 3000.0))
-    return pts
-
-
-def lspo_approach_points(proc: str, include_missed: bool = False) -> List[Dict[str, Any]]:
-    proc = proc.upper().strip()
-    pts: List[Dict[str, Any]] = []
-    lspo = lspo_arp()
-    if proc == "ILS RWY21":
-        pts += [
-            resolve_named_proc_point("MENDA", 3500.0),
-            proc_point("PDSD11", "IF D11 PDS", *dest_point(lspo.lat, lspo.lon, wrap360(206.0 + 180.0), 11.0), 2500.0, navlog_note="IF D11 PDS 2500"),
-            proc_point("PDSD64", "FAP D6.4 PDS", *dest_point(lspo.lat, lspo.lon, wrap360(206.0 + 180.0), 6.4), 2500.0, navlog_note="FAP D6.4 PDS 2500"),
-            proc_point("PDSD4", "D4 PDS", *dest_point(lspo.lat, lspo.lon, wrap360(206.0 + 180.0), 4.0), 1570.0, navlog_note="D4 PDS 1570"),
-            proc_from_point(lspo, alt=390.0, navlog_note="RWY21"),
-        ]
-    elif proc == "GNSS RWY03":
-        pts += [
-            resolve_named_proc_point("PORCA", 3500.0),
-            proc_point("D8PORCA", "D8 PORCA", *dest_point(resolve_named_proc_point("PORCA", 3500.0)["lat"], resolve_named_proc_point("PORCA", 3500.0)["lon"], 195.0, 8.0), 3500.0, navlog_note="D8 PORCA 3500"),
-            resolve_named_proc_point("RAKET", 1500.0),
-            proc_from_point(lspo, alt=390.0, navlog_note="RWY03"),
-        ]
-    elif proc == "GNSS RWY21":
-        pts += [
-            resolve_named_proc_point("TRAMA", 3500.0),
-            proc_point("D6TRAMA", "D6 TRAMA", *dest_point(resolve_named_proc_point("TRAMA", 3500.0)["lat"], resolve_named_proc_point("TRAMA", 3500.0)["lon"], 10.0, 6.0), 2000.0, navlog_note="D6 TRAMA 2000"),
-            resolve_named_proc_point("ROSED", 2000.0),
-            proc_from_point(lspo, alt=390.0, navlog_note="RWY21"),
-        ]
-    elif proc == "VOR DME RWY21":
-        pts += [
-            resolve_named_proc_point("SALTE", 3000.0),
-            proc_vor_radial("NSA", 198, 14.0, 2000.0, "NSAD14", "D14 NSA", note="D14 NSA 2000"),
-            proc_vor_radial("NSA", 198, 17.0, 2000.0, "NSAD17", "D17 NSA", note="D17 NSA 2000"),
-            proc_vor_radial("NSA", 198, 18.0, 1700.0, "NSAD18", "D18 NSA", note="D18 NSA 1700"),
-            proc_vor_radial("NSA", 198, 19.0, 1400.0, "NSAD19", "D19 NSA", note="D19 NSA 1400"),
-            proc_vor_radial("NSA", 198, 20.0, 1100.0, "NSAD20", "D20 NSA", note="D20 NSA 1100"),
-            proc_vor_radial("NSA", 198, 21.0, 900.0, "NSAD21", "D21 NSA MAP", note="MAP D21 NSA"),
-        ]
-    elif proc == "VOR DME RWY03":
-        pts += [
-            proc_vor_radial("NSA", 198, 30.6, 1500.0, "NSAD306", "IF D30.6 NSA", note="IF D30.6 NSA 1500"),
-            proc_vor_radial("NSA", 198, 26.6, 1500.0, "NSAD266", "FAF D26.6 NSA", note="FAF D26.6 NSA 1500"),
-            proc_vor_radial("NSA", 198, 25.6, 1380.0, "NSAD256", "D25.6 NSA", note="D25.6 NSA 1380"),
-            proc_vor_radial("NSA", 198, 24.6, 1060.0, "NSAD246", "D24.6 NSA", note="D24.6 NSA 1060"),
-            proc_vor_radial("NSA", 198, 23.6, 740.0, "NSAD236", "D23.6 NSA", note="D23.6 NSA 740"),
-            proc_vor_radial("NSA", 198, 22.6, 740.0, "NSAD226", "MAP D22.6 NSA", note="MAP D22.6 NSA"),
-        ]
-
-    if include_missed:
-        pts += lspo_missed_points(proc)
-    return pts
-
-
-def lspo_missed_points(proc: str) -> List[Dict[str, Any]]:
-    proc = proc.upper().strip()
-    lspo = lspo_arp()
-    if proc in {"ILS RWY21", "VOR DME RWY21"}:
-        turn = altitude_trigger_turn_point(lspo, LPSO_RWY_TRACKS["21"], 2000.0, "LEFT", 149.0, note_prefix="MA")
-        r149_lat, r149_lon = intersect_track_radial(turn["lat"], turn["lon"], LPSO_RWY_TRACKS["21"], "FTM", 149.0, fallback_dist_nm=6.0)
-        int149 = proc_point("MAINTFTMR149", "MA INT FTM R149", r149_lat, r149_lon, 2000.0, navlog_note="MA INT FTM R149")
-        arc_start = proc_vor_radial("FTM", 149, 37.0, 2000.0, "MAFTMD37R149", "MA FTM D37 R149", note="MA FTM D37 ARC")
-        arc = proc_arc_points("FTM", 37.0, 149.0, 119.0, "CCW", 2000.0, "MAFTM37", note="MA FTM D37 ARC")
-        menda = resolve_named_proc_point("MENDA", 3500.0)
-        return [turn, int149, arc_start] + arc + [menda]
-    if proc == "GNSS RWY03":
-        turn = altitude_trigger_turn_point(lspo, LPSO_RWY_TRACKS["03"], 2500.0, "LEFT", 195.0, note_prefix="MA")
-        porca = resolve_named_proc_point("PORCA", 3500.0)
-        return [turn, porca]
-    if proc == "GNSS RWY21":
-        turn = altitude_trigger_turn_point(lspo, LPSO_RWY_TRACKS["21"], 2500.0, "LEFT", 10.0, note_prefix="MA")
-        trama = resolve_named_proc_point("TRAMA", 3500.0)
-        return [turn, trama]
-    if proc == "VOR DME RWY03":
-        turn = altitude_trigger_turn_point(lspo, LPSO_RWY_TRACKS["03"], 2500.0, "RIGHT", 198.0, note_prefix="MA")
-        return [turn, proc_vor_radial("NSA", 198, 22.6, 3500.0, "MA_NSAD226", "MA D22.6 NSA", note="MA D22.6 NSA 3500")]
-    return []
-
-
-LPSO_SIDS = ["NSA 2N", "FTM 2N", "MAGUM 2N", "TAGUX 2N", "NSA 3S", "FTM 3S", "MAGUM 3S", "TAGUX 3S"]
-LPSO_STARS = [
-    "TAGUX 2S", "FTM 2S", "NSA 2S", "MAGUM 2S", "BORRO 2S",
-    "TAGUX 3N", "FTM 3N", "NSA 3N", "MAGUM 3N", "BORRO 3N",
-    "TAGUX 3S", "FTM 3S", "NSA 3S", "MAGUM 3S", "BORRO 3S",
-]
-LPSO_APPROACHES = ["ILS RWY21", "GNSS RWY03", "GNSS RWY21", "VOR DME RWY21", "VOR DME RWY03"]
-
-
-def lspo_procedure_points(kind: str, proc: str, include_departure: bool = True, include_missed: bool = False) -> List[Dict[str, Any]]:
-    kind = kind.upper().strip()
-    if kind == "SID":
-        return lspo_sid_points(proc, include_departure=include_departure)
-    if kind == "STAR":
-        return lspo_star_points(proc)
-    if kind == "APPROACH":
-        return lspo_approach_points(proc, include_missed=include_missed)
-    return []
+LPSO_SIDS = procedure_names("SID")
+LPSO_STARS = procedure_names("STAR")
+LPSO_APPROACHES = procedure_names("APPROACH")
 
 # ===============================================================
 # ROUTE DATABASE / PARSER
@@ -2479,4 +2376,5 @@ Ferramenta de planeamento. Confirma sempre cartas, NOTAM, AIP/AIRAC, meteorologi
 """,
     unsafe_allow_html=True,
 )
+
 
