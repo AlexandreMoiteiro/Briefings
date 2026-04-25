@@ -1,6 +1,11 @@
 # app.py
 # ---------------------------------------------------------------
 # NAVLOG Portugal — VFR + IFR Low — Streamlit
+# Versão completa com:
+#   - SIDs, STARs e Approaches vindas de procedures_lpso.json
+#   - Pontos locais do JSON pesquisáveis: PORCA, TRAMA, SALTE, MENDA, etc.
+#   - Correção lógica de procedimentos que intercetam radial e seguem inbound ao VOR
+#   - VOR fixes, DME arcs, airways, PDF NAVLOG e mapa folium/openAIP
 # ---------------------------------------------------------------
 # Ficheiros esperados na raiz do repositório:
 #   AD-HEL-ULM.csv
@@ -755,6 +760,97 @@ def rate_one_radius_nm(gs_kt: float, rate_deg_sec: float = 3.0) -> float:
     return (max(float(gs_kt), 1.0) / 3600.0) / omega
 
 # ===============================================================
+# PROCEDURE FILE + POINT CATALOG
+# ===============================================================
+@st.cache_data(show_spinner=False)
+def load_procedures_file(path_str: str) -> Dict[str, Any]:
+    path = Path(path_str)
+    if not path.exists():
+        return {"procedures": []}
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except Exception as exc:
+        st.error(f"Erro ao ler {path.name}: {exc}")
+        return {"procedures": []}
+
+
+@st.cache_data(show_spinner=False)
+def load_procedure_point_catalog(path_str: str) -> pd.DataFrame:
+    path = Path(path_str)
+    cols = ["code", "name", "lat", "lon", "alt", "src", "routes", "remarks"]
+    if not path.exists():
+        return pd.DataFrame(columns=cols)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return pd.DataFrame(columns=cols)
+
+    rows: List[Dict[str, Any]] = []
+
+    def add_point(code: str, name: str, lat: float, lon: float, alt: float, proc_id: str, remarks: str = "") -> None:
+        c = clean_code(code or name)
+        if not c:
+            return
+        rows.append({
+            "code": c,
+            "name": name or c,
+            "lat": float(lat),
+            "lon": float(lon),
+            "alt": float(alt or 0),
+            "src": "PROC",
+            "routes": proc_id,
+            "remarks": remarks,
+        })
+
+    for proc in data.get("procedures", []):
+        proc_id = str(proc.get("id", "PROC"))
+        for seg in proc.get("segments", []):
+            typ = str(seg.get("type", "")).lower()
+            code = clean_code(seg.get("point") or seg.get("code") or seg.get("name") or "")
+            name = str(seg.get("name") or seg.get("note") or seg.get("point") or seg.get("code") or code)
+            alt = float(seg.get("alt", 0) or 0)
+
+            if "lat" in seg and "lon" in seg:
+                add_point(code, name, float(seg["lat"]), float(seg["lon"]), alt, proc_id, "from procedures JSON")
+                continue
+
+            if typ in {"vor_radial_dme", "radial_to_dme"} and seg.get("vor") and seg.get("radial") is not None and seg.get("dme") is not None:
+                vor = get_vor(str(seg["vor"]))
+                if vor:
+                    radial = float(seg["radial"])
+                    dme = float(seg["dme"])
+                    lat, lon = dest_point(vor["lat"], vor["lon"], radial, dme)
+                    add_point(
+                        code or f"{vor['ident']}R{int(radial):03d}D{dme:g}",
+                        name,
+                        lat,
+                        lon,
+                        alt,
+                        proc_id,
+                        f"{vor['ident']} R{int(radial):03d} D{dme:g}",
+                    )
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(rows)
+    df["code"] = df["code"].map(clean_code)
+    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+    return df.dropna(subset=["code", "lat", "lon"]).drop_duplicates(subset=["code", "lat", "lon"]).reset_index(drop=True)
+
+
+def point_catalog() -> pd.DataFrame:
+    proc_points = load_procedure_point_catalog(str(PROC_FILE))
+    if proc_points.empty:
+        return POINTS_DF
+    return (
+        pd.concat([POINTS_DF, proc_points], ignore_index=True)
+        .drop_duplicates(subset=["code", "lat", "lon", "src"])
+        .reset_index(drop=True)
+    )
+
+# ===============================================================
 # POINT LOOKUP / ROUTE PARSER
 # ===============================================================
 def next_uid() -> int:
@@ -772,7 +868,7 @@ def df_row_to_point(row: pd.Series, alt: float = 0.0) -> Point:
         name=str(row.get("name") or row.get("code")),
         lat=float(row["lat"]),
         lon=float(row["lon"]),
-        alt=float(alt),
+        alt=float(alt if alt is not None else row.get("alt", 0.0)),
         src=str(row.get("src") or "DB"),
         routes=str(row.get("routes") or ""),
         remarks=str(row.get("remarks") or ""),
@@ -785,9 +881,10 @@ def df_row_to_point(row: pd.Series, alt: float = 0.0) -> Point:
 
 def db_point(code: str, alt: float = 0.0, src_priority: Optional[List[str]] = None) -> Optional[Point]:
     code = clean_code(code)
-    if not code or POINTS_DF.empty or "code" not in POINTS_DF.columns:
+    catalog = point_catalog()
+    if not code or catalog.empty or "code" not in catalog.columns:
         return None
-    hit = POINTS_DF[POINTS_DF["code"].astype(str).str.upper().str.strip() == code].copy()
+    hit = catalog[catalog["code"].astype(str).str.upper().str.strip() == code].copy()
     if hit.empty:
         return None
     if src_priority and "src" in hit.columns:
@@ -799,10 +896,11 @@ def db_point(code: str, alt: float = 0.0, src_priority: Optional[List[str]] = No
 
 def search_points(query: str, limit: int = 30, last: Optional[Point] = None) -> pd.DataFrame:
     q = query.strip().lower()
-    if not q:
-        return POINTS_DF.head(0)
-    mask = POINTS_DF.apply(lambda r: q in " ".join(str(v).lower() for v in r.values), axis=1)
-    df = POINTS_DF[mask].copy()
+    catalog = point_catalog()
+    if not q or catalog.empty:
+        return catalog.head(0)
+    mask = catalog.apply(lambda r: q in " ".join(str(v).lower() for v in r.values), axis=1)
+    df = catalog[mask].copy()
     if df.empty:
         return df
 
@@ -812,7 +910,7 @@ def search_points(query: str, limit: int = 30, last: Optional[Point] = None) -> 
         sim = difflib.SequenceMatcher(None, q, f"{code} {name}").ratio()
         starts = 1.5 if code.startswith(q) or name.startswith(q) else 0.0
         exact = 3.0 if code == q else 0.0
-        src_bonus = {"IFR": 0.35, "VOR": 0.30, "AD": 0.20, "VFR": 0.0}.get(str(row.get("src")), 0.0)
+        src_bonus = {"IFR": 0.35, "VOR": 0.30, "PROC": 0.28, "AD": 0.20, "VFR": 0.0}.get(str(row.get("src")), 0.0)
         near = 0.0
         if last:
             near = 1.0 / (1.0 + gc_dist_nm(last.lat, last.lon, float(row["lat"]), float(row["lon"])))
@@ -836,9 +934,10 @@ def resolve_token(token: str, default_alt: float, last: Optional[Point] = None) 
         lon = float(match.group(2))
         return Point(code="USERCOORD", name=f"{lat:.4f},{lon:.4f}", lat=lat, lon=lon, alt=default_alt, src="USER"), ""
     code = clean_code(raw)
-    exact = POINTS_DF[POINTS_DF["code"].astype(str).str.upper() == code]
+    catalog = point_catalog()
+    exact = catalog[catalog["code"].astype(str).str.upper() == code]
     if not exact.empty:
-        priority = {"VOR": 0, "IFR": 1, "AD": 2, "VFR": 3}
+        priority = {"VOR": 0, "IFR": 1, "PROC": 2, "AD": 3, "VFR": 4}
         exact = exact.assign(_prio=exact["src"].map(lambda x: priority.get(str(x), 9))).sort_values("_prio")
         return df_row_to_point(exact.iloc[0], default_alt), ""
     fuzzy = search_points(raw, limit=1, last=last)
@@ -916,19 +1015,6 @@ def parse_route_text(text: str, default_alt: float) -> Tuple[List[Point], List[s
 # ===============================================================
 # EXTERNAL PROCEDURE ENGINE
 # ===============================================================
-@st.cache_data(show_spinner=False)
-def load_procedures_file(path_str: str) -> Dict[str, Any]:
-    path = Path(path_str)
-    if not path.exists():
-        return {"procedures": []}
-    try:
-        with open(path, "r", encoding="utf-8") as file:
-            return json.load(file)
-    except Exception as exc:
-        st.error(f"Erro ao ler {path.name}: {exc}")
-        return {"procedures": []}
-
-
 def available_procedures(kind: Optional[str] = None) -> List[Dict[str, Any]]:
     data = load_procedures_file(str(PROC_FILE))
     procedures = data.get("procedures", [])
@@ -960,16 +1046,30 @@ def make_proc_point(
 def proc_static_point(segment: Dict[str, Any], previous: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     code = clean_code(segment.get("point") or segment.get("code"))
     alt = float(segment.get("alt", proc_default_alt()))
-    point = db_point(code, alt=alt, src_priority=["IFR", "VOR", "AD", "VFR"])
+
+    # Coordenadas explícitas no JSON têm prioridade.
+    # Isto resolve pontos locais como PORCA, TRAMA, MENDA/SALTE se forem definidos no JSON.
+    if "lat" in segment and "lon" in segment:
+        return make_proc_point(
+            code,
+            segment.get("name") or segment.get("note") or code,
+            float(segment["lat"]),
+            float(segment["lon"]),
+            alt,
+            src="PROC",
+            note=segment.get("note") or code,
+            remarks=segment.get("remarks", "from procedures JSON"),
+        )
+
+    point = db_point(code, alt=alt, src_priority=["IFR", "VOR", "PROC", "AD", "VFR"])
     if point:
         d = point.to_dict()
         d["uid"] = next_uid()
         d["navlog_note"] = segment.get("note") or code
         d["no_auto_vnav"] = True
         return d
-    if "lat" in segment and "lon" in segment:
-        return make_proc_point(code, segment.get("name") or code, float(segment["lat"]), float(segment["lon"]), alt, note=segment.get("note") or code, remarks=segment.get("remarks", ""))
-    raise ValueError(f"Ponto {code} não está no CSV e não tem lat/lon no JSON.")
+
+    raise ValueError(f"Ponto {code} não está nos CSV nem tem lat/lon no JSON.")
 
 
 def proc_vor_radial_dme(segment: Dict[str, Any]) -> Dict[str, Any]:
@@ -1029,7 +1129,7 @@ def proc_track_to_intercept_radial(segment: Dict[str, Any], previous: Dict[str, 
         src="PROC_DYNAMIC",
         note=note,
         remarks="Dynamic radial intercept" if ok else "Fallback point, no forward radial intercept",
-        extra={"vor_pref": "FIXED", "vor_ident": clean_code(segment["vor"])},
+        extra={"vor_pref": "FIXED", "vor_ident": clean_code(segment["vor"]), "leg_instruction": note},
     )
 
 
@@ -1047,7 +1147,7 @@ def proc_track_to_intercept_dme(segment: Dict[str, Any], previous: Dict[str, Any
         src="PROC_DYNAMIC",
         note=note,
         remarks="Dynamic DME intercept" if ok else "Fallback point, no forward DME intercept",
-        extra={"vor_pref": "FIXED", "vor_ident": clean_code(segment["vor"])},
+        extra={"vor_pref": "FIXED", "vor_ident": clean_code(segment["vor"]), "leg_instruction": note},
     )
 
 
@@ -1090,17 +1190,12 @@ def proc_rate_one_turn(segment: Dict[str, Any], previous: Dict[str, Any]) -> Dic
             "turn_start_course": start_track,
             "turn_end_course": end_track,
             "turn_direction": direction,
+            "leg_instruction": note,
         },
     )
 
 
 def build_procedure_points(proc_id: str, proc_instance_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Expande um procedimento do procedures_lpso.json.
-
-    Todos os pontos gerados ficam marcados com proc_id/proc_instance_id.
-    recalc_route() usa essas tags para regenerar os procedimentos quando mudas
-    ROC/TAS/vento. Assim os pontos dinâmicos deixam de ficar congelados.
-    """
     procedure = next((p for p in available_procedures() if p.get("id") == proc_id), None)
     if not procedure:
         raise ValueError(f"Procedimento {proc_id} não encontrado em {PROC_FILE.name}.")
@@ -1153,7 +1248,6 @@ def build_procedure_points(proc_id: str, proc_instance_id: Optional[str] = None)
 
 
 def refresh_procedure_waypoints(wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Regenera blocos de procedimentos mantendo pontos manuais intactos."""
     refreshed: List[Dict[str, Any]] = []
     i = 0
     while i < len(wps):
@@ -1235,6 +1329,8 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def tracking_instruction(A: Dict[str, Any], B: Dict[str, Any], preferred_vor: str = "") -> str:
+    if B.get("leg_instruction"):
+        return str(B.get("leg_instruction"))
     if B.get("navlog_note"):
         return str(B.get("navlog_note"))
     if is_dme_arc_leg(A, B):
@@ -1660,7 +1756,8 @@ def html_pills(items: Iterable[Tuple[str, str]]) -> None:
 # MAP
 # ===============================================================
 def map_start_center() -> Tuple[float, float]:
-    hit = POINTS_DF[POINTS_DF["code"].astype(str).str.upper() == "LPSO"]
+    catalog = point_catalog()
+    hit = catalog[catalog["code"].astype(str).str.upper() == "LPSO"] if not catalog.empty else pd.DataFrame()
     if not hit.empty:
         return float(hit.iloc[0]["lat"]), float(hit.iloc[0]["lon"])
     return LPSO_FALLBACK_CENTER
@@ -1696,15 +1793,16 @@ def add_div_marker(m: folium.Map, lat: float, lon: float, html: str) -> None:
 def render_route_map(wps: List[Dict[str, Any]], nodes: List[Dict[str, Any]], legs: List[Dict[str, Any]], key: str = "mainmap") -> Dict[str, Any]:
     m = make_base_map()
     if bool(st.session_state.show_ref_points):
-        cluster = MarkerCluster(name="Pontos IFR/VFR/VOR", disableClusteringAtZoom=10).add_to(m)
+        cluster = MarkerCluster(name="Pontos IFR/VFR/VOR/PROC", disableClusteringAtZoom=10).add_to(m)
         src_filter = set(st.session_state.ref_layers)
-        ref = POINTS_DF[POINTS_DF["src"].isin(src_filter)] if src_filter else POINTS_DF.head(0)
+        ref_all = point_catalog()
+        ref = ref_all[ref_all["src"].isin(src_filter)] if src_filter and not ref_all.empty else ref_all.head(0)
         for _, r in ref.iterrows():
             src = str(r.get("src"))
-            color = {"IFR": "#2563eb", "VOR": "#dc2626", "AD": "#111827", "VFR": "#16a34a"}.get(src, "#334155")
+            color = {"IFR": "#2563eb", "VOR": "#dc2626", "AD": "#111827", "VFR": "#16a34a", "PROC": "#9333ea"}.get(src, "#334155")
             folium.CircleMarker(
                 (float(r["lat"]), float(r["lon"])),
-                radius=4 if src in {"IFR", "VOR"} else 3,
+                radius=4 if src in {"IFR", "VOR", "PROC"} else 3,
                 color=color,
                 weight=1,
                 fill=True,
@@ -1739,6 +1837,7 @@ def render_route_map(wps: List[Dict[str, Any]], nodes: List[Dict[str, Any]], leg
             "USER": "#f97316",
             "VORFIX": "#be123c",
             "DMEARC": "#0891b2",
+            "PROC": "#9333ea",
             "PROC_DYNAMIC": "#9333ea",
             "TURN": "#9333ea",
         }.get(src, "#0f172a")
@@ -1780,7 +1879,7 @@ ss("wps", [])
 ss("route_nodes", [])
 ss("legs", [])
 ss("show_ref_points", True)
-ss("ref_layers", ["IFR", "VOR", "AD", "VFR"])
+ss("ref_layers", ["IFR", "VOR", "AD", "VFR", "PROC"])
 ss("show_airways", True)
 ss("show_openaip", True)
 ss("openaip_opacity", 0.65)
@@ -1791,7 +1890,7 @@ ensure_point_ids()
 # UI HEADER
 # ===============================================================
 st.markdown(
-    f"<div class='nav-hero'><div class='nav-title'>🧭 {APP_TITLE}</div><div class='nav-sub'>VFR/IFR low offline, airways, VOR fixes, DME arcs e procedimentos externos por JSON.</div></div>",
+    f"<div class='nav-hero'><div class='nav-title'>🧭 {APP_TITLE}</div><div class='nav-sub'>VFR/IFR low offline, airways, VOR fixes, DME arcs, SIDs, STARs e approaches por JSON.</div></div>",
     unsafe_allow_html=True,
 )
 
@@ -1805,8 +1904,10 @@ if st.session_state.legs:
         (f"{sm['legs']} legs", ""),
     ])
 else:
+    cat = point_catalog()
     html_pills([
-        (f"{len(POINTS_DF[POINTS_DF.src == 'IFR']) if 'src' in POINTS_DF.columns else 0} IFR pts", ""),
+        (f"{len(cat[cat.src == 'IFR']) if 'src' in cat.columns else 0} IFR pts", ""),
+        (f"{len(cat[cat.src == 'PROC']) if 'src' in cat.columns else 0} PROC pts", ""),
         (f"{len(AIRWAYS_DF.airway.unique()) if not AIRWAYS_DF.empty else 0} airways", ""),
         (f"{len(VOR_DF)} VOR", ""),
         ("procedures_lpso.json OK" if PROC_FILE.exists() else "procedures_lpso.json em falta", "pill-good" if PROC_FILE.exists() else "pill-warn"),
@@ -1900,7 +2001,7 @@ with tab_route:
     left, right = st.columns([1.05, 0.95], gap="large")
     with left:
         st.markdown("#### Rota por texto")
-        route_text = st.text_area("Rota", height=92, placeholder="LPSO MAGUM UZ218 ATECA LPFR")
+        route_text = st.text_area("Rota", height=92, placeholder="LPSO NSA MAGUM PORCA RAKET LPSO")
         c1, c2, c3 = st.columns(3)
         with c1:
             if st.button("Substituir rota", type="primary", use_container_width=True):
@@ -1926,7 +2027,7 @@ with tab_route:
                 st.rerun()
 
         st.markdown("#### Pesquisa")
-        q = st.text_input("Pesquisar por código/nome/rota", placeholder="MAGUM, ATECA, RAKET, CAS, LPSO…")
+        q = st.text_input("Pesquisar por código/nome/rota", placeholder="MAGUM, ATECA, RAKET, PORCA, TRAMA, NSA, LPSO…")
         results = search_points(q, limit=12, last=Point.from_dict(st.session_state.wps[-1]) if st.session_state.wps else None)
         for i, r in results.iterrows():
             cols = st.columns([0.14, 0.60, 0.16, 0.10])
@@ -2115,7 +2216,7 @@ with tab_map:
     with top[0]:
         st.toggle("Pontos ref.", key="show_ref_points")
     with top[1]:
-        st.multiselect("Camadas", ["IFR", "VOR", "AD", "VFR"], key="ref_layers")
+        st.multiselect("Camadas", ["IFR", "VOR", "AD", "VFR", "PROC"], key="ref_layers")
     with top[2]:
         st.toggle("Airways", key="show_airways")
     with top[3]:
