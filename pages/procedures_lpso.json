@@ -1,10 +1,12 @@
+
 {
-  "version": "0.2",
+  "version": "0.3",
   "airport": "LPSO",
   "notes": [
     "Procedures for training/planning only. Verify against current Sevenair/AIP charts.",
     "Dynamic points depend on aircraft performance, selected ROC/ROD, TAS and wind at runtime.",
-    "Some local Sevenair fixes are not official IFR points; where possible they are referenced by VOR/DME/radial instead of fixed coordinates."
+    "Some local Sevenair fixes are not official IFR points; where possible they are referenced by VOR/DME/radial instead of fixed coordinates.",
+    "v0.3: SID endpoints corrected to VORs where the chart names an inbound VOR route; STAR training procedures added from the uploaded 05Jun23 chart pack."
   ],
   "procedures": [
     {
@@ -13,10 +15,34 @@
       "name": "LPSO RWY03 departure to NSA R212",
       "runway": "03",
       "segments": [
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "runway_track_until_alt", "track": 25, "alt": 1400, "next_track": 339, "turn_arrow": "←", "note": "1400 TURN ← TRK339"},
-        {"type": "track_to_intercept_radial", "track": 339, "vor": "NSA", "radial": 212, "alt": 2000, "note": "INT NSA R212"},
-        {"type": "radial_to_dme", "vor": "NSA", "radial": 212, "dme": 23, "alt": 2000, "note": "NSA R212 D23"}
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "LPSO"
+        },
+        {
+          "type": "runway_track_until_alt",
+          "track": 25,
+          "alt": 1400,
+          "next_track": 339,
+          "turn_arrow": "←",
+          "note": "1400 TURN ← TRK339"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 339,
+          "vor": "NSA",
+          "radial": 212,
+          "alt": 2000,
+          "note": "INT NSA R212"
+        },
+        {
+          "type": "static_point",
+          "point": "NSA",
+          "alt": 2000,
+          "note": "NSA VIA R212"
+        }
       ]
     },
     {
@@ -25,9 +51,26 @@
       "name": "LPSO RWY03 departure to FTM R140 inbound",
       "runway": "03",
       "segments": [
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "track_to_intercept_radial", "track": 25, "vor": "FTM", "radial": 140, "alt": 2000, "note": "INT FTM R140"},
-        {"type": "track_to_intercept_dme", "track": 25, "vor": "FTM", "dme": 34, "alt": 3000, "note": "FTM R140 D34"}
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "LPSO"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 25,
+          "vor": "FTM",
+          "radial": 140,
+          "alt": 2000,
+          "note": "INT FTM R140"
+        },
+        {
+          "type": "static_point",
+          "point": "FTM",
+          "alt": 3000,
+          "note": "FTM VIA R140"
+        }
       ]
     },
     {
@@ -36,12 +79,50 @@
       "name": "LPSO RWY03 departure to MAGUM",
       "runway": "03",
       "segments": [
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "track_to_intercept_radial", "track": 25, "vor": "FTM", "radial": 140, "alt": 2000, "note": "INT FTM R140"},
-        {"type": "track_to_intercept_dme", "track": 25, "vor": "FTM", "dme": 28, "alt": 2000, "note": "FTM D28"},
-        {"type": "track_to_intercept_radial", "track": 238, "vor": "NSA", "radial": 225, "alt": 2000, "note": "TRK238 INT NSA R225"},
-        {"type": "track_to_intercept_dme", "track": 238, "vor": "NSA", "dme": 30, "alt": 2000, "note": "NSA ARC D30"},
-        {"type": "static_point", "point": "MAGUM", "alt": 3000, "note": "MAGUM"}
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "LPSO"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 25,
+          "vor": "FTM",
+          "radial": 140,
+          "alt": 2000,
+          "note": "INT FTM R140"
+        },
+        {
+          "type": "track_to_intercept_dme",
+          "track": 25,
+          "vor": "FTM",
+          "dme": 28,
+          "alt": 2000,
+          "note": "FTM D28"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 238,
+          "vor": "NSA",
+          "radial": 225,
+          "alt": 2000,
+          "note": "TRK238 INT NSA R225"
+        },
+        {
+          "type": "track_to_intercept_dme",
+          "track": 238,
+          "vor": "NSA",
+          "dme": 30,
+          "alt": 2000,
+          "note": "NSA ARC D30"
+        },
+        {
+          "type": "static_point",
+          "point": "MAGUM",
+          "alt": 3000,
+          "note": "MAGUM"
+        }
       ]
     },
     {
@@ -50,13 +131,58 @@
       "name": "LPSO RWY03 departure to TAGUX",
       "runway": "03",
       "segments": [
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "track_to_intercept_radial", "track": 25, "vor": "FTM", "radial": 140, "alt": 2000, "note": "INT FTM R140"},
-        {"type": "track_to_intercept_dme", "track": 25, "vor": "FTM", "dme": 28, "alt": 2000, "note": "FTM D28"},
-        {"type": "track_to_intercept_radial", "track": 244, "vor": "FTM", "radial": 149, "alt": 3000, "note": "TRK244 INT FTM R149"},
-        {"type": "track_to_intercept_dme", "track": 244, "vor": "FTM", "dme": 31, "alt": 3000, "note": "X FTM D31 3000"},
-        {"type": "track_to_intercept_dme", "track": 149, "vor": "FTM", "dme": 40, "alt": 3000, "note": "MAINT 3000 UNTIL D40"},
-        {"type": "static_point", "point": "TAGUX", "alt": 3000, "note": "TAGUX"}
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "LPSO"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 25,
+          "vor": "FTM",
+          "radial": 140,
+          "alt": 2000,
+          "note": "INT FTM R140"
+        },
+        {
+          "type": "track_to_intercept_dme",
+          "track": 25,
+          "vor": "FTM",
+          "dme": 28,
+          "alt": 2000,
+          "note": "FTM D28"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 244,
+          "vor": "FTM",
+          "radial": 149,
+          "alt": 3000,
+          "note": "TRK244 INT FTM R149"
+        },
+        {
+          "type": "track_to_intercept_dme",
+          "track": 244,
+          "vor": "FTM",
+          "dme": 31,
+          "alt": 3000,
+          "note": "X FTM D31 3000"
+        },
+        {
+          "type": "track_to_intercept_dme",
+          "track": 149,
+          "vor": "FTM",
+          "dme": 40,
+          "alt": 3000,
+          "note": "MAINT 3000 UNTIL D40"
+        },
+        {
+          "type": "static_point",
+          "point": "TAGUX",
+          "alt": 3000,
+          "note": "TAGUX"
+        }
       ]
     },
     {
@@ -65,11 +191,42 @@
       "name": "LPSO RWY21 departure to NSA R212",
       "runway": "21",
       "segments": [
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "runway_track_until_alt", "track": 206, "alt": 2000, "next_track": 319, "turn_arrow": "→", "note": "2000 TURN → TRK319"},
-        {"type": "track_to_intercept_radial", "track": 319, "vor": "NSA", "radial": 212, "alt": 2000, "note": "INT NSA R212"},
-        {"type": "track_to_intercept_radial", "track": 319, "vor": "FTM", "radial": 139, "alt": 2000, "note": "X FTM R139"},
-        {"type": "radial_to_dme", "vor": "NSA", "radial": 212, "dme": 31, "alt": 2000, "note": "NSA R212 D31"}
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "LPSO"
+        },
+        {
+          "type": "runway_track_until_alt",
+          "track": 206,
+          "alt": 2000,
+          "next_track": 319,
+          "turn_arrow": "→",
+          "note": "2000 TURN → TRK319"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 319,
+          "vor": "NSA",
+          "radial": 212,
+          "alt": 2000,
+          "note": "INT NSA R212"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 319,
+          "vor": "FTM",
+          "radial": 139,
+          "alt": 2000,
+          "note": "X FTM R139"
+        },
+        {
+          "type": "static_point",
+          "point": "NSA",
+          "alt": 3000,
+          "note": "NSA VIA R212"
+        }
       ]
     },
     {
@@ -78,11 +235,42 @@
       "name": "LPSO RWY21 departure to FTM",
       "runway": "21",
       "segments": [
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "runway_track_until_alt", "track": 206, "alt": 2000, "next_track": 319, "turn_arrow": "→", "note": "2000 TURN → TRK319"},
-        {"type": "track_to_intercept_radial", "track": 319, "vor": "NSA", "radial": 212, "alt": 2000, "note": "INT NSA R212"},
-        {"type": "track_to_intercept_radial", "track": 319, "vor": "FTM", "radial": 139, "alt": 2000, "note": "X FTM R139"},
-        {"type": "static_point", "point": "FTM", "alt": 3000, "note": "FTM"}
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "LPSO"
+        },
+        {
+          "type": "runway_track_until_alt",
+          "track": 206,
+          "alt": 2000,
+          "next_track": 319,
+          "turn_arrow": "→",
+          "note": "2000 TURN → TRK319"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 319,
+          "vor": "NSA",
+          "radial": 212,
+          "alt": 2000,
+          "note": "INT NSA R212"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 319,
+          "vor": "FTM",
+          "radial": 139,
+          "alt": 2000,
+          "note": "X FTM R139"
+        },
+        {
+          "type": "static_point",
+          "point": "FTM",
+          "alt": 3000,
+          "note": "FTM"
+        }
       ]
     },
     {
@@ -91,11 +279,42 @@
       "name": "LPSO RWY21 departure to MAGUM",
       "runway": "21",
       "segments": [
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "runway_track_until_alt", "track": 206, "alt": 2000, "next_track": 269, "turn_arrow": "→", "note": "2000 TURN → TRK269"},
-        {"type": "track_to_intercept_radial", "track": 269, "vor": "NSA", "radial": 225, "alt": 2000, "note": "TRK269 INT NSA R225"},
-        {"type": "track_to_intercept_dme", "track": 269, "vor": "NSA", "dme": 30, "alt": 2000, "note": "NSA ARC D30"},
-        {"type": "static_point", "point": "MAGUM", "alt": 3000, "note": "MAGUM"}
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "LPSO"
+        },
+        {
+          "type": "runway_track_until_alt",
+          "track": 206,
+          "alt": 2000,
+          "next_track": 269,
+          "turn_arrow": "→",
+          "note": "2000 TURN → TRK269"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 269,
+          "vor": "NSA",
+          "radial": 225,
+          "alt": 2000,
+          "note": "TRK269 INT NSA R225"
+        },
+        {
+          "type": "track_to_intercept_dme",
+          "track": 269,
+          "vor": "NSA",
+          "dme": 30,
+          "alt": 2000,
+          "note": "NSA ARC D30"
+        },
+        {
+          "type": "static_point",
+          "point": "MAGUM",
+          "alt": 3000,
+          "note": "MAGUM"
+        }
       ]
     },
     {
@@ -104,10 +323,34 @@
       "name": "LPSO RWY21 departure to TAGUX",
       "runway": "21",
       "segments": [
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "track_to_intercept_radial", "track": 206, "vor": "FTM", "radial": 149, "alt": 2000, "note": "INT FTM R149"},
-        {"type": "track_to_intercept_dme", "track": 206, "vor": "FTM", "dme": 40, "alt": 2000, "note": "MAINT 2000 UNTIL FTM D40"},
-        {"type": "static_point", "point": "TAGUX", "alt": 3000, "note": "TAGUX"}
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "LPSO"
+        },
+        {
+          "type": "track_to_intercept_radial",
+          "track": 206,
+          "vor": "FTM",
+          "radial": 149,
+          "alt": 2000,
+          "note": "INT FTM R149"
+        },
+        {
+          "type": "track_to_intercept_dme",
+          "track": 206,
+          "vor": "FTM",
+          "dme": 40,
+          "alt": 2000,
+          "note": "MAINT 2000 UNTIL FTM D40"
+        },
+        {
+          "type": "static_point",
+          "point": "TAGUX",
+          "alt": 3000,
+          "note": "TAGUX"
+        }
       ]
     },
     {
@@ -116,11 +359,44 @@
       "name": "LPSO GNSS RWY03",
       "runway": "03",
       "segments": [
-        {"type": "static_point", "point": "PORCA", "lat": 39.20851, "lon": -8.07308, "alt": 3500, "note": "PORCA IAF"},
-        {"type": "vor_radial_dme", "vor": "NSA", "radial": 198, "dme": 30.6, "alt": 3500, "code": "D8PORCA", "name": "D8 PORCA", "note": "D8 PORCA 3500"},
-        {"type": "rate_one_turn", "direction": "LEFT", "start_track": 195, "end_track": 25, "alt": 1500, "note": "RATE 1 ← ALIGN 025"},
-        {"type": "static_point", "point": "RAKET", "alt": 1500, "note": "RAKET FAF 1500"},
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "RWY03"}
+        {
+          "type": "static_point",
+          "point": "PORCA",
+          "lat": 39.20851,
+          "lon": -8.07308,
+          "alt": 3500,
+          "note": "PORCA IAF"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 30.6,
+          "alt": 3500,
+          "code": "D8PORCA",
+          "name": "D8 PORCA",
+          "note": "D8 PORCA 3500"
+        },
+        {
+          "type": "rate_one_turn",
+          "direction": "LEFT",
+          "start_track": 195,
+          "end_track": 25,
+          "alt": 1500,
+          "note": "RATE 1 ← ALIGN 025"
+        },
+        {
+          "type": "static_point",
+          "point": "RAKET",
+          "alt": 1500,
+          "note": "RAKET FAF 1500"
+        },
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "RWY03"
+        }
       ]
     },
     {
@@ -129,10 +405,37 @@
       "name": "LPSO GNSS RWY21",
       "runway": "21",
       "segments": [
-        {"type": "static_point", "point": "TRAMA", "lat": 39.30400, "lon": -8.00000, "alt": 3500, "note": "TRAMA IAF"},
-        {"type": "track_to_intercept_dme", "track": 10, "vor": "NSA", "dme": 31, "alt": 2000, "code": "D6TRAMA", "note": "D6 TRAMA 2000"},
-        {"type": "static_point", "point": "ROSED", "lat": 39.27200, "lon": -8.02200, "alt": 2000, "note": "ROSED FAF 2000"},
-        {"type": "static_point", "point": "LPSO", "alt": 390, "note": "RWY21"}
+        {
+          "type": "static_point",
+          "point": "TRAMA",
+          "lat": 39.304,
+          "lon": -8.0,
+          "alt": 3500,
+          "note": "TRAMA IAF"
+        },
+        {
+          "type": "track_to_intercept_dme",
+          "track": 10,
+          "vor": "NSA",
+          "dme": 31,
+          "alt": 2000,
+          "code": "D6TRAMA",
+          "note": "D6 TRAMA 2000"
+        },
+        {
+          "type": "static_point",
+          "point": "ROSED",
+          "lat": 39.272,
+          "lon": -8.022,
+          "alt": 2000,
+          "note": "ROSED FAF 2000"
+        },
+        {
+          "type": "static_point",
+          "point": "LPSO",
+          "alt": 390,
+          "note": "RWY21"
+        }
       ]
     },
     {
@@ -141,12 +444,440 @@
       "name": "LPSO VOR DME RWY03",
       "runway": "03",
       "segments": [
-        {"type": "vor_radial_dme", "vor": "NSA", "radial": 198, "dme": 30.6, "alt": 1500, "code": "NSAD306", "note": "IF D30.6 NSA 1500"},
-        {"type": "vor_radial_dme", "vor": "NSA", "radial": 198, "dme": 26.6, "alt": 1500, "code": "NSAD266", "note": "FAF D26.6 NSA 1500"},
-        {"type": "vor_radial_dme", "vor": "NSA", "radial": 198, "dme": 25.6, "alt": 1380, "code": "NSAD256", "note": "D25.6 NSA 1380"},
-        {"type": "vor_radial_dme", "vor": "NSA", "radial": 198, "dme": 24.6, "alt": 1060, "code": "NSAD246", "note": "D24.6 NSA 1060"},
-        {"type": "vor_radial_dme", "vor": "NSA", "radial": 198, "dme": 23.6, "alt": 740, "code": "NSAD236", "note": "D23.6 NSA 740"},
-        {"type": "vor_radial_dme", "vor": "NSA", "radial": 198, "dme": 22.6, "alt": 740, "code": "NSAD226", "note": "MAP D22.6 NSA"}
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 30.6,
+          "alt": 1500,
+          "code": "NSAD306",
+          "note": "IF D30.6 NSA 1500"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 26.6,
+          "alt": 1500,
+          "code": "NSAD266",
+          "note": "FAF D26.6 NSA 1500"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 25.6,
+          "alt": 1380,
+          "code": "NSAD256",
+          "note": "D25.6 NSA 1380"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 24.6,
+          "alt": 1060,
+          "code": "NSAD246",
+          "note": "D24.6 NSA 1060"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 23.6,
+          "alt": 740,
+          "code": "NSAD236",
+          "note": "D23.6 NSA 740"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 22.6,
+          "alt": 740,
+          "code": "NSAD226",
+          "note": "MAP D22.6 NSA"
+        }
+      ]
+    },
+    {
+      "id": "STAR TAGUX 3N",
+      "kind": "STAR",
+      "name": "TAGUX 3N — to PORCA, GNSS RWY03",
+      "runway": "03",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "TAGUX",
+          "alt": 5500,
+          "note": "TAGUX FL055"
+        },
+        {
+          "type": "static_point",
+          "point": "PORCA",
+          "lat": 39.20851,
+          "lon": -8.07308,
+          "alt": 3500,
+          "note": "PORCA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR FTM 3N",
+      "kind": "STAR",
+      "name": "FTM 3N — to PORCA, GNSS RWY03",
+      "runway": "03",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "FTM",
+          "alt": 5500,
+          "note": "FTM FL055"
+        },
+        {
+          "type": "static_point",
+          "point": "PORCA",
+          "lat": 39.20851,
+          "lon": -8.07308,
+          "alt": 3500,
+          "note": "PORCA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR NSA 3N",
+      "kind": "STAR",
+      "name": "NSA 3N — to PORCA, GNSS RWY03",
+      "runway": "03",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "NSA",
+          "alt": 4500,
+          "note": "NSA"
+        },
+        {
+          "type": "static_point",
+          "point": "PORCA",
+          "lat": 39.20851,
+          "lon": -8.07308,
+          "alt": 3500,
+          "note": "PORCA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR MAGUM 3N",
+      "kind": "STAR",
+      "name": "MAGUM 3N — to PORCA, GNSS RWY03",
+      "runway": "03",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "MAGUM",
+          "alt": 5500,
+          "note": "MAGUM"
+        },
+        {
+          "type": "static_point",
+          "point": "PORCA",
+          "lat": 39.20851,
+          "lon": -8.07308,
+          "alt": 3500,
+          "note": "PORCA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR BORRO 3N",
+      "kind": "STAR",
+      "name": "BORRO 3N — to PORCA, GNSS RWY03",
+      "runway": "03",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "BORRO",
+          "alt": 5500,
+          "note": "BORRO FL055"
+        },
+        {
+          "type": "static_point",
+          "point": "PORCA",
+          "lat": 39.20851,
+          "lon": -8.07308,
+          "alt": 3500,
+          "note": "PORCA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR TAGUX 3S",
+      "kind": "STAR",
+      "name": "TAGUX 3S — to TRAMA, GNSS RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "TAGUX",
+          "alt": 5500,
+          "note": "TAGUX FL055"
+        },
+        {
+          "type": "static_point",
+          "point": "TRAMA",
+          "lat": 39.304,
+          "lon": -8.0,
+          "alt": 3500,
+          "note": "TRAMA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR FTM 3S",
+      "kind": "STAR",
+      "name": "FTM 3S — to TRAMA, GNSS RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "FTM",
+          "alt": 5500,
+          "note": "FTM FL055"
+        },
+        {
+          "type": "static_point",
+          "point": "TRAMA",
+          "lat": 39.304,
+          "lon": -8.0,
+          "alt": 3500,
+          "note": "TRAMA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR NSA 3S",
+      "kind": "STAR",
+      "name": "NSA 3S — to TRAMA, GNSS RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "NSA",
+          "alt": 4500,
+          "note": "NSA"
+        },
+        {
+          "type": "static_point",
+          "point": "TRAMA",
+          "lat": 39.304,
+          "lon": -8.0,
+          "alt": 3500,
+          "note": "TRAMA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR MAGUM 3S",
+      "kind": "STAR",
+      "name": "MAGUM 3S — to TRAMA, GNSS RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "MAGUM",
+          "alt": 5500,
+          "note": "MAGUM"
+        },
+        {
+          "type": "static_point",
+          "point": "TRAMA",
+          "lat": 39.304,
+          "lon": -8.0,
+          "alt": 3500,
+          "note": "TRAMA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR BORRO 3S",
+      "kind": "STAR",
+      "name": "BORRO 3S — to TRAMA, GNSS RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "BORRO",
+          "alt": 5500,
+          "note": "BORRO FL055"
+        },
+        {
+          "type": "static_point",
+          "point": "TRAMA",
+          "lat": 39.304,
+          "lon": -8.0,
+          "alt": 3500,
+          "note": "TRAMA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR TAGUX 2S",
+      "kind": "STAR",
+      "name": "TAGUX 2S — to MENDA, ILS/VOR DME RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "TAGUX",
+          "alt": 5500,
+          "note": "TAGUX FL055"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "FTM",
+          "radial": 149,
+          "dme": 37,
+          "alt": 3500,
+          "code": "FTMR149D37",
+          "name": "FTM R149 D37",
+          "note": "FTM R149 D37"
+        },
+        {
+          "type": "dme_arc",
+          "vor": "FTM",
+          "dme": 37,
+          "start_radial": 149,
+          "end_radial": 119,
+          "direction": "CCW",
+          "alt": 3500,
+          "note": "FTM D37 ARC TO MENDA"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "FTM",
+          "radial": 119,
+          "dme": 35,
+          "alt": 3500,
+          "code": "MENDA",
+          "name": "MENDA",
+          "note": "MENDA IAF 3500"
+        }
+      ]
+    },
+    {
+      "id": "STAR FTM 2S",
+      "kind": "STAR",
+      "name": "FTM 2S — to SALTE, VOR DME RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "FTM",
+          "alt": 5500,
+          "note": "FTM FL055"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "FTM",
+          "radial": 137,
+          "dme": 32,
+          "alt": 3000,
+          "code": "FTMR137D32",
+          "name": "FTM R137 D32",
+          "note": "FTM R137 D32"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 17,
+          "alt": 3000,
+          "code": "SALTE",
+          "name": "SALTE",
+          "note": "SALTE IAF 3000"
+        }
+      ]
+    },
+    {
+      "id": "STAR NSA 2S",
+      "kind": "STAR",
+      "name": "NSA 2S — to SALTE, VOR DME RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "NSA",
+          "alt": 4500,
+          "note": "NSA"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 17,
+          "alt": 3000,
+          "code": "SALTE",
+          "name": "SALTE",
+          "note": "SALTE IAF 3000"
+        }
+      ]
+    },
+    {
+      "id": "STAR MAGUM 2S",
+      "kind": "STAR",
+      "name": "MAGUM 2S — to SALTE, VOR DME RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "MAGUM",
+          "alt": 5500,
+          "note": "MAGUM"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 17,
+          "alt": 3000,
+          "code": "SALTE",
+          "name": "SALTE",
+          "note": "SALTE IAF 3000"
+        }
+      ]
+    },
+    {
+      "id": "STAR BORRO 2S",
+      "kind": "STAR",
+      "name": "BORRO 2S — to SALTE, VOR DME RWY21",
+      "runway": "21",
+      "segments": [
+        {
+          "type": "static_point",
+          "point": "BORRO",
+          "alt": 5500,
+          "note": "BORRO FL055"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 29,
+          "alt": 3500,
+          "code": "NSAR198D29",
+          "name": "NSA R198 D29",
+          "note": "NSA R198 D29"
+        },
+        {
+          "type": "vor_radial_dme",
+          "vor": "NSA",
+          "radial": 198,
+          "dme": 17,
+          "alt": 3000,
+          "code": "SALTE",
+          "name": "SALTE",
+          "note": "SALTE IAF 3000"
+        }
       ]
     }
   ]
