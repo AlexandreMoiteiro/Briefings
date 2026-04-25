@@ -14,7 +14,7 @@
       "runway": "03",
       "segments": [
         {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "runway_track_until_alt", "track": 025, "alt": 1400, "next_track": 339, "turn_arrow": "←", "note": "1400 TURN ← TRK339"},
+        {"type": "runway_track_until_alt", "track": 25, "alt": 1400, "next_track": 339, "turn_arrow": "←", "note": "1400 TURN ← TRK339"},
         {"type": "track_to_intercept_radial", "track": 339, "vor": "NSA", "radial": 212, "alt": 2000, "note": "INT NSA R212"},
         {"type": "track_to_intercept_dme", "track": 339, "vor": "NSA", "dme": 23, "alt": 2000, "note": "NSA R212 D23"}
       ]
@@ -26,8 +26,8 @@
       "runway": "03",
       "segments": [
         {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "track_to_intercept_radial", "track": 025, "vor": "FTM", "radial": 140, "alt": 2000, "note": "INT FTM R140"},
-        {"type": "track_to_intercept_dme", "track": 025, "vor": "FTM", "dme": 34, "alt": 3000, "note": "FTM R140 D34"}
+        {"type": "track_to_intercept_radial", "track": 25, "vor": "FTM", "radial": 140, "alt": 2000, "note": "INT FTM R140"},
+        {"type": "track_to_intercept_dme", "track": 25, "vor": "FTM", "dme": 34, "alt": 3000, "note": "FTM R140 D34"}
       ]
     },
     {
@@ -37,8 +37,8 @@
       "runway": "03",
       "segments": [
         {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "track_to_intercept_radial", "track": 025, "vor": "FTM", "radial": 140, "alt": 2000, "note": "INT FTM R140"},
-        {"type": "track_to_intercept_dme", "track": 025, "vor": "FTM", "dme": 28, "alt": 2000, "note": "FTM D28"},
+        {"type": "track_to_intercept_radial", "track": 25, "vor": "FTM", "radial": 140, "alt": 2000, "note": "INT FTM R140"},
+        {"type": "track_to_intercept_dme", "track": 25, "vor": "FTM", "dme": 28, "alt": 2000, "note": "FTM D28"},
         {"type": "track_to_intercept_radial", "track": 238, "vor": "NSA", "radial": 225, "alt": 2000, "note": "TRK238 INT NSA R225"},
         {"type": "track_to_intercept_dme", "track": 238, "vor": "NSA", "dme": 30, "alt": 2000, "note": "NSA ARC D30"},
         {"type": "static_point", "point": "MAGUM", "alt": 3000, "note": "MAGUM"}
@@ -51,8 +51,8 @@
       "runway": "03",
       "segments": [
         {"type": "static_point", "point": "LPSO", "alt": 390, "note": "LPSO"},
-        {"type": "track_to_intercept_radial", "track": 025, "vor": "FTM", "radial": 140, "alt": 2000, "note": "INT FTM R140"},
-        {"type": "track_to_intercept_dme", "track": 025, "vor": "FTM", "dme": 28, "alt": 2000, "note": "FTM D28"},
+        {"type": "track_to_intercept_radial", "track": 25, "vor": "FTM", "radial": 140, "alt": 2000, "note": "INT FTM R140"},
+        {"type": "track_to_intercept_dme", "track": 25, "vor": "FTM", "dme": 28, "alt": 2000, "note": "FTM D28"},
         {"type": "track_to_intercept_radial", "track": 244, "vor": "FTM", "radial": 149, "alt": 3000, "note": "TRK244 INT FTM R149"},
         {"type": "track_to_intercept_dme", "track": 244, "vor": "FTM", "dme": 31, "alt": 3000, "note": "X FTM D31 3000"},
         {"type": "track_to_intercept_dme", "track": 149, "vor": "FTM", "dme": 40, "alt": 3000, "note": "MAINT 3000 UNTIL D40"},
@@ -118,7 +118,7 @@
       "segments": [
         {"type": "static_point", "point": "PORCA", "alt": 3500, "note": "PORCA IAF"},
         {"type": "vor_radial_dme", "vor": "NSA", "radial": 198, "dme": 30.6, "alt": 3500, "code": "D8PORCA", "name": "D8 PORCA", "note": "D8 PORCA 3500"},
-        {"type": "rate_one_turn", "direction": "LEFT", "start_track": 195, "end_track": 025, "alt": 1500, "note": "RATE 1 ← ALIGN 025"},
+        {"type": "rate_one_turn", "direction": "LEFT", "start_track": 195, "end_track": 25, "alt": 1500, "note": "RATE 1 ← ALIGN 025"},
         {"type": "static_point", "point": "RAKET", "alt": 1500, "note": "RAKET FAF 1500"},
         {"type": "static_point", "point": "LPSO", "alt": 390, "note": "RWY03"}
       ]
@@ -130,7 +130,7 @@
       "runway": "21",
       "segments": [
         {"type": "static_point", "point": "TRAMA", "alt": 3500, "note": "TRAMA IAF"},
-        {"type": "track_to_intercept_dme", "track": 010, "vor": "NSA", "dme": 31, "alt": 2000, "code": "D6TRAMA", "note": "D6 TRAMA 2000"},
+        {"type": "track_to_intercept_dme", "track": 10, "vor": "NSA", "dme": 31, "alt": 2000, "code": "D6TRAMA", "note": "D6 TRAMA 2000"},
         {"type": "static_point", "point": "ROSED", "alt": 2000, "note": "ROSED FAF 2000"},
         {"type": "static_point", "point": "LPSO", "alt": 390, "note": "RWY21"}
       ]
