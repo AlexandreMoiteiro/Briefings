@@ -224,8 +224,13 @@ def liters_to_usg(liters: float) -> float:
     return float(liters) / LITERS_PER_USG
 
 
-def fmt_fuel_l_usg(liters: float, decimals_usg: int = 1) -> str:
-    return f"{fmt_unit(liters)} L ({fmt_num_clean(liters_to_usg(liters), decimals_usg)} USG)"
+def fmt_efob_numbers(liters: float, decimals_usg: int = 1) -> str:
+    return f"{fmt_unit(liters)} ({fmt_num_clean(liters_to_usg(liters), decimals_usg)})"
+
+
+def fmt_efob_pdf(liters: float) -> str:
+    # Formato compacto para caber na célula EFOB do template PDF.
+    return f"{fmt_unit(liters)}({int(round(liters_to_usg(liters)))})"
 
 
 def mmss(sec: float) -> str:
@@ -1818,8 +1823,8 @@ def fill_leg_payload(data: Dict[str, Any], idx: int, leg: Dict[str, Any], acc_d:
     data[f"{prefix}{idx:02d}_Leg_ETE"] = fmt_with_plus(pdf_time(leg["time_sec"]), pdf_time(leg_hold_sec(leg)), has_hold)
     data[f"{prefix}{idx:02d}_Cumulative_ETE"] = pdf_time(acc_t)
     data[f"{prefix}{idx:02d}_ETO"] = ""
-    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_with_plus(fmt_fuel_l_usg(leg["burn"]), fmt_fuel_l_usg(leg_hold_burn(leg)), has_hold)
-    data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_fuel_l_usg(leg["efob_end"])
+    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_with_plus(fmt_unit(leg["burn"]), fmt_unit(leg_hold_burn(leg)), has_hold)
+    data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_efob_pdf(leg["efob_end"])
     vor = choose_vor_for_point(point)
     data[f"{prefix}{idx:02d}_Navaid_Identifier"] = format_vor_id(vor)
     data[f"{prefix}{idx:02d}_Navaid_Frequency"] = format_radial_dist(vor, float(point["lat"]), float(point["lon"]))
@@ -1836,8 +1841,8 @@ def fill_total_payload(data: Dict[str, Any], idx: int, total_dist: float, total_
     data[f"{prefix}{idx:02d}_Cumulative_Distance"] = f"{total_dist:.1f}"
     data[f"{prefix}{idx:02d}_Leg_ETE"] = pdf_time(total_sec)
     data[f"{prefix}{idx:02d}_Cumulative_ETE"] = pdf_time(total_sec)
-    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_fuel_l_usg(total_burn)
-    data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_fuel_l_usg(final_efob)
+    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_unit(total_burn)
+    data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_efob_pdf(final_efob)
 
 
 def build_pdf_payload(
@@ -1924,9 +1929,9 @@ def legs_to_dataframe(legs: List[Dict[str, Any]]) -> pd.DataFrame:
             "ETE": pdf_time(leg["time_sec"]),
             "Hold ETE": f"+{pdf_time(leg_hold_sec(leg))}" if leg_hold_sec(leg) else "",
             "CumETE": pdf_time(acc_t),
-            "Fuel": fmt_fuel_l_usg(leg["burn"]),
-            "Hold Fuel": f"+{fmt_fuel_l_usg(leg_hold_burn(leg))}" if leg_hold_sec(leg) else "",
-            "EFOB": fmt_fuel_l_usg(leg["efob_end"]),
+            "Fuel": fmt_unit(leg["burn"]),
+            "Hold Fuel": f"+{fmt_unit(leg_hold_burn(leg))}" if leg_hold_sec(leg) else "",
+            "EFOB": fmt_efob_numbers(leg["efob_end"]),
             "Wind": f"{int(leg['wind_from']):03d}/{int(leg['wind_kt'])}",
             "VOR": format_vor_id(vor),
             "Radial/Dist": format_radial_dist(vor, float(point["lat"]), float(point["lon"])),
@@ -2105,8 +2110,8 @@ if st.session_state.legs:
     html_pills([
         (f"ETE {pdf_time(sm['time'])}", "pill-good"),
         (f"Dist {sm['dist']:.1f} NM", "pill-good"),
-        (f"Fuel {fmt_fuel_l_usg(sm['burn'])}", "pill-good"),
-        (f"EFOB final {fmt_fuel_l_usg(sm['efob'])}", "pill-good" if sm["efob"] >= 30 else "pill-warn"),
+        (f"Fuel {fmt_unit(sm['burn'])} L", "pill-good"),
+        (f"EFOB final {fmt_efob_numbers(sm['efob'])}", "pill-good" if sm["efob"] >= 30 else "pill-warn"),
         (f"{sm['legs']} legs", ""),
     ])
 else:
