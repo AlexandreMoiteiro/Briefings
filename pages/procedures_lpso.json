@@ -1,28 +1,15 @@
 {
-  "version": "0.4",
+  "version": "0.5-sids-stars-only",
   "airport": "LPSO",
   "reference_basis": {
     "charts": "RVP.CFI.020.B.02 LPSO IFR Charts 05Jun23, training/VMC charts",
-    "coordinate_method": [
-      "Published VOR/DME radial-distance fixes are generated from the selected VOR and DME.",
-      "Local GNSS fixes PORCA/TRAMA are generated from charted RNAV STAR legs to the IAF.",
-      "RAKET/ROSED and DME stepdown points are generated along the final approach course from PORCA/TRAMA DME distances.",
-      "RWY03/RWY21 threshold points are approximate, derived from LPSO ARP and 1800 m runway length for drawing only."
-    ],
+    "scope": "Only SIDs and STARs. Instrument approaches are intentionally excluded.",
     "important": "For training/planning only. Verify against current AIP/AIRAC/NOTAM and the operator chart pack before flight."
   },
   "points": {
     "LPSO_ARP": {
       "lat": 39.211667,
       "lon": -8.057778
-    },
-    "RWY03": {
-      "lat": 39.204392,
-      "lon": -8.062357
-    },
-    "RWY21": {
-      "lat": 39.218941,
-      "lon": -8.053198
     },
     "PORCA": {
       "lat": 39.207134,
@@ -39,70 +26,6 @@
     "MENDA": {
       "lat": 39.381071,
       "lon": -7.833152
-    },
-    "P03_D8": {
-      "lat": 39.086352,
-      "lon": -8.146122
-    },
-    "RAKET": {
-      "lat": 39.146749,
-      "lon": -8.10988
-    },
-    "P03_D3": {
-      "lat": 39.161846,
-      "lon": -8.100809
-    },
-    "P03_D2": {
-      "lat": 39.176943,
-      "lon": -8.091735
-    },
-    "P03_D1": {
-      "lat": 39.192039,
-      "lon": -8.082657
-    },
-    "ROSED": {
-      "lat": 39.27734,
-      "lon": -8.022725
-    },
-    "T21_D3": {
-      "lat": 39.262368,
-      "lon": -8.032151
-    },
-    "T21_D2": {
-      "lat": 39.247396,
-      "lon": -8.041573
-    },
-    "T21_D1": {
-      "lat": 39.232422,
-      "lon": -8.050991
-    },
-    "T21_D05": {
-      "lat": 39.224936,
-      "lon": -8.055699
-    },
-    "PDS_D11": {
-      "lat": 39.383563,
-      "lon": -7.949288
-    },
-    "PDS_D64": {
-      "lat": 39.314732,
-      "lon": -7.992801
-    },
-    "PDS_D50": {
-      "lat": 39.293781,
-      "lon": -8.006027
-    },
-    "PDS_D40": {
-      "lat": 39.278814,
-      "lon": -8.015469
-    },
-    "PDS_D30": {
-      "lat": 39.263847,
-      "lon": -8.024907
-    },
-    "PDS_D20": {
-      "lat": 39.248879,
-      "lon": -8.034342
     }
   },
   "procedures": [
@@ -122,9 +45,9 @@
           "type": "runway_track_until_alt",
           "track": 25,
           "alt": 1400,
-          "note": "1400 TURN ← TRK339",
           "next_track": 339,
-          "turn_arrow": "←"
+          "turn_arrow": "←",
+          "note": "1400 TURN ← TRK339"
         },
         {
           "type": "track_to_intercept_radial",
@@ -298,9 +221,9 @@
           "type": "runway_track_until_alt",
           "track": 206,
           "alt": 2000,
-          "note": "2000 TURN → TRK319",
           "next_track": 319,
-          "turn_arrow": "→"
+          "turn_arrow": "→",
+          "note": "2000 TURN → TRK319"
         },
         {
           "type": "track_to_intercept_radial",
@@ -342,9 +265,9 @@
           "type": "runway_track_until_alt",
           "track": 206,
           "alt": 2000,
-          "note": "2000 TURN → TRK319",
           "next_track": 319,
-          "turn_arrow": "→"
+          "turn_arrow": "→",
+          "note": "2000 TURN → TRK319"
         },
         {
           "type": "track_to_intercept_radial",
@@ -386,9 +309,9 @@
           "type": "runway_track_until_alt",
           "track": 206,
           "alt": 2000,
-          "note": "2000 TURN → TRK269",
           "next_track": 269,
-          "turn_arrow": "→"
+          "turn_arrow": "→",
+          "note": "2000 TURN → TRK269"
         },
         {
           "type": "track_to_intercept_radial",
@@ -451,382 +374,9 @@
       ]
     },
     {
-      "id": "GNSS RWY03",
-      "kind": "APPROACH",
-      "name": "GNSS RWY03 via PORCA / RAKET",
-      "runway": "03",
-      "segments": [
-        {
-          "type": "static_point",
-          "point": "PORCA",
-          "alt": 3500,
-          "note": "PORCA IAF 3500",
-          "lat": 39.207134,
-          "lon": -8.073575,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "P03_D8",
-          "alt": 3500,
-          "note": "D8.0 PORCA 3500",
-          "name": "D8.0 PORCA",
-          "lat": 39.086352,
-          "lon": -8.146122,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "RAKET",
-          "alt": 1500,
-          "note": "RAKET FAF 1500",
-          "lat": 39.146749,
-          "lon": -8.10988,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "P03_D3",
-          "alt": 1380,
-          "note": "D3.0 PORCA 1380",
-          "name": "D3.0 PORCA",
-          "lat": 39.161846,
-          "lon": -8.100809,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "P03_D2",
-          "alt": 1060,
-          "note": "D2.0 PORCA 1060",
-          "name": "D2.0 PORCA",
-          "lat": 39.176943,
-          "lon": -8.091735,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "P03_D1",
-          "alt": 740,
-          "note": "D1.0 PORCA 740",
-          "name": "D1.0 PORCA",
-          "lat": 39.192039,
-          "lon": -8.082657,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "RWY03",
-          "alt": 390,
-          "note": "RWY03",
-          "lat": 39.204392,
-          "lon": -8.062357,
-          "remarks": "local chart-derived point"
-        }
-      ]
-    },
-    {
-      "id": "GNSS RWY21",
-      "kind": "APPROACH",
-      "name": "GNSS RWY21 via TRAMA / ROSED",
-      "runway": "21",
-      "segments": [
-        {
-          "type": "static_point",
-          "point": "TRAMA",
-          "alt": 3500,
-          "note": "TRAMA IAF / IF D6.0 3500",
-          "lat": 39.307281,
-          "lon": -8.003861,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "ROSED",
-          "alt": 2000,
-          "note": "ROSED FAF D4.0 2000",
-          "lat": 39.27734,
-          "lon": -8.022725,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "T21_D3",
-          "alt": 1650,
-          "note": "D3.0 TRAMA 1650",
-          "name": "D3.0 TRAMA",
-          "lat": 39.262368,
-          "lon": -8.032151,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "T21_D2",
-          "alt": 1300,
-          "note": "D2.0 TRAMA 1300",
-          "name": "D2.0 TRAMA",
-          "lat": 39.247396,
-          "lon": -8.041573,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "T21_D1",
-          "alt": 950,
-          "note": "D1.0 TRAMA 950",
-          "name": "D1.0 TRAMA",
-          "lat": 39.232422,
-          "lon": -8.050991,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "T21_D05",
-          "alt": 700,
-          "note": "MAP D0.5 TRAMA 700",
-          "name": "MAP D0.5 TRAMA",
-          "lat": 39.224936,
-          "lon": -8.055699,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "RWY21",
-          "alt": 390,
-          "note": "RWY21",
-          "lat": 39.218941,
-          "lon": -8.053198,
-          "remarks": "local chart-derived point"
-        }
-      ]
-    },
-    {
-      "id": "ILS RWY21",
-      "kind": "APPROACH",
-      "name": "ILS RWY21 via MENDA / PDS DME",
-      "runway": "21",
-      "segments": [
-        {
-          "type": "vor_radial_dme",
-          "vor": "FTM",
-          "radial": 119,
-          "dme": 35,
-          "alt": 3500,
-          "note": "MENDA IAF FTM R119 D35 3500",
-          "code": "MENDA",
-          "name": "MENDA"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "FTM",
-          "radial": 119,
-          "dme": 31,
-          "alt": 2500,
-          "note": "D31.0 FTM 2500",
-          "code": "FTMD31",
-          "name": "D31.0 FTM"
-        },
-        {
-          "type": "static_point",
-          "point": "PDS_D11",
-          "alt": 2500,
-          "note": "D11.0 PDS IF 2500",
-          "name": "D11.0 PDS",
-          "lat": 39.383563,
-          "lon": -7.949288,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "PDS_D64",
-          "alt": 2500,
-          "note": "D6.4 PDS FAP 2500",
-          "name": "D6.4 PDS",
-          "lat": 39.314732,
-          "lon": -7.992801,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "PDS_D40",
-          "alt": 1570,
-          "note": "D4.0 PDS 1570",
-          "name": "D4.0 PDS",
-          "lat": 39.278814,
-          "lon": -8.015469,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "PDS_D30",
-          "alt": 1350,
-          "note": "D3.0 PDS 1350",
-          "name": "D3.0 PDS",
-          "lat": 39.263847,
-          "lon": -8.024907,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "PDS_D20",
-          "alt": 1030,
-          "note": "D2.0 PDS 1030",
-          "name": "D2.0 PDS",
-          "lat": 39.248879,
-          "lon": -8.034342,
-          "remarks": "local chart-derived point"
-        },
-        {
-          "type": "static_point",
-          "point": "RWY21",
-          "alt": 390,
-          "note": "RWY21",
-          "lat": 39.218941,
-          "lon": -8.053198,
-          "remarks": "local chart-derived point"
-        }
-      ]
-    },
-    {
-      "id": "VOR DME RWY21",
-      "kind": "APPROACH",
-      "name": "VOR DME RWY21 via SALTE / NSA R198",
-      "runway": "21",
-      "segments": [
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 17,
-          "alt": 3000,
-          "note": "SALTE IAF NSA R198 D17 3000",
-          "code": "SALTE",
-          "name": "SALTE"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 17,
-          "alt": 2000,
-          "note": "D17.0 NSA 2000",
-          "code": "NSAD17",
-          "name": "NSA D17.0"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 18,
-          "alt": 1700,
-          "note": "D18.0 NSA 1700",
-          "code": "NSAD18",
-          "name": "NSA D18.0"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 19,
-          "alt": 1400,
-          "note": "D19.0 NSA 1400",
-          "code": "NSAD19",
-          "name": "NSA D19.0"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 20,
-          "alt": 1100,
-          "note": "D20.0 NSA 1100",
-          "code": "NSAD20",
-          "name": "NSA D20.0"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 21,
-          "alt": 900,
-          "note": "MAP D21.0 NSA 900",
-          "code": "NSAD21",
-          "name": "NSA D21.0"
-        }
-      ]
-    },
-    {
-      "id": "VOR DME RWY03",
-      "kind": "APPROACH",
-      "name": "VOR DME RWY03 via NSA R198",
-      "runway": "03",
-      "segments": [
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 30.6,
-          "alt": 1500,
-          "note": "IF D30.6 NSA 1500",
-          "code": "NSAD306",
-          "name": "IF D30.6 NSA"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 26.6,
-          "alt": 1500,
-          "note": "FAF RASQUET D26.6 NSA 1500",
-          "code": "RASQUET",
-          "name": "RASQUET / D26.6 NSA"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 25.6,
-          "alt": 1380,
-          "note": "D25.6 NSA 1380",
-          "code": "NSAD256",
-          "name": "D25.6 NSA"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 24.6,
-          "alt": 1060,
-          "note": "D24.6 NSA 1060",
-          "code": "NSAD246",
-          "name": "D24.6 NSA"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 23.6,
-          "alt": 740,
-          "note": "D23.6 NSA 740",
-          "code": "NSAD236",
-          "name": "D23.6 NSA"
-        },
-        {
-          "type": "vor_radial_dme",
-          "vor": "NSA",
-          "radial": 198,
-          "dme": 22.6,
-          "alt": 740,
-          "note": "MAP D22.6 NSA",
-          "code": "NSAD226",
-          "name": "D22.6 NSA"
-        }
-      ]
-    },
-    {
       "id": "STAR TAGUX 3N",
       "kind": "STAR",
-      "name": "TAGUX 3N to PORCA, GNSS RWY03",
+      "name": "TAGUX 3N to PORCA IAF, GNSS RWY03 transition",
       "runway": "03",
       "segments": [
         {
@@ -842,14 +392,14 @@
           "note": "PORCA IAF 3500",
           "lat": 39.207134,
           "lon": -8.073575,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR FTM 3N",
       "kind": "STAR",
-      "name": "FTM 3N to PORCA, GNSS RWY03",
+      "name": "FTM 3N to PORCA IAF, GNSS RWY03 transition",
       "runway": "03",
       "segments": [
         {
@@ -865,14 +415,14 @@
           "note": "PORCA IAF 3500",
           "lat": 39.207134,
           "lon": -8.073575,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR NSA 3N",
       "kind": "STAR",
-      "name": "NSA 3N to PORCA, GNSS RWY03",
+      "name": "NSA 3N to PORCA IAF, GNSS RWY03 transition",
       "runway": "03",
       "segments": [
         {
@@ -888,14 +438,14 @@
           "note": "PORCA IAF 3500",
           "lat": 39.207134,
           "lon": -8.073575,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR MAGUM 3N",
       "kind": "STAR",
-      "name": "MAGUM 3N to PORCA, GNSS RWY03",
+      "name": "MAGUM 3N to PORCA IAF, GNSS RWY03 transition",
       "runway": "03",
       "segments": [
         {
@@ -911,14 +461,14 @@
           "note": "PORCA IAF 3500",
           "lat": 39.207134,
           "lon": -8.073575,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR BORRO 3N",
       "kind": "STAR",
-      "name": "BORRO 3N to PORCA, GNSS RWY03",
+      "name": "BORRO 3N to PORCA IAF, GNSS RWY03 transition",
       "runway": "03",
       "segments": [
         {
@@ -934,14 +484,14 @@
           "note": "PORCA IAF 3500",
           "lat": 39.207134,
           "lon": -8.073575,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR TAGUX 3S",
       "kind": "STAR",
-      "name": "TAGUX 3S to TRAMA, GNSS RWY21",
+      "name": "TAGUX 3S to TRAMA IAF, GNSS RWY21 transition",
       "runway": "21",
       "segments": [
         {
@@ -957,14 +507,14 @@
           "note": "TRAMA IAF 3500",
           "lat": 39.307281,
           "lon": -8.003861,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR FTM 3S",
       "kind": "STAR",
-      "name": "FTM 3S to TRAMA, GNSS RWY21",
+      "name": "FTM 3S to TRAMA IAF, GNSS RWY21 transition",
       "runway": "21",
       "segments": [
         {
@@ -980,14 +530,14 @@
           "note": "TRAMA IAF 3500",
           "lat": 39.307281,
           "lon": -8.003861,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR NSA 3S",
       "kind": "STAR",
-      "name": "NSA 3S to TRAMA, GNSS RWY21",
+      "name": "NSA 3S to TRAMA IAF, GNSS RWY21 transition",
       "runway": "21",
       "segments": [
         {
@@ -1003,14 +553,14 @@
           "note": "TRAMA IAF 3500",
           "lat": 39.307281,
           "lon": -8.003861,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR MAGUM 3S",
       "kind": "STAR",
-      "name": "MAGUM 3S to TRAMA, GNSS RWY21",
+      "name": "MAGUM 3S to TRAMA IAF, GNSS RWY21 transition",
       "runway": "21",
       "segments": [
         {
@@ -1026,14 +576,14 @@
           "note": "TRAMA IAF 3500",
           "lat": 39.307281,
           "lon": -8.003861,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR BORRO 3S",
       "kind": "STAR",
-      "name": "BORRO 3S to TRAMA, GNSS RWY21",
+      "name": "BORRO 3S to TRAMA IAF, GNSS RWY21 transition",
       "runway": "21",
       "segments": [
         {
@@ -1049,14 +599,14 @@
           "note": "TRAMA IAF 3500",
           "lat": 39.307281,
           "lon": -8.003861,
-          "remarks": "local chart-derived point"
+          "remarks": "local chart-derived IAF/STAR endpoint"
         }
       ]
     },
     {
       "id": "STAR TAGUX 2S",
       "kind": "STAR",
-      "name": "TAGUX 2S to MENDA, ILS/VOR DME RWY21",
+      "name": "TAGUX 2S to MENDA IAF, ILS/VOR DME RWY21 transition",
       "runway": "21",
       "segments": [
         {
@@ -1100,7 +650,7 @@
     {
       "id": "STAR FTM 2S",
       "kind": "STAR",
-      "name": "FTM 2S to SALTE, VOR DME RWY21",
+      "name": "FTM 2S to SALTE IAF, VOR DME RWY21 transition",
       "runway": "21",
       "segments": [
         {
@@ -1134,7 +684,7 @@
     {
       "id": "STAR NSA 2S",
       "kind": "STAR",
-      "name": "NSA 2S to SALTE, VOR DME RWY21",
+      "name": "NSA 2S to SALTE IAF, VOR DME RWY21 transition",
       "runway": "21",
       "segments": [
         {
@@ -1158,7 +708,7 @@
     {
       "id": "STAR MAGUM 2S",
       "kind": "STAR",
-      "name": "MAGUM 2S to SALTE, VOR DME RWY21",
+      "name": "MAGUM 2S to SALTE IAF, VOR DME RWY21 transition",
       "runway": "21",
       "segments": [
         {
@@ -1182,7 +732,7 @@
     {
       "id": "STAR BORRO 2S",
       "kind": "STAR",
-      "name": "BORRO 2S to SALTE, VOR DME RWY21",
+      "name": "BORRO 2S to SALTE IAF, VOR DME RWY21 transition",
       "runway": "21",
       "segments": [
         {
