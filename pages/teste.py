@@ -103,6 +103,12 @@ ROUND_TIME_SEC = 60
 ROUND_DIST_NM = 0.5
 ROUND_FUEL_L = 1.0
 
+# O formulário NAVLOG principal tem espaço útil para cerca de 10 legs.
+# Se a rota couber aí, a linha seguinte é usada como TOTAL e o PDF é exportado só com a primeira página.
+PDF_SINGLE_PAGE_LEG_ROWS = 10
+PDF_FULL_TEMPLATE_LEG_ROWS = 22
+PDF_TOTAL_ROW_INDEX = 23
+
 # ===============================================================
 # STREAMLIT SETUP / STYLE
 # ===============================================================
@@ -522,6 +528,9 @@ def format_radial_dist(vor: Optional[Dict[str, Any]], lat: float, lon: float) ->
     if not vor:
         return ""
     radial, dist = vor_radial_distance(vor, lat, lon)
+    # Se o fix é o próprio VOR/NAVAID, não faz sentido mostrar R000/D00.
+    if dist < 0.3:
+        return ""
     return f"R{radial:03d}/D{int(round(dist)):02d}"
 
 
@@ -1190,6 +1199,12 @@ def build_procedure_points(proc_id: str, proc_instance_id: Optional[str] = None)
 
 
 def refresh_procedure_waypoints(wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Regenera SIDs/STARs sem destruir alterações manuais do utilizador.
+
+    O caso crítico é altitude: se alteras, por exemplo, NSA de 2000 para 4500
+    num SID, o recálculo deixa de voltar ao valor original do JSON.
+    Também preserva STOP/HOLD, vento local e texto do navlog quando existirem.
+    """
     refreshed: List[Dict[str, Any]] = []
     i = 0
     while i < len(wps):
@@ -1200,12 +1215,33 @@ def refresh_procedure_waypoints(wps: List[Dict[str, Any]]) -> List[Dict[str, Any
             refreshed.append(point)
             i += 1
             continue
+
         block_start = i
         while i < len(wps) and wps[i].get("proc_instance_id") == instance_id:
             i += 1
         old_block = wps[block_start:i]
+
+        # Preferimos casar por proc_order; se não existir, usamos a posição no bloco.
+        old_by_order: Dict[int, Dict[str, Any]] = {}
+        for pos, old in enumerate(old_block):
+            order = int(old.get("proc_order", pos))
+            old_by_order[order] = old
+
         try:
-            refreshed.extend(build_procedure_points(str(proc_id), proc_instance_id=str(instance_id)))
+            new_block = build_procedure_points(str(proc_id), proc_instance_id=str(instance_id))
+            for pos, new in enumerate(new_block):
+                order = int(new.get("proc_order", pos))
+                old = old_by_order.get(order)
+                if not old:
+                    continue
+                # Preserva alterações manuais úteis.
+                for key in ["alt", "stop_min", "wind_from", "wind_kt", "vor_pref", "vor_ident"]:
+                    if key in old and old.get(key) not in {None, ""}:
+                        new[key] = old.get(key)
+                # Texto do navlog só é preservado se tiver sido mesmo editado.
+                if old.get("navlog_note") and old.get("navlog_note") != new.get("navlog_note"):
+                    new["navlog_note"] = old.get("navlog_note")
+            refreshed.extend(new_block)
         except Exception as exc:
             st.warning(f"Não consegui regenerar {proc_id}: {exc}. Mantive os pontos antigos.")
             refreshed.extend(old_block)
@@ -1250,20 +1286,49 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         dist = gc_dist_nm(A["lat"], A["lon"], B["lat"], B["lon"])
         tc = gc_course_tc(A["lat"], A["lon"], B["lat"], B["lon"])
         wf, wk = wind_for_point(A)
+        from_label = str(A.get("code") or A.get("name") or "FROM")
+        to_label = str(B.get("code") or B.get("name") or "TO")
+
         if B["alt"] > A["alt"]:
             t_min = (B["alt"] - A["alt"]) / max(float(st.session_state.roc_fpm), 1.0)
             _, _, gs = wind_triangle(tc, profile["climb_tas"], wf, wk)
             d_need = gs * t_min / 60.0
             if 0.05 < d_need < dist - 0.05:
                 lat, lon = point_along_gc(A["lat"], A["lon"], B["lat"], B["lon"], d_need)
-                output.append(Point(code="TOC", name="TOC", lat=lat, lon=lon, alt=B["alt"], src="CALC", uid=next_uid()).to_dict())
+                d_from = rd(d_need)
+                d_to = rd(dist - d_need)
+                p = Point(code="TOC", name="TOC", lat=lat, lon=lon, alt=B["alt"], src="CALC", uid=next_uid()).to_dict()
+                p.update({
+                    "navlog_note": f"TOC
+{d_from:.1f} from {from_label}
+{d_to:.1f} to {to_label}",
+                    "calc_detail": f"{d_from:.1f} NM from {from_label} / {d_to:.1f} NM to {to_label}",
+                    "calc_from_code": from_label,
+                    "calc_to_code": to_label,
+                    "calc_dist_from_prev": d_from,
+                    "calc_dist_to_next": d_to,
+                })
+                output.append(p)
         elif B["alt"] < A["alt"]:
             t_min = (A["alt"] - B["alt"]) / max(float(st.session_state.rod_fpm), 1.0)
             _, _, gs = wind_triangle(tc, profile["descent_tas"], wf, wk)
             d_need = gs * t_min / 60.0
             if 0.05 < d_need < dist - 0.05:
-                lat, lon = point_along_gc(A["lat"], A["lon"], B["lat"], B["lon"], max(0.0, dist - d_need))
-                output.append(Point(code="TOD", name="TOD", lat=lat, lon=lon, alt=A["alt"], src="CALC", uid=next_uid()).to_dict())
+                d_from = rd(max(0.0, dist - d_need))
+                d_to = rd(d_need)
+                lat, lon = point_along_gc(A["lat"], A["lon"], B["lat"], B["lon"], d_from)
+                p = Point(code="TOD", name="TOD", lat=lat, lon=lon, alt=A["alt"], src="CALC", uid=next_uid()).to_dict()
+                p.update({
+                    "navlog_note": f"TOD
+{d_from:.1f} from {from_label}
+{d_to:.1f} to {to_label}",
+                    "calc_detail": f"{d_from:.1f} NM from {from_label} / {d_to:.1f} NM to {to_label}",
+                    "calc_from_code": from_label,
+                    "calc_to_code": to_label,
+                    "calc_dist_from_prev": d_from,
+                    "calc_dist_to_next": d_to,
+                })
+                output.append(p)
     output.append(user_wps[-1].copy())
     return output
 
@@ -1332,10 +1397,18 @@ def build_legs(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         mh = apply_mag_var(th, float(st.session_state.mag_var), bool(st.session_state.mag_is_east))
         ete = rt((dist / max(gs, 1e-9)) * 3600.0) if gs > 0 and dist > 0 else 0
         burn = rf(profile["fuel_flow_lh"] * ete / 3600.0)
+
+        hold_min = float(B.get("stop_min") or 0.0)
+        hold_sec = rt(hold_min * 60.0) if hold_min > 0 else 0
+        hold_dist = rd(gs * hold_sec / 3600.0) if hold_sec > 0 and gs > 0 else 0.0
+        hold_burn = rf(profile["fuel_flow_lh"] * hold_sec / 3600.0) if hold_sec > 0 else 0.0
+
         efob_start = efob
-        efob_end = max(0.0, rf(efob_start - burn))
+        efob_after_leg = max(0.0, rf(efob_start - burn))
+        efob_end = max(0.0, rf(efob_after_leg - hold_burn))
         clk_start = (base_dt + dt.timedelta(seconds=t_cursor)).strftime("%H:%M") if base_dt else f"T+{mmss(t_cursor)}"
-        clk_end = (base_dt + dt.timedelta(seconds=t_cursor + ete)).strftime("%H:%M") if base_dt else f"T+{mmss(t_cursor + ete)}"
+        clk_arrive = (base_dt + dt.timedelta(seconds=t_cursor + ete)).strftime("%H:%M") if base_dt else f"T+{mmss(t_cursor + ete)}"
+        clk_end = (base_dt + dt.timedelta(seconds=t_cursor + ete + hold_sec)).strftime("%H:%M") if base_dt else f"T+{mmss(t_cursor + ete + hold_sec)}"
         pref_vor = A.get("vor_ident") if A.get("vor_pref") == "FIXED" else ""
         legs.append({
             "i": len(legs) + 1,
@@ -1350,9 +1423,15 @@ def build_legs(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "Dist": dist,
             "time_sec": ete,
             "burn": burn,
+            "hold_sec": hold_sec,
+            "hold_dist": hold_dist,
+            "hold_burn": hold_burn,
+            "hold_min": hold_min,
             "efob_start": efob_start,
+            "efob_after_leg": efob_after_leg,
             "efob_end": efob_end,
             "clock_start": clk_start,
+            "clock_arrive": clk_arrive,
             "clock_end": clk_end,
             "wind_from": wf,
             "wind_kt": wk,
@@ -1360,38 +1439,8 @@ def build_legs(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "is_dme_arc": is_dme_arc_leg(A, B),
             "is_turn": is_rate_turn_leg(A, B),
         })
-        t_cursor += ete
+        t_cursor += ete + hold_sec
         efob = efob_end
-
-        stop_min = float(B.get("stop_min") or 0.0)
-        if stop_min > 0:
-            stop_sec = rt(stop_min * 60.0)
-            stop_burn = rf(profile["fuel_flow_lh"] * stop_sec / 3600.0)
-            efob_start2 = efob
-            efob_end2 = max(0.0, rf(efob_start2 - stop_burn))
-            legs.append({
-                "i": len(legs) + 1,
-                "A": B,
-                "B": B,
-                "profile": "STOP",
-                "TC": 0,
-                "TH": 0,
-                "MH": 0,
-                "TAS": 0,
-                "GS": 0,
-                "Dist": 0,
-                "time_sec": stop_sec,
-                "burn": stop_burn,
-                "efob_start": efob_start2,
-                "efob_end": efob_end2,
-                "clock_start": "",
-                "clock_end": "",
-                "wind_from": wf,
-                "wind_kt": wk,
-                "tracking": "STOP",
-            })
-            t_cursor += stop_sec
-            efob = efob_end2
     return legs
 
 
@@ -1479,14 +1528,153 @@ def expand_pdf_aliases(data: Dict[str, Any]) -> Dict[str, Any]:
     return output
 
 
-def fill_pdf(template: Path, output_path: Path, data: Dict[str, Any]) -> Path:
+def pdf_page_size(page: Any) -> Tuple[float, float]:
+    media_box = page.MediaBox
+    return float(media_box[2]) - float(media_box[0]), float(media_box[3]) - float(media_box[1])
+
+
+def pdf_text_lines(text: str, width: float, size: float, max_lines: int = 3) -> List[str]:
+    raw_lines = str(text).splitlines() or [str(text)]
+    max_chars = max(3, int(width / max(size * 0.52, 1)))
+    lines: List[str] = []
+    for raw in raw_lines:
+        raw = raw.strip()
+        if not raw:
+            lines.append("")
+            continue
+        while len(raw) > max_chars and len(lines) < max_lines:
+            cut = raw.rfind(" ", 0, max_chars)
+            if cut < max_chars * 0.45:
+                cut = max_chars
+            lines.append(raw[:cut].strip())
+            raw = raw[cut:].strip()
+        if len(lines) < max_lines:
+            lines.append(raw)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+    return lines
+
+
+def pdf_font_size_for_field(name: str, value: str, rect: List[float]) -> float:
+    width = max(1.0, rect[2] - rect[0])
+    height = max(1.0, rect[3] - rect[1])
+    n = len(str(value).replace("
+", " "))
+    if "Waypoint" in name:
+        return 4.1 if n > 18 or "
+" in str(value) else 4.8
+    if any(x in name for x in ["Navaid", "Identifier", "Frequency"]):
+        return 4.1 if n > 12 else 4.8
+    if name in {"ETD/ETA", "OBSERVATIONS", "CLEARANCES"}:
+        return 4.3 if n > 12 else 5.2
+    if width < 18 or height < 9:
+        return 4.2
+    if n > 10:
+        return 4.6
+    return 5.4
+
+
+def draw_pdf_field_text(canvas_obj: Any, name: str, rect: List[float], value: Any) -> None:
+    text = str(value or "")
+    if not text:
+        return
+    x1, y1, x2, y2 = [float(x) for x in rect]
+    width = max(1.0, x2 - x1)
+    height = max(1.0, y2 - y1)
+    size = pdf_font_size_for_field(name, text, [x1, y1, x2, y2])
+    max_lines = 3 if "Waypoint" in name else 2 if "
+" in text else 1
+    if name in {"OBSERVATIONS", "CLEARANCES"}:
+        max_lines = max(2, int(height / max(size * 1.15, 1)))
+    lines = pdf_text_lines(text, width - 2.0, size, max_lines=max_lines)
+    line_h = size * 1.12
+    total_h = line_h * len(lines)
+    y = y1 + (height - total_h) / 2 + (len(lines) - 1) * line_h + size * 0.20
+    left_align = any(x in name for x in ["Waypoint", "OBSERVATIONS", "CLEARANCES", "Departure", "Arrival"])
+
+    for line in lines:
+        is_plus = line.strip().startswith("+")
+        is_tod = "TOD" in line.strip().upper()
+        if is_plus:
+            canvas_obj.setFillColorRGB(0.72, 0.12, 0.12)
+        elif is_tod:
+            canvas_obj.setFillColorRGB(0.80, 0.08, 0.08)
+        else:
+            canvas_obj.setFillColorRGB(0, 0, 0)
+        canvas_obj.setFont("Helvetica-Bold", size)
+        if left_align:
+            canvas_obj.drawString(x1 + 1.2, y, line)
+        else:
+            canvas_obj.drawCentredString((x1 + x2) / 2, y, line)
+        y -= line_h
+    canvas_obj.setFillColorRGB(0, 0, 0)
+
+
+def stamp_non_field_navlog_headers(pdf: Any, data: Dict[str, Any], template: Path) -> None:
+    try:
+        from reportlab.pdfgen import canvas
+    except Exception:
+        return
+    values = {
+        "fl_alt": str(data.get("FLIGHT_LEVEL_ALTITUDE", "")),
+        "wind": str(data.get("WIND", "")),
+        "mag_var": str(data.get("MAG_VAR", "")),
+        "temp_isa": str(data.get("TEMP_ISA_DEV", "")),
+    }
+    if not any(values.values()):
+        return
+    for page_index, page in enumerate(pdf.pages):
+        page_width, page_height = pdf_page_size(page)
+        is_cont = page_index > 0 or "_1" in template.stem
+        ox = page_width / 2 if page_width > 650 and is_cont else 0
+        cw = min(421, page_width - ox)
+        y = 504 if is_cont else 367
+        packet = io.BytesIO()
+        c = canvas.Canvas(packet, pagesize=(page_width, page_height))
+        c.setFont("Helvetica-Bold", 5.2)
+        c.drawCentredString(ox + cw * 0.345, y, values["fl_alt"])
+        c.drawCentredString(ox + cw * 0.572, y, values["wind"])
+        c.drawCentredString(ox + cw * 0.766, y, values["mag_var"])
+        c.drawCentredString(ox + cw * 0.925, y, values["temp_isa"])
+        c.save()
+        packet.seek(0)
+        from pdfrw import PageMerge, PdfReader as _PdfReader
+        PageMerge(page).add(_PdfReader(packet).pages[0]).render()
+
+
+def stamp_pdf_form_values(pdf: Any, data: Dict[str, Any]) -> None:
+    try:
+        from reportlab.pdfgen import canvas
+        from pdfrw import PageMerge, PdfReader as _PdfReader
+    except Exception:
+        return
+    for page in pdf.pages:
+        if not getattr(page, "Annots", None):
+            continue
+        page_width, page_height = pdf_page_size(page)
+        packet = io.BytesIO()
+        c = canvas.Canvas(packet, pagesize=(page_width, page_height))
+        for annot in page.Annots:
+            if annot.Subtype == PdfName("Widget") and annot.T and annot.Rect:
+                key = str(annot.T)[1:-1]
+                value = data.get(key, data.get(pdf_key_norm(key)))
+                if value is not None and str(value) != "":
+                    draw_pdf_field_text(c, key, [float(x) for x in annot.Rect], value)
+        c.save()
+        packet.seek(0)
+        PageMerge(page).add(_PdfReader(packet).pages[0]).render()
+
+
+def fill_pdf(template: Path, output_path: Path, data: Dict[str, Any], pages_to_keep: Optional[int] = None) -> Path:
     if PdfReader is None or PdfWriter is None or PdfDict is None or PdfName is None:
         raise RuntimeError("pdfrw não está instalado.")
     data = expand_pdf_aliases(data)
     pdf = PdfReader(str(template))
+    if pages_to_keep is not None:
+        pdf.pages = pdf.pages[:max(1, int(pages_to_keep))]
     if pdf.Root.AcroForm:
         pdf.Root.AcroForm.update(PdfDict(NeedAppearances=True))
-    small_re = re.compile(r"(Waypoint|Navaid|Identifier|Frequency|Name|Lat|Long|Fix)", re.I)
+    small_re = re.compile(r"(Waypoint|Navaid|Identifier|Frequency|Name|Lat|Long|Fix|ETA|OBSERVATIONS)", re.I)
     for page in pdf.pages:
         if not getattr(page, "Annots", None):
             continue
@@ -1497,7 +1685,11 @@ def fill_pdf(template: Path, output_path: Path, data: Dict[str, Any]) -> Path:
                 if value is not None:
                     annot.update(PdfDict(V=str(value), DV=str(value)))
                     if small_re.search(key):
-                        annot.update(PdfDict(DA="/Helv 4.5 Tf 0 g"))
+                        annot.update(PdfDict(DA="/Helv 4 Tf 0 g"))
+    # Stamping torna os valores visíveis em leitores que ignoram NeedAppearances
+    # e permite texto pequeno/multilinha em fixes e ETD/ETA.
+    stamp_pdf_form_values(pdf, data)
+    stamp_non_field_navlog_headers(pdf, data, template)
     PdfWriter(str(output_path), trailer=pdf).write()
     return output_path
 
@@ -1515,41 +1707,89 @@ def choose_vor_for_point(point: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return nearest_vor(float(point["lat"]), float(point["lon"]))
 
 
+def leg_hold_sec(leg: Dict[str, Any]) -> int:
+    return int(leg.get("hold_sec") or 0)
+
+
+def leg_hold_dist(leg: Dict[str, Any]) -> float:
+    return float(leg.get("hold_dist") or 0.0)
+
+
+def leg_hold_burn(leg: Dict[str, Any]) -> float:
+    return float(leg.get("hold_burn") or 0.0)
+
+
+def leg_total_time_sec(leg: Dict[str, Any]) -> int:
+    return int(leg.get("time_sec") or 0) + leg_hold_sec(leg)
+
+
+def leg_total_distance(leg: Dict[str, Any]) -> float:
+    return float(leg.get("Dist") or 0.0) + leg_hold_dist(leg)
+
+
+def leg_total_burn(leg: Dict[str, Any]) -> float:
+    return float(leg.get("burn") or 0.0) + leg_hold_burn(leg)
+
+
+def fmt_with_plus(base: str, plus: str, has_plus: bool) -> str:
+    return f"{base}
++{plus}" if has_plus else base
+
+
 def fill_leg_payload(data: Dict[str, Any], idx: int, leg: Dict[str, Any], acc_d: float, acc_t: int, prefix: str = "Leg") -> None:
     point = leg["B"]
+    has_hold = leg_hold_sec(leg) > 0
     data[f"{prefix}{idx:02d}_Waypoint"] = str(point.get("navlog_note") or point.get("code") or point.get("name"))
     data[f"{prefix}{idx:02d}_Altitude_FL"] = str(int(round(float(point.get("alt", 0)))))
-    if leg["profile"] != "STOP":
-        data[f"{prefix}{idx:02d}_True_Course"] = f"{int(round(leg['TC'])):03d}"
-        data[f"{prefix}{idx:02d}_True_Heading"] = f"{int(round(leg['TH'])):03d}"
-        data[f"{prefix}{idx:02d}_Magnetic_Heading"] = f"{int(round(leg['MH'])):03d}"
-        data[f"{prefix}{idx:02d}_True_Airspeed"] = str(int(round(leg["TAS"])))
-        data[f"{prefix}{idx:02d}_Ground_Speed"] = str(int(round(leg["GS"])))
-        data[f"{prefix}{idx:02d}_Leg_Distance"] = f"{leg['Dist']:.1f}"
-    else:
-        for field in ["True_Course", "True_Heading", "Magnetic_Heading", "True_Airspeed", "Ground_Speed"]:
-            data[f"{prefix}{idx:02d}_{field}"] = ""
-        data[f"{prefix}{idx:02d}_Leg_Distance"] = "0.0"
+    data[f"{prefix}{idx:02d}_True_Course"] = f"{int(round(leg['TC'])):03d}"
+    data[f"{prefix}{idx:02d}_True_Heading"] = f"{int(round(leg['TH'])):03d}"
+    data[f"{prefix}{idx:02d}_Magnetic_Heading"] = f"{int(round(leg['MH'])):03d}"
+    data[f"{prefix}{idx:02d}_True_Airspeed"] = str(int(round(leg["TAS"])))
+    data[f"{prefix}{idx:02d}_Ground_Speed"] = str(int(round(leg["GS"])))
+    data[f"{prefix}{idx:02d}_Leg_Distance"] = fmt_with_plus(f"{float(leg['Dist']):.1f}", f"{leg_hold_dist(leg):.1f}", has_hold)
     data[f"{prefix}{idx:02d}_Cumulative_Distance"] = f"{acc_d:.1f}"
-    data[f"{prefix}{idx:02d}_Leg_ETE"] = pdf_time(leg["time_sec"])
+    data[f"{prefix}{idx:02d}_Leg_ETE"] = fmt_with_plus(pdf_time(leg["time_sec"]), pdf_time(leg_hold_sec(leg)), has_hold)
     data[f"{prefix}{idx:02d}_Cumulative_ETE"] = pdf_time(acc_t)
     data[f"{prefix}{idx:02d}_ETO"] = ""
-    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_unit(leg["burn"])
+    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_with_plus(fmt_unit(leg["burn"]), fmt_unit(leg_hold_burn(leg)), has_hold)
     data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_unit(leg["efob_end"])
     vor = choose_vor_for_point(point)
     data[f"{prefix}{idx:02d}_Navaid_Identifier"] = format_vor_id(vor)
     data[f"{prefix}{idx:02d}_Navaid_Frequency"] = format_radial_dist(vor, float(point["lat"]), float(point["lon"]))
 
 
-def build_pdf_payload(legs: List[Dict[str, Any]], header: Dict[str, str], start: int = 0, count: int = 22) -> Dict[str, Any]:
+def fill_total_payload(data: Dict[str, Any], idx: int, total_dist: float, total_sec: int, total_burn: float, final_efob: float, prefix: str = "Leg") -> None:
+    data[f"{prefix}{idx:02d}_Waypoint"] = "TOTAL"
+    data[f"{prefix}{idx:02d}_Navaid_Identifier"] = ""
+    data[f"{prefix}{idx:02d}_Navaid_Frequency"] = ""
+    data[f"{prefix}{idx:02d}_Altitude_FL"] = ""
+    for field in ["True_Course", "True_Heading", "Magnetic_Heading", "True_Airspeed", "Ground_Speed"]:
+        data[f"{prefix}{idx:02d}_{field}"] = ""
+    data[f"{prefix}{idx:02d}_Leg_Distance"] = f"{total_dist:.1f}"
+    data[f"{prefix}{idx:02d}_Cumulative_Distance"] = f"{total_dist:.1f}"
+    data[f"{prefix}{idx:02d}_Leg_ETE"] = pdf_time(total_sec)
+    data[f"{prefix}{idx:02d}_Cumulative_ETE"] = pdf_time(total_sec)
+    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_unit(total_burn)
+    data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_unit(final_efob)
+
+
+def build_pdf_payload(
+    legs: List[Dict[str, Any]],
+    header: Dict[str, str],
+    start: int = 0,
+    count: int = PDF_FULL_TEMPLATE_LEG_ROWS,
+    total_on_next_row: bool = False,
+    fill_continuation_total: bool = True,
+) -> Dict[str, Any]:
     chunk = legs[start:start + count]
-    total_sec = sum(leg["time_sec"] for leg in legs)
-    total_burn = rf(sum(leg["burn"] for leg in legs))
-    total_dist = rd(sum(leg["Dist"] for leg in legs))
-    climb_sec = sum(leg["time_sec"] for leg in legs if leg["profile"] == "CLIMB")
-    level_sec = sum(leg["time_sec"] for leg in legs if leg["profile"] == "LEVEL")
-    desc_sec = sum(leg["time_sec"] for leg in legs if leg["profile"] == "DESCENT")
-    climb_burn = rf(sum(leg["burn"] for leg in legs if leg["profile"] == "CLIMB"))
+    total_sec = sum(leg_total_time_sec(leg) for leg in legs)
+    total_burn = rf(sum(leg_total_burn(leg) for leg in legs))
+    total_dist = rd(sum(leg_total_distance(leg) for leg in legs))
+    climb_sec = sum(leg_total_time_sec(leg) for leg in legs if leg["profile"] == "CLIMB")
+    level_sec = sum(leg_total_time_sec(leg) for leg in legs if leg["profile"] == "LEVEL")
+    desc_sec = sum(leg_total_time_sec(leg) for leg in legs if leg["profile"] == "DESCENT")
+    climb_burn = rf(sum(leg_total_burn(leg) for leg in legs if leg["profile"] == "CLIMB"))
+    final_efob = legs[-1]["efob_end"] if legs else float(st.session_state.start_efob)
     data = {
         "CALLSIGN": header.get("callsign", ""),
         "REGISTRATION": header.get("registration", ""),
@@ -1576,13 +1816,13 @@ def build_pdf_payload(legs: List[Dict[str, Any]], header: Dict[str, str], start:
     acc_t = 0
     start_idx = 1 if start == 0 else 12
     for idx, leg in enumerate(chunk, start=start_idx):
-        acc_d = rd(acc_d + leg["Dist"])
-        acc_t += int(leg["time_sec"])
+        acc_d = rd(acc_d + leg_total_distance(leg))
+        acc_t += int(leg_total_time_sec(leg))
         fill_leg_payload(data, idx, leg, acc_d, acc_t)
-    data["Leg23_Leg_Distance"] = f"{total_dist:.1f}"
-    data["Leg23_Leg_ETE"] = pdf_time(total_sec)
-    data["Leg23_Planned_Burnoff"] = fmt_unit(total_burn)
-    data["Leg23_Estimated_FOB"] = fmt_unit(legs[-1]["efob_end"]) if legs else ""
+    if total_on_next_row and start == 0:
+        fill_total_payload(data, start_idx + len(chunk), total_dist, total_sec, total_burn, final_efob)
+    if fill_continuation_total:
+        fill_total_payload(data, PDF_TOTAL_ROW_INDEX, total_dist, total_sec, total_burn, final_efob)
     return data
 
 
@@ -1591,26 +1831,32 @@ def legs_to_dataframe(legs: List[Dict[str, Any]]) -> pd.DataFrame:
     acc_d = 0.0
     acc_t = 0
     for leg in legs:
-        acc_d = rd(acc_d + leg["Dist"])
-        acc_t += leg["time_sec"]
+        acc_d = rd(acc_d + leg_total_distance(leg))
+        acc_t += leg_total_time_sec(leg)
         point = leg["B"]
         vor = choose_vor_for_point(point)
+        to_label = point.get("navlog_note") or point.get("code") or point.get("name")
+        if point.get("calc_detail"):
+            to_label = f"{point.get('code')} · {point.get('calc_detail')}"
         rows.append({
             "Leg": leg["i"],
             "From": leg["A"].get("code") or leg["A"].get("name"),
-            "To": point.get("navlog_note") or point.get("code") or point.get("name"),
+            "To": to_label,
             "Profile": leg["profile"],
             "Alt": int(round(float(point.get("alt", 0)))),
-            "TC": f"{int(round(leg['TC'])):03d}" if leg["profile"] != "STOP" else "",
-            "TH": f"{int(round(leg['TH'])):03d}" if leg["profile"] != "STOP" else "",
-            "MH": f"{int(round(leg['MH'])):03d}" if leg["profile"] != "STOP" else "",
+            "TC": f"{int(round(leg['TC'])):03d}",
+            "TH": f"{int(round(leg['TH'])):03d}",
+            "MH": f"{int(round(leg['MH'])):03d}",
             "TAS": int(round(leg["TAS"])),
             "GS": int(round(leg["GS"])),
-            "Dist": f"{leg['Dist']:.1f}",
+            "Dist": f"{float(leg['Dist']):.1f}",
+            "Hold Dist": f"+{leg_hold_dist(leg):.1f}" if leg_hold_sec(leg) else "",
             "CumDist": f"{acc_d:.1f}",
             "ETE": pdf_time(leg["time_sec"]),
+            "Hold ETE": f"+{pdf_time(leg_hold_sec(leg))}" if leg_hold_sec(leg) else "",
             "CumETE": pdf_time(acc_t),
             "Fuel": fmt_unit(leg["burn"]),
+            "Hold Fuel": f"+{fmt_unit(leg_hold_burn(leg))}" if leg_hold_sec(leg) else "",
             "EFOB": fmt_unit(leg["efob_end"]),
             "Wind": f"{int(leg['wind_from']):03d}/{int(leg['wind_kt'])}",
             "VOR": format_vor_id(vor),
@@ -1618,6 +1864,19 @@ def legs_to_dataframe(legs: List[Dict[str, Any]]) -> pd.DataFrame:
             "Tracking": leg.get("tracking", ""),
         })
     return pd.DataFrame(rows)
+
+
+def style_navlog_dataframe(df: pd.DataFrame):
+    def row_style(row: pd.Series) -> List[str]:
+        styles = [""] * len(row)
+        to_text = str(row.get("To", "")).upper()
+        has_hold = bool(str(row.get("Hold ETE", "")).strip())
+        if "TOD" in to_text:
+            styles = ["background-color: #fff1f2"] * len(row)
+        if has_hold:
+            styles = ["background-color: #fff7ed"] * len(row)
+        return styles
+    return df.style.apply(row_style, axis=1)
 
 
 def route_item15(wps: List[Dict[str, Any]]) -> str:
@@ -1641,9 +1900,9 @@ def route_item15(wps: List[Dict[str, Any]]) -> str:
 
 def summary_metrics(legs: List[Dict[str, Any]]) -> Dict[str, float]:
     return {
-        "time": sum(leg["time_sec"] for leg in legs),
-        "dist": rd(sum(leg["Dist"] for leg in legs)),
-        "burn": rf(sum(leg["burn"] for leg in legs)),
+        "time": sum(leg_total_time_sec(leg) for leg in legs),
+        "dist": rd(sum(leg_total_distance(leg) for leg in legs)),
+        "burn": rf(sum(leg_total_burn(leg) for leg in legs)),
         "efob": legs[-1]["efob_end"] if legs else float(st.session_state.start_efob),
         "legs": len(legs),
     }
@@ -1725,7 +1984,12 @@ def render_route_map(wps: List[Dict[str, Any]], nodes: List[Dict[str, Any]], leg
         folium.CircleMarker((lat, lon), radius=6, color="#fff", weight=3, fill=True, fill_opacity=1).add_to(m)
         folium.CircleMarker((lat, lon), radius=5, color=color, fill=True, fill_opacity=1, tooltip=f"{idx}. {point.get('code') or point.get('name')} [{src}]").add_to(m)
         label = point.get("navlog_note") or point.get("code") or point.get("name")
-        add_div_marker(m, lat, lon, f"<div style='transform:translate(8px,-22px);font-weight:800;font-size:12px;color:#0f172a;text-shadow:-1px -1px 0 white,1px -1px 0 white,-1px 1px 0 white,1px 1px 0 white;white-space:nowrap'>{idx}. {label}</div>")
+        label_html = str(label).replace("
+", "<br><span style='font-size:10px;font-weight:700'>")
+        extra_close = "</span>" if "
+" in str(label) else ""
+        label_color = "#be123c" if clean_code(point.get("code")) == "TOD" else "#0f172a"
+        add_div_marker(m, lat, lon, f"<div style='transform:translate(8px,-22px);font-weight:800;font-size:12px;color:{label_color};text-shadow:-1px -1px 0 white,1px -1px 0 white,-1px 1px 0 white,1px 1px 0 white;white-space:nowrap'>{idx}. {label_html}{extra_close}</div>")
     folium.LayerControl(collapsed=False).add_to(m)
     return st_folium(m, width=None, height=720, key=key)
 
@@ -2048,7 +2312,7 @@ with tab_route:
                         point["navlog_note"] = st.text_input("Texto no NAVLOG", point.get("navlog_note", ""), key=f"wp_note_{point['uid']}")
                 with c2:
                     point["alt"] = st.number_input("Alt ft", 0.0, 45000.0, float(point.get("alt", 0)), step=50.0, key=f"wp_alt_{point['uid']}")
-                    point["stop_min"] = st.number_input("STOP min", 0.0, 480.0, float(point.get("stop_min", 0)), step=1.0, key=f"wp_stop_{point['uid']}")
+                    point["stop_min"] = st.number_input("HOLD/STOP min", 0.0, 480.0, float(point.get("stop_min", 0)), step=1.0, key=f"wp_stop_{point['uid']}")
                 c1, c2 = st.columns(2)
                 with c1:
                     point["lat"] = st.number_input("Lat", -90.0, 90.0, float(point.get("lat")), step=0.0001, format="%.6f", key=f"wp_lat_{point['uid']}")
@@ -2124,7 +2388,7 @@ with tab_navlog:
         st.info("Cria uma rota e recalcula para ver o navlog.")
     else:
         df_legs = legs_to_dataframe(st.session_state.legs)
-        st.dataframe(df_legs, use_container_width=True, hide_index=True)
+        st.dataframe(style_navlog_dataframe(df_legs), use_container_width=True, hide_index=True)
         st.download_button("⬇️ Navlog CSV", df_legs.to_csv(index=False).encode("utf-8"), file_name="navlog.csv", mime="text/csv")
 
         st.markdown("#### Cabeçalho PDF")
@@ -2177,12 +2441,20 @@ with tab_navlog:
                 st.error("pdfrw não está instalado. Instala com: pip install pdfrw")
             else:
                 try:
-                    payload = build_pdf_payload(st.session_state.legs, header, 0, 22)
-                    out = fill_pdf(TEMPLATE_MAIN, OUTPUT_MAIN, payload)
+                    single_page = len(st.session_state.legs) <= PDF_SINGLE_PAGE_LEG_ROWS
+                    payload = build_pdf_payload(
+                        st.session_state.legs,
+                        header,
+                        0,
+                        PDF_SINGLE_PAGE_LEG_ROWS if single_page else PDF_FULL_TEMPLATE_LEG_ROWS,
+                        total_on_next_row=single_page,
+                        fill_continuation_total=not single_page,
+                    )
+                    out = fill_pdf(TEMPLATE_MAIN, OUTPUT_MAIN, payload, pages_to_keep=1 if single_page else None)
                     with open(out, "rb") as file:
                         st.download_button("⬇️ NAVLOG principal", file.read(), file_name="NAVLOG_FILLED.pdf", mime="application/pdf", use_container_width=True)
-                    if len(st.session_state.legs) > 22 and TEMPLATE_CONT.exists():
-                        payload2 = build_pdf_payload(st.session_state.legs, header, 22, 11)
+                    if len(st.session_state.legs) > PDF_FULL_TEMPLATE_LEG_ROWS and TEMPLATE_CONT.exists():
+                        payload2 = build_pdf_payload(st.session_state.legs, header, PDF_FULL_TEMPLATE_LEG_ROWS, 11)
                         out2 = fill_pdf(TEMPLATE_CONT, OUTPUT_CONT, payload2)
                         with open(out2, "rb") as file:
                             st.download_button("⬇️ NAVLOG continuação", file.read(), file_name="NAVLOG_FILLED_1.pdf", mime="application/pdf", use_container_width=True)
