@@ -105,7 +105,7 @@ ROUND_FUEL_L = 1.0
 
 # O formulário NAVLOG principal tem espaço útil para cerca de 10 legs.
 # Se a rota couber aí, a linha seguinte é usada como TOTAL e o PDF é exportado só com a primeira página.
-PDF_SINGLE_PAGE_LEG_ROWS = 10
+PDF_SINGLE_PAGE_LEG_ROWS = 11
 PDF_FULL_TEMPLATE_LEG_ROWS = 22
 PDF_TOTAL_ROW_INDEX = 23
 
@@ -1302,7 +1302,7 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 d_to = rd(dist - d_need)
                 p = Point(code="TOC", name="TOC", lat=lat, lon=lon, alt=B["alt"], src="CALC", uid=next_uid()).to_dict()
                 p.update({
-                    "navlog_note": chr(10).join(["TOC", f"{d_from:.1f} from {from_label}", f"{d_to:.1f} to {to_label}"]),
+                    "navlog_note": chr(10).join(["TOC", f"+{d_from:.1f} {compact_nav_token(from_label)}", f"-{d_to:.1f} {compact_nav_token(to_label)}"]),
                     "calc_detail": f"{d_from:.1f} NM from {from_label} / {d_to:.1f} NM to {to_label}",
                     "calc_from_code": from_label,
                     "calc_to_code": to_label,
@@ -1321,7 +1321,7 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 lat, lon = point_along_gc(A["lat"], A["lon"], B["lat"], B["lon"], d_from)
                 p = Point(code="TOD", name="TOD", lat=lat, lon=lon, alt=A["alt"], src="CALC", uid=next_uid()).to_dict()
                 p.update({
-                    "navlog_note": chr(10).join(["TOD", f"{d_from:.1f} from {from_label}", f"{d_to:.1f} to {to_label}"]),
+                    "navlog_note": chr(10).join(["TOD", f"+{d_from:.1f} {compact_nav_token(from_label)}", f"-{d_to:.1f} {compact_nav_token(to_label)}"]),
                     "calc_detail": f"{d_from:.1f} NM from {from_label} / {d_to:.1f} NM to {to_label}",
                     "calc_from_code": from_label,
                     "calc_to_code": to_label,
@@ -1663,6 +1663,21 @@ def stamp_pdf_form_values(pdf: Any, data: Dict[str, Any]) -> None:
         PageMerge(page).add(_PdfReader(packet).pages[0]).render()
 
 
+def remove_pdf_widgets(pdf: Any) -> None:
+    for page in pdf.pages:
+        annots = getattr(page, "Annots", None)
+        if not annots:
+            continue
+        kept = []
+        for annot in annots:
+            if annot.Subtype != PdfName("Widget"):
+                kept.append(annot)
+        if kept:
+            page.Annots = kept
+        else:
+            page.Annots = []
+
+
 def fill_pdf(template: Path, output_path: Path, data: Dict[str, Any], pages_to_keep: Optional[int] = None) -> Path:
     if PdfReader is None or PdfWriter is None or PdfDict is None or PdfName is None:
         raise RuntimeError("pdfrw não está instalado.")
@@ -1688,6 +1703,7 @@ def fill_pdf(template: Path, output_path: Path, data: Dict[str, Any], pages_to_k
     # e permite texto pequeno/multilinha em fixes e ETD/ETA.
     stamp_pdf_form_values(pdf, data)
     stamp_non_field_navlog_headers(pdf, data, template)
+    remove_pdf_widgets(pdf)
     PdfWriter(str(output_path), trailer=pdf).write()
     return output_path
 
@@ -1703,6 +1719,49 @@ def choose_vor_for_point(point: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if point.get("src") == "VOR":
         return get_vor(str(point.get("code") or point.get("name")))
     return nearest_vor(float(point["lat"]), float(point["lon"]))
+
+
+def aircraft_pdf_code(registration: str = "") -> str:
+    reg = clean_code(registration)
+    aircraft = str(st.session_state.get("aircraft_type", ""))
+    if reg.startswith("OE") or "Piper" in aircraft or "PA-28" in aircraft or "PA28" in aircraft:
+        return "PA28"
+    if reg.startswith("CS") or "Tecnam" in aircraft or "P2008" in aircraft or "P208" in aircraft:
+        return "P208"
+    return aircraft or ""
+
+
+def compact_nav_token(value: Any, max_len: int = 10) -> str:
+    s = str(value or "").replace(chr(10), " ").strip().upper()
+    if not s:
+        return ""
+    s = s.replace("TURNTRK", " T")
+    s = s.replace("TURN TRK", " T")
+    s = s.replace("TRK", "T")
+    s = s.replace("INTNSA", "I NSA")
+    s = s.replace("INT NSA", "I NSA")
+    s = s.replace(" ", "") if len(s) > max_len else s
+    return s[:max_len]
+
+
+def pretty_pdf_waypoint_text(value: Any) -> str:
+    lines = [str(x).strip() for x in str(value or "").splitlines() if str(x).strip()]
+    if not lines:
+        return ""
+    first = lines[0]
+    first = first.replace("TURNTRK", " TURN T")
+    first = first.replace("TURN TRK", " TURN T")
+    first = first.replace("INTNSA", "INT NSA R")
+    first = first.replace("INT NSA", "INT NSA")
+    out = [first[:14]]
+    for line in lines[1:3]:
+        out.append(line[:14])
+    return chr(10).join(out)
+
+
+def compact_pdf_waypoint(point: Dict[str, Any]) -> str:
+    value = point.get("navlog_note") or point.get("code") or point.get("name")
+    return pretty_pdf_waypoint_text(value)
 
 
 def leg_hold_sec(leg: Dict[str, Any]) -> int:
@@ -1736,7 +1795,7 @@ def fmt_with_plus(base: str, plus: str, has_plus: bool) -> str:
 def fill_leg_payload(data: Dict[str, Any], idx: int, leg: Dict[str, Any], acc_d: float, acc_t: int, prefix: str = "Leg") -> None:
     point = leg["B"]
     has_hold = leg_hold_sec(leg) > 0
-    data[f"{prefix}{idx:02d}_Waypoint"] = str(point.get("navlog_note") or point.get("code") or point.get("name"))
+    data[f"{prefix}{idx:02d}_Waypoint"] = compact_pdf_waypoint(point)
     data[f"{prefix}{idx:02d}_Altitude_FL"] = str(int(round(float(point.get("alt", 0)))))
     data[f"{prefix}{idx:02d}_True_Course"] = f"{int(round(leg['TC'])):03d}"
     data[f"{prefix}{idx:02d}_True_Heading"] = f"{int(round(leg['TH'])):03d}"
@@ -1789,6 +1848,8 @@ def build_pdf_payload(
     final_efob = legs[-1]["efob_end"] if legs else float(st.session_state.start_efob)
     data = {
         "CALLSIGN": header.get("callsign", ""),
+        "AIRCRAFT": aircraft_pdf_code(header.get("registration", "")),
+        "AIRCRAFT_TYPE": aircraft_pdf_code(header.get("registration", "")),
         "REGISTRATION": header.get("registration", ""),
         "STUDENT": header.get("student", ""),
         "LESSON": header.get("lesson", ""),
@@ -1807,7 +1868,7 @@ def build_pdf_payload(
         "CLIMB FUEL": fmt_unit(climb_burn),
         "OBSERVATIONS": f"Climb {pdf_time(climb_sec)} / Cruise {pdf_time(level_sec)} / Descent {pdf_time(desc_sec)}",
         "Leg_Number": str(len(legs)),
-        "AIRCRAFT_TYPE": str(st.session_state.aircraft_type),
+        "AIRCRAFT_MODEL": str(st.session_state.aircraft_type),
     }
     acc_d = 0.0
     acc_t = 0
