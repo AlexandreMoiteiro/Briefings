@@ -104,6 +104,10 @@ ROUND_TIME_SEC = 60
 ROUND_DIST_NM = 0.5
 ROUND_FUEL_L = 1.0
 
+# Compatibilidade defensiva: evita NameError em sessões Streamlit antigas
+# que ainda invoquem este nome antes da redefinição completa abaixo.
+fmt_fuel_l_usg = lambda litres, decimals_usg=1: str(int(round(float(litres or 0))))
+
 # O formulário NAVLOG principal tem espaço útil para cerca de 10 legs.
 # Se a rota couber aí, a linha seguinte é usada como TOTAL e o PDF é exportado só com a primeira página.
 PDF_SINGLE_PAGE_LEG_ROWS = 11
@@ -231,6 +235,11 @@ def fmt_efob_numbers(liters: float, decimals_usg: int = 1) -> str:
 def fmt_efob_pdf(liters: float) -> str:
     # Formato compacto para caber na célula EFOB do template PDF.
     return f"{fmt_unit(liters)}({int(round(liters_to_usg(liters)))})"
+
+
+def fmt_fuel_l_usg(liters: float, decimals_usg: int = 1) -> str:
+    # Compatibilidade retroativa para sessões antigas/callbacks que ainda referem este nome.
+    return fmt_efob_numbers(liters, decimals_usg)
 
 
 def mmss(sec: float) -> str:
