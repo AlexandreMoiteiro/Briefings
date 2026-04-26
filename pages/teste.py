@@ -1559,11 +1559,9 @@ def pdf_text_lines(text: str, width: float, size: float, max_lines: int = 3) -> 
 def pdf_font_size_for_field(name: str, value: str, rect: List[float]) -> float:
     width = max(1.0, rect[2] - rect[0])
     height = max(1.0, rect[3] - rect[1])
-    n = len(str(value).replace("
-", " "))
+    n = len(str(value).replace(chr(10), " "))
     if "Waypoint" in name:
-        return 4.1 if n > 18 or "
-" in str(value) else 4.8
+        return 4.1 if n > 18 or chr(10) in str(value) else 4.8
     if any(x in name for x in ["Navaid", "Identifier", "Frequency"]):
         return 4.1 if n > 12 else 4.8
     if name in {"ETD/ETA", "OBSERVATIONS", "CLEARANCES"}:
@@ -1583,8 +1581,7 @@ def draw_pdf_field_text(canvas_obj: Any, name: str, rect: List[float], value: An
     width = max(1.0, x2 - x1)
     height = max(1.0, y2 - y1)
     size = pdf_font_size_for_field(name, text, [x1, y1, x2, y2])
-    max_lines = 3 if "Waypoint" in name else 2 if "
-" in text else 1
+    max_lines = 3 if "Waypoint" in name else 2 if chr(10) in text else 1
     if name in {"OBSERVATIONS", "CLEARANCES"}:
         max_lines = max(2, int(height / max(size * 1.15, 1)))
     lines = pdf_text_lines(text, width - 2.0, size, max_lines=max_lines)
@@ -1986,10 +1983,8 @@ def render_route_map(wps: List[Dict[str, Any]], nodes: List[Dict[str, Any]], leg
         folium.CircleMarker((lat, lon), radius=6, color="#fff", weight=3, fill=True, fill_opacity=1).add_to(m)
         folium.CircleMarker((lat, lon), radius=5, color=color, fill=True, fill_opacity=1, tooltip=f"{idx}. {point.get('code') or point.get('name')} [{src}]").add_to(m)
         label = point.get("navlog_note") or point.get("code") or point.get("name")
-        label_html = str(label).replace("
-", "<br><span style='font-size:10px;font-weight:700'>")
-        extra_close = "</span>" if "
-" in str(label) else ""
+        label_html = str(label).replace(chr(10), "<br><span style='font-size:10px;font-weight:700'>")
+        extra_close = "</span>" if chr(10) in str(label) else ""
         label_color = "#be123c" if clean_code(point.get("code")) == "TOD" else "#0f172a"
         add_div_marker(m, lat, lon, f"<div style='transform:translate(8px,-22px);font-weight:800;font-size:12px;color:{label_color};text-shadow:-1px -1px 0 white,1px -1px 0 white,-1px 1px 0 white,1px 1px 0 white;white-space:nowrap'>{idx}. {label_html}{extra_close}</div>")
     folium.LayerControl(collapsed=False).add_to(m)
