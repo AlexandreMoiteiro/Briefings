@@ -1,12 +1,16 @@
 # app.py
 # ---------------------------------------------------------------
 # NAVLOG Portugal — VFR + IFR Low — Streamlit
-# Versão completa com:
-#   - SIDs, STARs e Approaches vindas de procedures_lpso.json
-#   - Pontos locais do JSON pesquisáveis: PORCA, TRAMA, SALTE, MENDA, etc.
-#   - Correção lógica de procedimentos que intercetam radial e seguem inbound ao VOR
-#   - VOR fixes, DME arcs, airways, PDF NAVLOG e mapa folium/openAIP
-# ---------------------------------------------------------------
+# Versão completa em ficheiro único.
+#
+# Inclui:
+#   - Rota por texto, pesquisa e clique no mapa
+#   - Pontos CSV + pontos definidos em procedures_lpso.json
+#   - SIDs, STARs e APPROACHES externos via JSON
+#   - Correção de lógica: intercetar radial e depois seguir inbound/outbound
+#   - Fixes VOR radial/DME, DME arcs e viragens rate-one
+#   - Folium/openAIP, airways, navlog, combustível e CSV
+#
 # Ficheiros esperados na raiz do repositório:
 #   AD-HEL-ULM.csv
 #   Localidades-Nova-versao-230223.csv
@@ -14,13 +18,13 @@
 #   IFR_POINTS.csv
 #   IFR_AIRWAYS.csv
 #   procedures_lpso.json
-#   NAVLOG_FORM.pdf
-#   NAVLOG_FORM_1.pdf   opcional
+#   NAVLOG_FORM.pdf       opcional
+#   NAVLOG_FORM_1.pdf     opcional
 #
 # Secrets Streamlit:
-#   OPENAIP_API_KEY     opcional, usado automaticamente no mapa
-#   GITHUB_TOKEN        opcional, para rotas padrão em Gist
-#   ROUTES_GIST_ID      opcional, para rotas padrão em Gist
+#   OPENAIP_API_KEY       opcional
+#   GITHUB_TOKEN          opcional
+#   ROUTES_GIST_ID        opcional
 # ---------------------------------------------------------------
 
 from __future__ import annotations
@@ -40,13 +44,17 @@ import folium
 import pandas as pd
 import streamlit as st
 from folium.plugins import Fullscreen, MarkerCluster, MeasureControl
-from pdfrw import PageMerge, PdfDict, PdfName, PdfReader, PdfWriter
 from streamlit_folium import st_folium
 
 try:
     import requests
 except Exception:
     requests = None
+
+try:
+    from pdfrw import PageMerge, PdfDict, PdfName, PdfReader, PdfWriter
+except Exception:
+    PageMerge = PdfDict = PdfName = PdfReader = PdfWriter = None
 
 # ===============================================================
 # CONFIG
@@ -140,7 +148,7 @@ class Point:
     stop_min: float = 0.0
     wind_from: Optional[int] = None
     wind_kt: Optional[int] = None
-    vor_pref: str = "AUTO"  # AUTO | FIXED | NONE
+    vor_pref: str = "AUTO"
     vor_ident: str = ""
     arc_vor: str = ""
     arc_radius_nm: float = 0.0
@@ -322,7 +330,7 @@ def apply_mag_var(true_heading: float, mag_var: float, is_east: bool) -> float:
 @st.cache_data(show_spinner=False)
 def load_csv_safe(path: Path) -> pd.DataFrame:
     if not path.exists():
-        st.error(f"CSV obrigatório em falta: {path.name}")
+        st.warning(f"CSV em falta: {path.name}")
         return pd.DataFrame()
     try:
         return pd.read_csv(path)
@@ -387,7 +395,7 @@ def parse_loc_df(df: pd.DataFrame) -> pd.DataFrame:
 def load_vor(path_str: str) -> pd.DataFrame:
     path = Path(path_str)
     if not path.exists():
-        st.error(f"CSV obrigatório em falta: {path.name}")
+        st.warning(f"CSV em falta: {path.name}")
         return pd.DataFrame(columns=["ident", "name", "freq_mhz", "lat", "lon"])
     df = pd.read_csv(path)
     df = df.rename(columns={c: c.lower().strip() for c in df.columns})
@@ -610,12 +618,7 @@ def make_dme_arc_points(vor_ident: str, radius_nm: float, start_radial: float, e
 
 
 def is_dme_arc_leg(A: Dict[str, Any], B: Dict[str, Any]) -> bool:
-    return (
-        A.get("src") == "DMEARC"
-        and B.get("src") == "DMEARC"
-        and A.get("arc_vor") == B.get("arc_vor")
-        and float(A.get("arc_radius_nm") or 0) > 0
-    )
+    return A.get("src") == "DMEARC" and B.get("src") == "DMEARC" and A.get("arc_vor") == B.get("arc_vor") and float(A.get("arc_radius_nm") or 0) > 0
 
 
 def dme_arc_sweep_deg(A: Dict[str, Any], B: Dict[str, Any]) -> float:
@@ -642,12 +645,7 @@ def dme_arc_polyline(A: Dict[str, Any], B: Dict[str, Any], step_deg: float = 2.0
     vor = get_vor(str(A.get("arc_vor") or B.get("arc_vor") or ""))
     if not vor:
         return [(A["lat"], A["lon"]), (B["lat"], B["lon"])]
-    radials = arc_radials(
-        float(A.get("arc_start_radial") or B.get("arc_start_radial") or 0),
-        float(A.get("arc_end_radial") or B.get("arc_end_radial") or 0),
-        str(A.get("arc_direction") or B.get("arc_direction") or "CW"),
-        step_deg,
-    )
+    radials = arc_radials(float(A.get("arc_start_radial") or B.get("arc_start_radial") or 0), float(A.get("arc_end_radial") or B.get("arc_end_radial") or 0), str(A.get("arc_direction") or B.get("arc_direction") or "CW"), step_deg)
     radius = float(A.get("arc_radius_nm") or B.get("arc_radius_nm") or 0)
     return [dest_point(vor["lat"], vor["lon"], radial, radius) for radial in radials]
 
@@ -760,7 +758,7 @@ def rate_one_radius_nm(gs_kt: float, rate_deg_sec: float = 3.0) -> float:
     return (max(float(gs_kt), 1.0) / 3600.0) / omega
 
 # ===============================================================
-# PROCEDURE FILE + POINT CATALOG
+# PROCEDURES JSON POINT CATALOG
 # ===============================================================
 @st.cache_data(show_spinner=False)
 def load_procedures_file(path_str: str) -> Dict[str, Any]:
@@ -768,8 +766,7 @@ def load_procedures_file(path_str: str) -> Dict[str, Any]:
     if not path.exists():
         return {"procedures": []}
     try:
-        with open(path, "r", encoding="utf-8") as file:
-            return json.load(file)
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         st.error(f"Erro ao ler {path.name}: {exc}")
         return {"procedures": []}
@@ -789,12 +786,12 @@ def load_procedure_point_catalog(path_str: str) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
 
     def add_point(code: str, name: str, lat: float, lon: float, alt: float, proc_id: str, remarks: str = "") -> None:
-        c = clean_code(code or name)
-        if not c:
+        code = clean_code(code or name)
+        if not code:
             return
         rows.append({
-            "code": c,
-            "name": name or c,
+            "code": code,
+            "name": name or code,
             "lat": float(lat),
             "lon": float(lon),
             "alt": float(alt or 0),
@@ -810,25 +807,21 @@ def load_procedure_point_catalog(path_str: str) -> pd.DataFrame:
             code = clean_code(seg.get("point") or seg.get("code") or seg.get("name") or "")
             name = str(seg.get("name") or seg.get("note") or seg.get("point") or seg.get("code") or code)
             alt = float(seg.get("alt", 0) or 0)
-
             if "lat" in seg and "lon" in seg:
                 add_point(code, name, float(seg["lat"]), float(seg["lon"]), alt, proc_id, "from procedures JSON")
                 continue
-
             if typ in {"vor_radial_dme", "radial_to_dme"} and seg.get("vor") and seg.get("radial") is not None and seg.get("dme") is not None:
                 vor = get_vor(str(seg["vor"]))
                 if vor:
-                    radial = float(seg["radial"])
-                    dme = float(seg["dme"])
-                    lat, lon = dest_point(vor["lat"], vor["lon"], radial, dme)
+                    lat, lon = dest_point(vor["lat"], vor["lon"], float(seg["radial"]), float(seg["dme"]))
                     add_point(
-                        code or f"{vor['ident']}R{int(radial):03d}D{dme:g}",
+                        code or f"{vor['ident']}R{int(float(seg['radial'])):03d}D{float(seg['dme']):g}",
                         name,
                         lat,
                         lon,
                         alt,
                         proc_id,
-                        f"{vor['ident']} R{int(radial):03d} D{dme:g}",
+                        f"{vor['ident']} R{int(float(seg['radial'])):03d} D{float(seg['dme']):g}",
                     )
 
     if not rows:
@@ -844,11 +837,7 @@ def point_catalog() -> pd.DataFrame:
     proc_points = load_procedure_point_catalog(str(PROC_FILE))
     if proc_points.empty:
         return POINTS_DF
-    return (
-        pd.concat([POINTS_DF, proc_points], ignore_index=True)
-        .drop_duplicates(subset=["code", "lat", "lon", "src"])
-        .reset_index(drop=True)
-    )
+    return pd.concat([POINTS_DF, proc_points], ignore_index=True).drop_duplicates(subset=["code", "lat", "lon", "src"]).reset_index(drop=True)
 
 # ===============================================================
 # POINT LOOKUP / ROUTE PARSER
@@ -868,7 +857,7 @@ def df_row_to_point(row: pd.Series, alt: float = 0.0) -> Point:
         name=str(row.get("name") or row.get("code")),
         lat=float(row["lat"]),
         lon=float(row["lon"]),
-        alt=float(alt if alt is not None else row.get("alt", 0.0)),
+        alt=float(alt if alt else row.get("alt", 0) or 0),
         src=str(row.get("src") or "DB"),
         routes=str(row.get("routes") or ""),
         remarks=str(row.get("remarks") or ""),
@@ -1013,7 +1002,7 @@ def parse_route_text(text: str, default_alt: float) -> Tuple[List[Point], List[s
     return output, notes
 
 # ===============================================================
-# EXTERNAL PROCEDURE ENGINE
+# PROCEDURE ENGINE
 # ===============================================================
 def available_procedures(kind: Optional[str] = None) -> List[Dict[str, Any]]:
     data = load_procedures_file(str(PROC_FILE))
@@ -1023,18 +1012,7 @@ def available_procedures(kind: Optional[str] = None) -> List[Dict[str, Any]]:
     return procedures
 
 
-def make_proc_point(
-    code: str,
-    name: str,
-    lat: float,
-    lon: float,
-    alt: float,
-    *,
-    src: str = "PROC",
-    note: str = "",
-    remarks: str = "",
-    extra: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+def make_proc_point(code: str, name: str, lat: float, lon: float, alt: float, *, src: str = "PROC", note: str = "", remarks: str = "", extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     point = Point(code=clean_code(code) or "PROC", name=name or code or "PROC", lat=float(lat), lon=float(lon), alt=float(alt), src=src, remarks=remarks, uid=next_uid()).to_dict()
     point["navlog_note"] = note or name or code
     point["no_auto_vnav"] = True
@@ -1046,21 +1024,8 @@ def make_proc_point(
 def proc_static_point(segment: Dict[str, Any], previous: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     code = clean_code(segment.get("point") or segment.get("code"))
     alt = float(segment.get("alt", proc_default_alt()))
-
-    # Coordenadas explícitas no JSON têm prioridade.
-    # Isto resolve pontos locais como PORCA, TRAMA, MENDA/SALTE se forem definidos no JSON.
     if "lat" in segment and "lon" in segment:
-        return make_proc_point(
-            code,
-            segment.get("name") or segment.get("note") or code,
-            float(segment["lat"]),
-            float(segment["lon"]),
-            alt,
-            src="PROC",
-            note=segment.get("note") or code,
-            remarks=segment.get("remarks", "from procedures JSON"),
-        )
-
+        return make_proc_point(code, segment.get("name") or segment.get("note") or code, float(segment["lat"]), float(segment["lon"]), alt, src="PROC", note=segment.get("note") or code, remarks=segment.get("remarks", "from procedures JSON"))
     point = db_point(code, alt=alt, src_priority=["IFR", "VOR", "PROC", "AD", "VFR"])
     if point:
         d = point.to_dict()
@@ -1068,7 +1033,6 @@ def proc_static_point(segment: Dict[str, Any], previous: Optional[Dict[str, Any]
         d["navlog_note"] = segment.get("note") or code
         d["no_auto_vnav"] = True
         return d
-
     raise ValueError(f"Ponto {code} não está nos CSV nem tem lat/lon no JSON.")
 
 
@@ -1080,16 +1044,7 @@ def proc_vor_radial_dme(segment: Dict[str, Any]) -> Dict[str, Any]:
     dme = float(segment["dme"])
     lat, lon = dest_point(vor["lat"], vor["lon"], radial, dme)
     note = segment.get("note") or f"{vor['ident']} R{int(radial):03d} D{dme:g}"
-    return make_proc_point(
-        segment.get("code") or note.replace(" ", ""),
-        segment.get("name") or note,
-        lat,
-        lon,
-        float(segment.get("alt", proc_default_alt())),
-        note=note,
-        remarks=f"{format_vor_id(vor)} R{int(radial):03d} D{dme:g}",
-        extra={"vor_pref": "FIXED", "vor_ident": vor["ident"]},
-    )
+    return make_proc_point(segment.get("code") or note.replace(" ", ""), segment.get("name") or note, lat, lon, float(segment.get("alt", proc_default_alt())), note=note, remarks=f"{format_vor_id(vor)} R{int(radial):03d} D{dme:g}", extra={"vor_pref": "FIXED", "vor_ident": vor["ident"]})
 
 
 def proc_runway_track_until_alt(segment: Dict[str, Any], previous: Dict[str, Any]) -> Dict[str, Any]:
@@ -1103,16 +1058,7 @@ def proc_runway_track_until_alt(segment: Dict[str, Any], previous: Dict[str, Any
     dist_nm = max(0.05, gs * minutes / 60.0)
     lat, lon = dest_point(float(previous["lat"]), float(previous["lon"]), track, dist_nm)
     note = segment.get("note") or f"{int(target_alt)} TURN {segment.get('turn_arrow', '')} TRK{int(segment.get('next_track', track)):03d}".strip()
-    return make_proc_point(
-        segment.get("code") or note.replace(" ", ""),
-        note,
-        lat,
-        lon,
-        target_alt,
-        src="PROC_DYNAMIC",
-        note=note,
-        remarks=f"Performance ROC {float(st.session_state.roc_fpm):.0f} fpm, GS climb {gs:.0f} kt, dist {dist_nm:.2f} NM",
-    )
+    return make_proc_point(segment.get("code") or note.replace(" ", ""), note, lat, lon, target_alt, src="PROC_DYNAMIC", note=note, remarks=f"ROC {float(st.session_state.roc_fpm):.0f} fpm, GS climb {gs:.0f} kt, dist {dist_nm:.2f} NM")
 
 
 def proc_track_to_intercept_radial(segment: Dict[str, Any], previous: Dict[str, Any]) -> Dict[str, Any]:
@@ -1120,17 +1066,7 @@ def proc_track_to_intercept_radial(segment: Dict[str, Any], previous: Dict[str, 
     radial = float(segment["radial"])
     lat, lon, ok = track_intercept_radial(float(previous["lat"]), float(previous["lon"]), track, str(segment["vor"]), radial, float(segment.get("fallback_nm", 20.0)))
     note = segment.get("note") or f"INT {segment['vor']} R{int(radial):03d}"
-    return make_proc_point(
-        segment.get("code") or note.replace(" ", ""),
-        note,
-        lat,
-        lon,
-        float(segment.get("alt", previous.get("alt", proc_default_alt()))),
-        src="PROC_DYNAMIC",
-        note=note,
-        remarks="Dynamic radial intercept" if ok else "Fallback point, no forward radial intercept",
-        extra={"vor_pref": "FIXED", "vor_ident": clean_code(segment["vor"]), "leg_instruction": note},
-    )
+    return make_proc_point(segment.get("code") or note.replace(" ", ""), note, lat, lon, float(segment.get("alt", previous.get("alt", proc_default_alt()))), src="PROC_DYNAMIC", note=note, remarks="Dynamic radial intercept" if ok else "Fallback point, no forward radial intercept", extra={"vor_pref": "FIXED", "vor_ident": clean_code(segment["vor"])})
 
 
 def proc_track_to_intercept_dme(segment: Dict[str, Any], previous: Dict[str, Any]) -> Dict[str, Any]:
@@ -1138,17 +1074,7 @@ def proc_track_to_intercept_dme(segment: Dict[str, Any], previous: Dict[str, Any
     dme = float(segment["dme"])
     lat, lon, ok = track_intercept_dme(float(previous["lat"]), float(previous["lon"]), track, str(segment["vor"]), dme, str(segment.get("choose", "first")), float(segment.get("fallback_nm", 20.0)))
     note = segment.get("note") or f"{segment['vor']} D{dme:g}"
-    return make_proc_point(
-        segment.get("code") or note.replace(" ", ""),
-        note,
-        lat,
-        lon,
-        float(segment.get("alt", previous.get("alt", proc_default_alt()))),
-        src="PROC_DYNAMIC",
-        note=note,
-        remarks="Dynamic DME intercept" if ok else "Fallback point, no forward DME intercept",
-        extra={"vor_pref": "FIXED", "vor_ident": clean_code(segment["vor"]), "leg_instruction": note},
-    )
+    return make_proc_point(segment.get("code") or note.replace(" ", ""), note, lat, lon, float(segment.get("alt", previous.get("alt", proc_default_alt()))), src="PROC_DYNAMIC", note=note, remarks="Dynamic DME intercept" if ok else "Fallback point, no forward DME intercept", extra={"vor_pref": "FIXED", "vor_ident": clean_code(segment["vor"])})
 
 
 def proc_dme_arc(segment: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1174,40 +1100,19 @@ def proc_rate_one_turn(segment: Dict[str, Any], previous: Dict[str, Any]) -> Dic
     end_radial = wrap360(end_track + 90 if direction == "LEFT" else end_track - 90)
     end_lat, end_lon = dest_point(center_lat, center_lon, end_radial, radius)
     note = segment.get("note") or f"RATE 1 {'←' if direction == 'LEFT' else '→'} TRK{int(end_track):03d}"
-    return make_proc_point(
-        segment.get("code") or note.replace(" ", ""),
-        note,
-        end_lat,
-        end_lon,
-        float(segment.get("alt", previous.get("alt", proc_default_alt()))),
-        src="TURN",
-        note=note,
-        remarks=f"Rate one turn GS {gs:.0f} kt radius {radius:.2f} NM",
-        extra={
-            "turn_center_lat": center_lat,
-            "turn_center_lon": center_lon,
-            "turn_radius_nm": radius,
-            "turn_start_course": start_track,
-            "turn_end_course": end_track,
-            "turn_direction": direction,
-            "leg_instruction": note,
-        },
-    )
+    return make_proc_point(segment.get("code") or note.replace(" ", ""), note, end_lat, end_lon, float(segment.get("alt", previous.get("alt", proc_default_alt()))), src="TURN", note=note, remarks=f"Rate one turn GS {gs:.0f} kt radius {radius:.2f} NM", extra={"turn_center_lat": center_lat, "turn_center_lon": center_lon, "turn_radius_nm": radius, "turn_start_course": start_track, "turn_end_course": end_track, "turn_direction": direction})
 
 
 def build_procedure_points(proc_id: str, proc_instance_id: Optional[str] = None) -> List[Dict[str, Any]]:
     procedure = next((p for p in available_procedures() if p.get("id") == proc_id), None)
     if not procedure:
         raise ValueError(f"Procedimento {proc_id} não encontrado em {PROC_FILE.name}.")
-
     instance_id = proc_instance_id or f"{clean_code(proc_id)}-{next_uid()}"
     output: List[Dict[str, Any]] = []
-
     for segment_index, segment in enumerate(procedure.get("segments", [])):
         typ = str(segment.get("type", "")).lower()
         previous = output[-1] if output else None
         before_len = len(output)
-
         if typ == "static_point":
             output.append(proc_static_point(segment, previous))
         elif typ in {"vor_radial_dme", "radial_to_dme"}:
@@ -1232,13 +1137,11 @@ def build_procedure_points(proc_id: str, proc_instance_id: Optional[str] = None)
             output.append(proc_rate_one_turn(segment, previous))
         else:
             raise ValueError(f"Tipo de segmento desconhecido: {typ}")
-
         for point in output[before_len:]:
             point["proc_id"] = proc_id
             point["proc_instance_id"] = instance_id
             point["proc_segment_index"] = segment_index
             point["proc_generated"] = True
-
     for order, point in enumerate(output):
         point["proc_id"] = proc_id
         point["proc_instance_id"] = instance_id
@@ -1258,12 +1161,10 @@ def refresh_procedure_waypoints(wps: List[Dict[str, Any]]) -> List[Dict[str, Any
             refreshed.append(point)
             i += 1
             continue
-
         block_start = i
         while i < len(wps) and wps[i].get("proc_instance_id") == instance_id:
             i += 1
         old_block = wps[block_start:i]
-
         try:
             refreshed.extend(build_procedure_points(str(proc_id), proc_instance_id=str(instance_id)))
         except Exception as exc:
@@ -1505,7 +1406,7 @@ def save_routes_to_gist(routes: Dict[str, Any]) -> Tuple[bool, str]:
         return False, str(exc)
 
 # ===============================================================
-# PDF
+# PDF HELPERS — versão segura: só ativa se pdfrw/reportlab existirem
 # ===============================================================
 def pdf_key_norm(s: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(s).upper())
@@ -1539,48 +1440,9 @@ def expand_pdf_aliases(data: Dict[str, Any]) -> Dict[str, Any]:
     return output
 
 
-def pdf_page_size(page: Any) -> Tuple[float, float]:
-    media_box = page.MediaBox
-    return float(media_box[2]) - float(media_box[0]), float(media_box[3]) - float(media_box[1])
-
-
-def stamp_text_center(canvas_obj: Any, x: float, y: float, text: str, size: float = 6.2) -> None:
-    if text:
-        canvas_obj.setFont("Helvetica-Bold", size)
-        canvas_obj.drawCentredString(x, y, str(text))
-
-
-def stamp_non_field_navlog_headers(pdf: Any, data: Dict[str, Any], template: Path) -> None:
-    try:
-        from reportlab.pdfgen import canvas
-    except Exception:
-        return
-    values = {
-        "fl_alt": str(data.get("FLIGHT_LEVEL_ALTITUDE", "")),
-        "wind": str(data.get("WIND", "")),
-        "mag_var": str(data.get("MAG_VAR", "")),
-        "temp_isa": str(data.get("TEMP_ISA_DEV", "")),
-    }
-    if not any(values.values()):
-        return
-    for page_index, page in enumerate(pdf.pages):
-        page_width, page_height = pdf_page_size(page)
-        is_cont = page_index > 0 or "_1" in template.stem
-        ox = page_width / 2 if page_width > 650 and is_cont else 0
-        cw = min(421, page_width - ox)
-        y = 504 if is_cont else 367
-        packet = io.BytesIO()
-        c = canvas.Canvas(packet, pagesize=(page_width, page_height))
-        stamp_text_center(c, ox + cw * 0.345, y, values["fl_alt"])
-        stamp_text_center(c, ox + cw * 0.572, y, values["wind"])
-        stamp_text_center(c, ox + cw * 0.766, y, values["mag_var"])
-        stamp_text_center(c, ox + cw * 0.925, y, values["temp_isa"])
-        c.save()
-        packet.seek(0)
-        PageMerge(page).add(PdfReader(packet).pages[0]).render()
-
-
 def fill_pdf(template: Path, output_path: Path, data: Dict[str, Any]) -> Path:
+    if PdfReader is None or PdfWriter is None or PdfDict is None or PdfName is None:
+        raise RuntimeError("pdfrw não está instalado.")
     data = expand_pdf_aliases(data)
     pdf = PdfReader(str(template))
     if pdf.Root.AcroForm:
@@ -1597,7 +1459,6 @@ def fill_pdf(template: Path, output_path: Path, data: Dict[str, Any]) -> Path:
                     annot.update(PdfDict(V=str(value), DV=str(value)))
                     if small_re.search(key):
                         annot.update(PdfDict(DA="/Helv 4.5 Tf 0 g"))
-    stamp_non_field_navlog_headers(pdf, data, template)
     PdfWriter(str(output_path), trailer=pdf).write()
     return output_path
 
@@ -1756,8 +1617,7 @@ def html_pills(items: Iterable[Tuple[str, str]]) -> None:
 # MAP
 # ===============================================================
 def map_start_center() -> Tuple[float, float]:
-    catalog = point_catalog()
-    hit = catalog[catalog["code"].astype(str).str.upper() == "LPSO"] if not catalog.empty else pd.DataFrame()
+    hit = point_catalog()[point_catalog()["code"].astype(str).str.upper() == "LPSO"] if not point_catalog().empty else pd.DataFrame()
     if not hit.empty:
         return float(hit.iloc[0]["lat"]), float(hit.iloc[0]["lon"])
     return LPSO_FALLBACK_CENTER
@@ -1800,15 +1660,7 @@ def render_route_map(wps: List[Dict[str, Any]], nodes: List[Dict[str, Any]], leg
         for _, r in ref.iterrows():
             src = str(r.get("src"))
             color = {"IFR": "#2563eb", "VOR": "#dc2626", "AD": "#111827", "VFR": "#16a34a", "PROC": "#9333ea"}.get(src, "#334155")
-            folium.CircleMarker(
-                (float(r["lat"]), float(r["lon"])),
-                radius=4 if src in {"IFR", "VOR", "PROC"} else 3,
-                color=color,
-                weight=1,
-                fill=True,
-                fill_opacity=0.9,
-                tooltip=f"[{src}] {r.get('code')} — {r.get('name')} {r.get('routes', '')}",
-            ).add_to(cluster)
+            folium.CircleMarker((float(r["lat"]), float(r["lon"])), radius=4 if src in {"IFR", "VOR", "PROC"} else 3, color=color, weight=1, fill=True, fill_opacity=0.9, tooltip=f"[{src}] {r.get('code')} — {r.get('name')} {r.get('routes', '')}").add_to(cluster)
     if bool(st.session_state.show_airways) and not AIRWAYS_DF.empty:
         for airway, grp in AIRWAYS_DF.groupby("airway"):
             pts = [(float(r["lat"]), float(r["lon"])) for _, r in grp.sort_values("seq").iterrows()]
@@ -1829,27 +1681,11 @@ def render_route_map(wps: List[Dict[str, Any]], nodes: List[Dict[str, Any]], leg
     for idx, point in enumerate(wps, start=1):
         lat, lon = float(point["lat"]), float(point["lon"])
         src = point.get("src", "USER")
-        color = {
-            "IFR": "#2563eb",
-            "VOR": "#dc2626",
-            "AD": "#111827",
-            "VFR": "#16a34a",
-            "USER": "#f97316",
-            "VORFIX": "#be123c",
-            "DMEARC": "#0891b2",
-            "PROC": "#9333ea",
-            "PROC_DYNAMIC": "#9333ea",
-            "TURN": "#9333ea",
-        }.get(src, "#0f172a")
+        color = {"IFR": "#2563eb", "VOR": "#dc2626", "AD": "#111827", "VFR": "#16a34a", "USER": "#f97316", "VORFIX": "#be123c", "DMEARC": "#0891b2", "PROC": "#9333ea", "PROC_DYNAMIC": "#9333ea", "TURN": "#9333ea"}.get(src, "#0f172a")
         folium.CircleMarker((lat, lon), radius=6, color="#fff", weight=3, fill=True, fill_opacity=1).add_to(m)
         folium.CircleMarker((lat, lon), radius=5, color=color, fill=True, fill_opacity=1, tooltip=f"{idx}. {point.get('code') or point.get('name')} [{src}]").add_to(m)
         label = point.get("navlog_note") or point.get("code") or point.get("name")
-        add_div_marker(
-            m,
-            lat,
-            lon,
-            f"<div style='transform:translate(8px,-22px);font-weight:800;font-size:12px;color:#0f172a;text-shadow:-1px -1px 0 white,1px -1px 0 white,-1px 1px 0 white,1px 1px 0 white;white-space:nowrap'>{idx}. {label}</div>",
-        )
+        add_div_marker(m, lat, lon, f"<div style='transform:translate(8px,-22px);font-weight:800;font-size:12px;color:#0f172a;text-shadow:-1px -1px 0 white,1px -1px 0 white,-1px 1px 0 white,1px 1px 0 white;white-space:nowrap'>{idx}. {label}</div>")
     folium.LayerControl(collapsed=False).add_to(m)
     return st_folium(m, width=None, height=720, key=key)
 
@@ -1889,10 +1725,7 @@ ensure_point_ids()
 # ===============================================================
 # UI HEADER
 # ===============================================================
-st.markdown(
-    f"<div class='nav-hero'><div class='nav-title'>🧭 {APP_TITLE}</div><div class='nav-sub'>VFR/IFR low offline, airways, VOR fixes, DME arcs, SIDs, STARs e approaches por JSON.</div></div>",
-    unsafe_allow_html=True,
-)
+st.markdown(f"<div class='nav-hero'><div class='nav-title'>🧭 {APP_TITLE}</div><div class='nav-sub'>VFR/IFR low offline, airways, VOR fixes, DME arcs e procedimentos externos por JSON.</div></div>", unsafe_allow_html=True)
 
 if st.session_state.legs:
     sm = summary_metrics(st.session_state.legs)
@@ -1904,10 +1737,10 @@ if st.session_state.legs:
         (f"{sm['legs']} legs", ""),
     ])
 else:
-    cat = point_catalog()
+    catalog = point_catalog()
     html_pills([
-        (f"{len(cat[cat.src == 'IFR']) if 'src' in cat.columns else 0} IFR pts", ""),
-        (f"{len(cat[cat.src == 'PROC']) if 'src' in cat.columns else 0} PROC pts", ""),
+        (f"{len(catalog[catalog.src == 'IFR']) if 'src' in catalog.columns else 0} IFR pts", ""),
+        (f"{len(catalog[catalog.src == 'PROC']) if 'src' in catalog.columns else 0} PROC pts", ""),
         (f"{len(AIRWAYS_DF.airway.unique()) if not AIRWAYS_DF.empty else 0} airways", ""),
         (f"{len(VOR_DF)} VOR", ""),
         ("procedures_lpso.json OK" if PROC_FILE.exists() else "procedures_lpso.json em falta", "pill-good" if PROC_FILE.exists() else "pill-warn"),
@@ -1962,26 +1795,23 @@ with setup_d:
 
 
 def calculation_signature() -> str:
-    return json.dumps(
-        {
-            "aircraft_type": st.session_state.aircraft_type,
-            "climb_tas": float(st.session_state.climb_tas),
-            "cruise_tas": float(st.session_state.cruise_tas),
-            "descent_tas": float(st.session_state.descent_tas),
-            "fuel_flow_lh": float(st.session_state.fuel_flow_lh),
-            "taxi_fuel_l": float(st.session_state.taxi_fuel_l),
-            "roc_fpm": int(st.session_state.roc_fpm),
-            "rod_fpm": int(st.session_state.rod_fpm),
-            "wind_from": int(st.session_state.wind_from),
-            "wind_kt": int(st.session_state.wind_kt),
-            "use_global_wind": bool(st.session_state.use_global_wind),
-            "mag_var": float(st.session_state.mag_var),
-            "mag_is_east": bool(st.session_state.mag_is_east),
-            "start_efob": float(st.session_state.start_efob),
-            "start_clock": str(st.session_state.start_clock),
-        },
-        sort_keys=True,
-    )
+    return json.dumps({
+        "aircraft_type": st.session_state.aircraft_type,
+        "climb_tas": float(st.session_state.climb_tas),
+        "cruise_tas": float(st.session_state.cruise_tas),
+        "descent_tas": float(st.session_state.descent_tas),
+        "fuel_flow_lh": float(st.session_state.fuel_flow_lh),
+        "taxi_fuel_l": float(st.session_state.taxi_fuel_l),
+        "roc_fpm": int(st.session_state.roc_fpm),
+        "rod_fpm": int(st.session_state.rod_fpm),
+        "wind_from": int(st.session_state.wind_from),
+        "wind_kt": int(st.session_state.wind_kt),
+        "use_global_wind": bool(st.session_state.use_global_wind),
+        "mag_var": float(st.session_state.mag_var),
+        "mag_is_east": bool(st.session_state.mag_is_east),
+        "start_efob": float(st.session_state.start_efob),
+        "start_clock": str(st.session_state.start_clock),
+    }, sort_keys=True)
 
 
 _current_calc_sig = calculation_signature()
@@ -2298,20 +2128,20 @@ with tab_navlog:
         if st.button("Gerar PDF NAVLOG", type="primary", use_container_width=True):
             if not TEMPLATE_MAIN.exists():
                 st.error("NAVLOG_FORM.pdf não encontrado.")
+            elif PdfReader is None:
+                st.error("pdfrw não está instalado. Instala com: pip install pdfrw")
             else:
-                payload = build_pdf_payload(st.session_state.legs, header, 0, 22)
-                out = fill_pdf(TEMPLATE_MAIN, OUTPUT_MAIN, payload)
-                with open(out, "rb") as file:
-                    st.download_button("⬇️ NAVLOG principal", file.read(), file_name="NAVLOG_FILLED.pdf", mime="application/pdf", use_container_width=True)
-                if len(st.session_state.legs) > 22 and TEMPLATE_CONT.exists():
-                    payload2 = build_pdf_payload(st.session_state.legs, header, 22, 11)
-                    out2 = fill_pdf(TEMPLATE_CONT, OUTPUT_CONT, payload2)
-                    with open(out2, "rb") as file:
-                        st.download_button("⬇️ NAVLOG continuação", file.read(), file_name="NAVLOG_FILLED_1.pdf", mime="application/pdf", use_container_width=True)
+                try:
+                    payload = build_pdf_payload(st.session_state.legs, header, 0, 22)
+                    out = fill_pdf(TEMPLATE_MAIN, OUTPUT_MAIN, payload)
+                    with open(out, "rb") as file:
+                        st.download_button("⬇️ NAVLOG principal", file.read(), file_name="NAVLOG_FILLED.pdf", mime="application/pdf", use_container_width=True)
+                    if len(st.session_state.legs) > 22 and TEMPLATE_CONT.exists():
+                        payload2 = build_pdf_payload(st.session_state.legs, header, 22, 11)
+                        out2 = fill_pdf(TEMPLATE_CONT, OUTPUT_CONT, payload2)
+                        with open(out2, "rb") as file:
+                            st.download_button("⬇️ NAVLOG continuação", file.read(), file_name="NAVLOG_FILLED_1.pdf", mime="application/pdf", use_container_width=True)
+                except Exception as exc:
+                    st.error(f"Erro ao gerar PDF: {exc}")
 
-st.markdown(
-    "<hr><div class='small-muted'>Ferramenta de planeamento. Confirma sempre cartas, NOTAM, AIP/AIRAC, meteorologia, mínimos, autorizações ATC e performance real.</div>",
-    unsafe_allow_html=True,
-)
-
-
+st.markdown("<hr><div class='small-muted'>Ferramenta de planeamento. Confirma sempre cartas, NOTAM, AIP/AIRAC, meteorologia, mínimos, autorizações ATC e performance real.</div>", unsafe_allow_html=True)
