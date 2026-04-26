@@ -68,6 +68,7 @@ OUTPUT_MAIN = ROOT / "NAVLOG_FILLED.pdf"
 OUTPUT_CONT = ROOT / "NAVLOG_FILLED_1.pdf"
 
 EARTH_NM = 3440.065
+LITERS_PER_USG = 3.785411784
 LPSO_FALLBACK_CENTER = (39.2119, -8.0569)
 PT_BOUNDS = [(36.70, -9.85), (42.25, -6.00)]
 PROCEDURE_KINDS_ALLOWED = {"SID", "STAR"}
@@ -217,6 +218,14 @@ def fmt_num_clean(x: float, decimals: int = 1) -> str:
     if abs(value - round(value)) < 1e-9:
         return str(int(round(value)))
     return f"{value:.{decimals}f}"
+
+
+def liters_to_usg(liters: float) -> float:
+    return float(liters) / LITERS_PER_USG
+
+
+def fmt_fuel_l_usg(liters: float, decimals_usg: int = 1) -> str:
+    return f"{fmt_unit(liters)} L ({fmt_num_clean(liters_to_usg(liters), decimals_usg)} USG)"
 
 
 def mmss(sec: float) -> str:
@@ -442,6 +451,8 @@ def load_all_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
                 ifr[col] = "IFR" if col == "src" else ""
         if "alt" not in ifr.columns:
             ifr["alt"] = 0.0
+        # Normaliza todos os pontos carregados deste CSV como IFR.
+        ifr["src"] = "IFR"
         ifr["code"] = ifr["code"].astype(str).str.upper().str.strip()
         ifr["name"] = ifr["name"].fillna(ifr["code"]).astype(str)
         ifr["lat"] = pd.to_numeric(ifr["lat"], errors="coerce")
@@ -1807,8 +1818,8 @@ def fill_leg_payload(data: Dict[str, Any], idx: int, leg: Dict[str, Any], acc_d:
     data[f"{prefix}{idx:02d}_Leg_ETE"] = fmt_with_plus(pdf_time(leg["time_sec"]), pdf_time(leg_hold_sec(leg)), has_hold)
     data[f"{prefix}{idx:02d}_Cumulative_ETE"] = pdf_time(acc_t)
     data[f"{prefix}{idx:02d}_ETO"] = ""
-    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_with_plus(fmt_unit(leg["burn"]), fmt_unit(leg_hold_burn(leg)), has_hold)
-    data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_unit(leg["efob_end"])
+    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_with_plus(fmt_fuel_l_usg(leg["burn"]), fmt_fuel_l_usg(leg_hold_burn(leg)), has_hold)
+    data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_fuel_l_usg(leg["efob_end"])
     vor = choose_vor_for_point(point)
     data[f"{prefix}{idx:02d}_Navaid_Identifier"] = format_vor_id(vor)
     data[f"{prefix}{idx:02d}_Navaid_Frequency"] = format_radial_dist(vor, float(point["lat"]), float(point["lon"]))
@@ -1825,8 +1836,8 @@ def fill_total_payload(data: Dict[str, Any], idx: int, total_dist: float, total_
     data[f"{prefix}{idx:02d}_Cumulative_Distance"] = f"{total_dist:.1f}"
     data[f"{prefix}{idx:02d}_Leg_ETE"] = pdf_time(total_sec)
     data[f"{prefix}{idx:02d}_Cumulative_ETE"] = pdf_time(total_sec)
-    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_unit(total_burn)
-    data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_unit(final_efob)
+    data[f"{prefix}{idx:02d}_Planned_Burnoff"] = fmt_fuel_l_usg(total_burn)
+    data[f"{prefix}{idx:02d}_Estimated_FOB"] = fmt_fuel_l_usg(final_efob)
 
 
 def build_pdf_payload(
@@ -1865,7 +1876,7 @@ def build_pdf_payload(
         "FLIGHT_LEVEL_ALTITUDE": header.get("fl_alt", ""),
         "TEMP_ISA_DEV": header.get("temp_isa", ""),
         "FLT TIME": pdf_time(total_sec),
-        "CLIMB FUEL": fmt_unit(climb_burn),
+        "CLIMB FUEL": fmt_fuel_l_usg(climb_burn),
         "OBSERVATIONS": f"Climb {pdf_time(climb_sec)} / Cruise {pdf_time(level_sec)} / Descent {pdf_time(desc_sec)}",
         "Leg_Number": str(len(legs)),
         "AIRCRAFT_MODEL": str(st.session_state.aircraft_type),
@@ -1913,9 +1924,9 @@ def legs_to_dataframe(legs: List[Dict[str, Any]]) -> pd.DataFrame:
             "ETE": pdf_time(leg["time_sec"]),
             "Hold ETE": f"+{pdf_time(leg_hold_sec(leg))}" if leg_hold_sec(leg) else "",
             "CumETE": pdf_time(acc_t),
-            "Fuel": fmt_unit(leg["burn"]),
-            "Hold Fuel": f"+{fmt_unit(leg_hold_burn(leg))}" if leg_hold_sec(leg) else "",
-            "EFOB": fmt_unit(leg["efob_end"]),
+            "Fuel": fmt_fuel_l_usg(leg["burn"]),
+            "Hold Fuel": f"+{fmt_fuel_l_usg(leg_hold_burn(leg))}" if leg_hold_sec(leg) else "",
+            "EFOB": fmt_fuel_l_usg(leg["efob_end"]),
             "Wind": f"{int(leg['wind_from']):03d}/{int(leg['wind_kt'])}",
             "VOR": format_vor_id(vor),
             "Radial/Dist": format_radial_dist(vor, float(point["lat"]), float(point["lon"])),
@@ -2094,8 +2105,8 @@ if st.session_state.legs:
     html_pills([
         (f"ETE {pdf_time(sm['time'])}", "pill-good"),
         (f"Dist {sm['dist']:.1f} NM", "pill-good"),
-        (f"Fuel {fmt_unit(sm['burn'])} L", "pill-good"),
-        (f"EFOB final {fmt_unit(sm['efob'])} L", "pill-good" if sm["efob"] >= 30 else "pill-warn"),
+        (f"Fuel {fmt_fuel_l_usg(sm['burn'])}", "pill-good"),
+        (f"EFOB final {fmt_fuel_l_usg(sm['efob'])}", "pill-good" if sm["efob"] >= 30 else "pill-warn"),
         (f"{sm['legs']} legs", ""),
     ])
 else:
