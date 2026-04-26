@@ -442,6 +442,8 @@ def load_all_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
                 ifr[col] = "IFR" if col == "src" else ""
         if "alt" not in ifr.columns:
             ifr["alt"] = 0.0
+        # Normaliza todos os pontos carregados deste CSV como IFR.
+        ifr["src"] = "IFR"
         ifr["code"] = ifr["code"].astype(str).str.upper().str.strip()
         ifr["name"] = ifr["name"].fillna(ifr["code"]).astype(str)
         ifr["lat"] = pd.to_numeric(ifr["lat"], errors="coerce")
