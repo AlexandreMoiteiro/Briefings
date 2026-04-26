@@ -233,11 +233,6 @@ def fmt_efob_pdf(liters: float) -> str:
     return f"{fmt_unit(liters)}({int(round(liters_to_usg(liters)))})"
 
 
-def fmt_fuel_l_usg(liters: float, decimals_usg: int = 1) -> str:
-    # Compatibilidade retroativa para sessões antigas/callbacks que ainda referem este nome.
-    return fmt_efob_numbers(liters, decimals_usg)
-
-
 def mmss(sec: float) -> str:
     mins = int(round(float(sec) / 60.0))
     if mins < 60:
@@ -1886,7 +1881,7 @@ def build_pdf_payload(
         "FLIGHT_LEVEL_ALTITUDE": header.get("fl_alt", ""),
         "TEMP_ISA_DEV": header.get("temp_isa", ""),
         "FLT TIME": pdf_time(total_sec),
-        "CLIMB FUEL": fmt_unit(climb_burn),
+        "CLIMB FUEL": fmt_fuel_l_usg(climb_burn),
         "OBSERVATIONS": f"Climb {pdf_time(climb_sec)} / Cruise {pdf_time(level_sec)} / Descent {pdf_time(desc_sec)}",
         "Leg_Number": str(len(legs)),
         "AIRCRAFT_MODEL": str(st.session_state.aircraft_type),
