@@ -60,7 +60,7 @@
         {
           "type": "static_point",
           "point": "NSA",
-          "alt": 2000,
+          "alt": 4500,
           "note": "NSA VIA R212"
         }
       ]
