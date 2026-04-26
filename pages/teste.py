@@ -1277,12 +1277,15 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return []
     profile = current_profile()
     output: List[Dict[str, Any]] = []
+
     for i in range(len(user_wps) - 1):
         A = user_wps[i]
         B = user_wps[i + 1]
         output.append(A.copy())
+
         if A.get("no_auto_vnav") or B.get("no_auto_vnav") or is_dme_arc_leg(A, B) or is_rate_turn_leg(A, B):
             continue
+
         dist = gc_dist_nm(A["lat"], A["lon"], B["lat"], B["lon"])
         tc = gc_course_tc(A["lat"], A["lon"], B["lat"], B["lon"])
         wf, wk = wind_for_point(A)
@@ -1299,9 +1302,7 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 d_to = rd(dist - d_need)
                 p = Point(code="TOC", name="TOC", lat=lat, lon=lon, alt=B["alt"], src="CALC", uid=next_uid()).to_dict()
                 p.update({
-                    "navlog_note": f"TOC
-{d_from:.1f} from {from_label}
-{d_to:.1f} to {to_label}",
+                    "navlog_note": chr(10).join(["TOC", f"{d_from:.1f} from {from_label}", f"{d_to:.1f} to {to_label}"]),
                     "calc_detail": f"{d_from:.1f} NM from {from_label} / {d_to:.1f} NM to {to_label}",
                     "calc_from_code": from_label,
                     "calc_to_code": to_label,
@@ -1309,6 +1310,7 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "calc_dist_to_next": d_to,
                 })
                 output.append(p)
+
         elif B["alt"] < A["alt"]:
             t_min = (A["alt"] - B["alt"]) / max(float(st.session_state.rod_fpm), 1.0)
             _, _, gs = wind_triangle(tc, profile["descent_tas"], wf, wk)
@@ -1319,9 +1321,7 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 lat, lon = point_along_gc(A["lat"], A["lon"], B["lat"], B["lon"], d_from)
                 p = Point(code="TOD", name="TOD", lat=lat, lon=lon, alt=A["alt"], src="CALC", uid=next_uid()).to_dict()
                 p.update({
-                    "navlog_note": f"TOD
-{d_from:.1f} from {from_label}
-{d_to:.1f} to {to_label}",
+                    "navlog_note": chr(10).join(["TOD", f"{d_from:.1f} from {from_label}", f"{d_to:.1f} to {to_label}"]),
                     "calc_detail": f"{d_from:.1f} NM from {from_label} / {d_to:.1f} NM to {to_label}",
                     "calc_from_code": from_label,
                     "calc_to_code": to_label,
@@ -1329,6 +1329,7 @@ def build_route_nodes(user_wps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "calc_dist_to_next": d_to,
                 })
                 output.append(p)
+
     output.append(user_wps[-1].copy())
     return output
 
@@ -1732,8 +1733,7 @@ def leg_total_burn(leg: Dict[str, Any]) -> float:
 
 
 def fmt_with_plus(base: str, plus: str, has_plus: bool) -> str:
-    return f"{base}
-+{plus}" if has_plus else base
+    return base + chr(10) + "+" + plus if has_plus else base
 
 
 def fill_leg_payload(data: Dict[str, Any], idx: int, leg: Dict[str, Any], acc_d: float, acc_t: int, prefix: str = "Leg") -> None:
@@ -1923,11 +1923,13 @@ def map_start_center() -> Tuple[float, float]:
 
 
 def make_base_map() -> folium.Map:
-    m = folium.Map(location=map_start_center(), zoom_start=9, tiles=None, control_scale=True, prefer_canvas=True)
+    # Arranca centrado em LPSO, com zoom suficiente para ver a zona de Ponte de Sor
+    # e grande parte de Portugal continental sem ficar demasiado afastado.
+    m = folium.Map(location=map_start_center(), zoom_start=8, tiles=None, control_scale=True, prefer_canvas=True)
     folium.TileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", name="OSM", attr="© OpenStreetMap").add_to(m)
     folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", name="OpenTopoMap", attr="© OpenTopoMap").add_to(m)
     folium.TileLayer("https://services.arcgisonline.com/ArcGIS/rest/services/World_Hillshade/MapServer/tile/{z}/{y}/{x}", name="Hillshade", attr="© Esri").add_to(m)
-    m.fit_bounds(PT_BOUNDS)
+    # Não usar fit_bounds aqui; isso anulava o zoom inicial e abria o mapa demasiado afastado.
     token = get_openaip_token()
     if bool(st.session_state.get("show_openaip", True)) and token:
         folium.TileLayer(
