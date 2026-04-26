@@ -1881,7 +1881,7 @@ def build_pdf_payload(
         "FLIGHT_LEVEL_ALTITUDE": header.get("fl_alt", ""),
         "TEMP_ISA_DEV": header.get("temp_isa", ""),
         "FLT TIME": pdf_time(total_sec),
-        "CLIMB FUEL": fmt_unit(climb_burn),
+        "CLIMB FUEL": fmt_fuel_l_usg(climb_burn),
         "OBSERVATIONS": f"Climb {pdf_time(climb_sec)} / Cruise {pdf_time(level_sec)} / Descent {pdf_time(desc_sec)}",
         "Leg_Number": str(len(legs)),
         "AIRCRAFT_MODEL": str(st.session_state.aircraft_type),
