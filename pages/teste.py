@@ -27,6 +27,7 @@ import io
 import json
 import math
 import os
+import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -1615,6 +1616,7 @@ def draw_pdf_field_text(canvas_obj: Any, name: str, rect: List[float], value: An
     y = y1 + (height - total_h) / 2 + (len(lines) - 1) * line_h + size * 0.20
     left_align = any(x in name for x in ["Waypoint", "OBSERVATIONS", "CLEARANCES", "Departure", "Arrival"])
 
+    rng = random.Random()
     for line in lines:
         is_plus = line.strip().startswith("+")
         is_tod = "TOD" in line.strip().upper()
@@ -1624,13 +1626,86 @@ def draw_pdf_field_text(canvas_obj: Any, name: str, rect: List[float], value: An
             canvas_obj.setFillColorRGB(0.80, 0.08, 0.08)
         else:
             canvas_obj.setFillColorRGB(0, 0, 0)
-        canvas_obj.setFont("Helvetica-Bold", size)
         if left_align:
-            canvas_obj.drawString(x1 + 1.2, y, line)
+            draw_randomized_handwritten_text(canvas_obj, x1 + 1.2, y, line, size, rng)
         else:
-            canvas_obj.drawCentredString((x1 + x2) / 2, y, line)
+            draw_randomized_handwritten_text(canvas_obj, (x1 + x2) / 2, y, line, size, rng, center_x=(x1 + x2) / 2)
         y -= line_h
-    canvas_obj.setFillColorRGB(0, 0, 0)
+        canvas_obj.setFillColorRGB(0, 0, 0)
+
+
+NAVLOG_FONT_ARM_NAME = "NavlogArm"
+NAVLOG_FONT_ARM_PATH = ROOT / "fontsfornavlog" / "Arm-Regular.ttf"
+NAVLOG_NUMBER_FONT_NAMES = [f"NavlogNumbers{i}" for i in range(5)]
+NAVLOG_NUMBER_FONT_PATHS = [ROOT / "fontsfornavlog" / f"Numbers{i}-Regular.ttf" for i in range(5)]
+NAVLOG_FONTS_REGISTERED = False
+
+
+def register_navlog_fonts() -> None:
+    global NAVLOG_FONTS_REGISTERED
+    if NAVLOG_FONTS_REGISTERED:
+        return
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+    except Exception:
+        return
+
+    try:
+        if NAVLOG_FONT_ARM_PATH.exists():
+            pdfmetrics.registerFont(TTFont(NAVLOG_FONT_ARM_NAME, str(NAVLOG_FONT_ARM_PATH)))
+        for font_name, font_path in zip(NAVLOG_NUMBER_FONT_NAMES, NAVLOG_NUMBER_FONT_PATHS):
+            if font_path.exists():
+                pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+        NAVLOG_FONTS_REGISTERED = True
+    except Exception:
+        NAVLOG_FONTS_REGISTERED = False
+
+
+def navlog_font_for_char(char: str, rng: random.Random) -> str:
+    if char.isdigit():
+        available = [NAVLOG_FONT_ARM_NAME] + NAVLOG_NUMBER_FONT_NAMES
+        return rng.choice(available)
+    if char.isalpha():
+        return NAVLOG_FONT_ARM_NAME
+    if char in {" ", "-", "/", "(", ")", "+", ".", ":", ","}:
+        return NAVLOG_FONT_ARM_NAME
+    return "Helvetica-Bold"
+
+
+def draw_randomized_handwritten_text(
+    canvas_obj: Any,
+    x_left: float,
+    y: float,
+    text: str,
+    size: float,
+    rng: random.Random,
+    center_x: Optional[float] = None,
+) -> None:
+    if not text:
+        return
+    register_navlog_fonts()
+    runs: List[Tuple[str, str]] = []
+    for char in text:
+        chosen_font = navlog_font_for_char(char, rng)
+        try:
+            canvas_obj.stringWidth(char, chosen_font, size)
+        except Exception:
+            chosen_font = "Helvetica-Bold"
+        if runs and runs[-1][0] == chosen_font:
+            runs[-1] = (runs[-1][0], runs[-1][1] + char)
+        else:
+            runs.append((chosen_font, char))
+
+    total_width = 0.0
+    for font_name, fragment in runs:
+        total_width += canvas_obj.stringWidth(fragment, font_name, size)
+    x = x_left if center_x is None else center_x - (total_width / 2)
+
+    for font_name, fragment in runs:
+        canvas_obj.setFont(font_name, size)
+        canvas_obj.drawString(x, y, fragment)
+        x += canvas_obj.stringWidth(fragment, font_name, size)
 
 
 def stamp_non_field_navlog_headers(pdf: Any, data: Dict[str, Any], template: Path) -> None:
@@ -1646,6 +1721,7 @@ def stamp_non_field_navlog_headers(pdf: Any, data: Dict[str, Any], template: Pat
     }
     if not any(values.values()):
         return
+    rng = random.Random()
     for page_index, page in enumerate(pdf.pages):
         page_width, page_height = pdf_page_size(page)
         is_cont = page_index > 0 or "_1" in template.stem
@@ -1654,11 +1730,10 @@ def stamp_non_field_navlog_headers(pdf: Any, data: Dict[str, Any], template: Pat
         y = 504 if is_cont else 367
         packet = io.BytesIO()
         c = canvas.Canvas(packet, pagesize=(page_width, page_height))
-        c.setFont("Helvetica-Bold", 5.2)
-        c.drawCentredString(ox + cw * 0.345, y, values["fl_alt"])
-        c.drawCentredString(ox + cw * 0.572, y, values["wind"])
-        c.drawCentredString(ox + cw * 0.766, y, values["mag_var"])
-        c.drawCentredString(ox + cw * 0.925, y, values["temp_isa"])
+        draw_randomized_handwritten_text(c, ox + cw * 0.345, y, values["fl_alt"], 5.2, rng, center_x=ox + cw * 0.345)
+        draw_randomized_handwritten_text(c, ox + cw * 0.572, y, values["wind"], 5.2, rng, center_x=ox + cw * 0.572)
+        draw_randomized_handwritten_text(c, ox + cw * 0.766, y, values["mag_var"], 5.2, rng, center_x=ox + cw * 0.766)
+        draw_randomized_handwritten_text(c, ox + cw * 0.925, y, values["temp_isa"], 5.2, rng, center_x=ox + cw * 0.925)
         c.save()
         packet.seek(0)
         from pdfrw import PageMerge, PdfReader as _PdfReader
@@ -1671,6 +1746,7 @@ def stamp_pdf_form_values(pdf: Any, data: Dict[str, Any]) -> None:
         from pdfrw import PageMerge, PdfReader as _PdfReader
     except Exception:
         return
+    register_navlog_fonts()
     for page in pdf.pages:
         if not getattr(page, "Annots", None):
             continue
